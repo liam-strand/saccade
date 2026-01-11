@@ -1,3 +1,6 @@
+use saccade::event_library::EventLibrary;
+
 fn main() {
-    println!("Hello, world!");
+    let lib = EventLibrary::from_bytes(include_bytes!("../perf.out")).unwrap();
+    println!("{:#?}", lib.events);
 }
