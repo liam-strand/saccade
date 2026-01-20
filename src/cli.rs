@@ -22,6 +22,10 @@ pub enum Commands {
         #[arg(short, long)]
         library: Option<PathBuf>,
 
+        /// Default Scheduler Quantum (in nanoseconds)
+        #[arg(short, long, default_value_t = 1000000)]
+        quantum: u64,
+
         /// Target program and arguments
         #[arg(last = true, required = true)]
         target: Vec<String>,
