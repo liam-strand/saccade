@@ -2,7 +2,6 @@ use crate::event_library::{Event, EventLibrary};
 use perf_event::{Builder, Counter, events};
 use std::collections::HashMap;
 
-/// ID representing an event in the EventRegistry
 pub type EventId = usize;
 
 pub struct EventRegistry {
@@ -44,5 +43,9 @@ impl EventRegistry {
 
     pub fn lookup(&self, name: &str) -> Option<EventId> {
         self.event_names.get(name).cloned()
+    }
+
+    pub fn get_event(&self, id: EventId) -> &Event {
+        &self.counters[id].0
     }
 }
