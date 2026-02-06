@@ -8,8 +8,13 @@ clap = { version = "4.5.54", features = ["derive"] }
 libbpf-rs = "0.25.0"
 nom = "8.0.0"
 perf-event2 = "0.7.4"
+rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 strum = { version = "0.27.2", features = ["strum_macros"] }
 strum_macros = "0.27.2"
 syscalls = { version = "0.7.0", features = ["x86", "x86_64"] }
+
+[build-dependencies]
+libbpf-cargo = "0.26.0"
+vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git", rev = "db131a55c624fbe1da97de90ac08e9cec9e8ed49" }
