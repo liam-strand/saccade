@@ -42,12 +42,12 @@ fn main() -> std::io::Result<()> {
             };
             println!("Loaded {} events.", lib.events.len());
             println!("Target program args: {:?}", target);
-            let registry = EventRegistry::new(lib);
-            let scheduler = RoundRobinScheduler::default();
-            let mut oculomotor = Oculomotor::new(registry, scheduler);
 
             let (tx, rx) = channel();
             let thread = thread::spawn(move || {
+                let registry = EventRegistry::new(lib);
+                let scheduler = RoundRobinScheduler::default();
+                let mut oculomotor = Oculomotor::new(0, registry, Box::new(scheduler)).unwrap();
                 let mut done = false;
                 let mut quantum = Duration::from_nanos(quantum);
                 let mut loops = 0;

@@ -2,7 +2,7 @@ use crate::event_library::{Event, EventLibrary};
 use perf_event::{Builder, Counter, events};
 use std::collections::HashMap;
 
-pub type EventId = usize;
+pub type EventId = u32;
 
 pub struct EventRegistry {
     counters: Vec<(Event, Counter)>,
@@ -34,18 +34,18 @@ impl EventRegistry {
     }
 
     pub fn enable(&mut self, event_id: EventId) {
-        self.counters[event_id].1.enable().unwrap();
+        self.counters[event_id as usize].1.enable().unwrap();
     }
 
     pub fn disable(&mut self, event_id: EventId) {
-        self.counters[event_id].1.disable().unwrap();
+        self.counters[event_id as usize].1.disable().unwrap();
     }
 
     pub fn lookup(&self, name: &str) -> Option<EventId> {
-        self.event_names.get(name).cloned()
+        self.event_names.get(name).map(|&e| e as u32)
     }
 
     pub fn get_event(&self, id: EventId) -> &Event {
-        &self.counters[id].0
+        &self.counters[id as usize].0
     }
 }
