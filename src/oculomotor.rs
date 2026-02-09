@@ -1,21 +1,20 @@
-use crate::event_registry::EventId;
+use crate::event_registry::{EventId, EventRegistry};
 use crate::sampler::{self, SamplerSkelBuilder};
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
-use libbpf_rs::{OpenObject, RingBufferBuilder};
+use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 const MAX_COUNTERS: usize = 4;
 
 pub struct Oculomotor {
     skel: sampler::SamplerSkel<'static>,
-    open_object: MaybeUninit<OpenObject>,
     ringbuf: libbpf_rs::RingBuffer<'static>,
-    _scheduler: Box<dyn Scheduler>,
+    scheduler: Box<dyn Scheduler>,
     active_set: Vec<EventId>,
+    registry: EventRegistry,
     cpus: Vec<usize>,
     // We store counters to keep them alive.
     counters: Vec<Vec<perf_event::Counter>>,
@@ -24,13 +23,15 @@ pub struct Oculomotor {
 impl Oculomotor {
     pub fn new(
         target_pid: u32,
+        registry: EventRegistry,
         scheduler: Box<dyn Scheduler>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut skel_builder = SamplerSkelBuilder::default();
-        skel_builder.obj_builder.debug(true);
-        
-        let mut open_object = MaybeUninit::uninit();
-        let mut open_skel = skel_builder.open(&mut open_object)?;
+        // skel_builder.obj_builder.debug(true);
+
+        let open_object = Box::new(MaybeUninit::uninit());
+        let open_object_ref = Box::leak(open_object);
+        let mut open_skel = skel_builder.open(open_object_ref)?;
 
         // Initialize global config before loading.
         // target_pid (0) maps to .bss.
@@ -47,11 +48,10 @@ impl Oculomotor {
         skel.attach()?;
 
         let mut ringbuf_builder = RingBufferBuilder::new();
-        ringbuf_builder
-            .add(&skel.maps.ringbuf, |data| {
-                // TODO: Handle sample data properly (decode Sample struct)
-                0
-            })?;
+        ringbuf_builder.add(&skel.maps.ringbuf, |_data| {
+            print!(".");
+            0
+        })?;
 
         let ringbuf = ringbuf_builder.build()?;
 
@@ -60,11 +60,11 @@ impl Oculomotor {
 
         Ok(Self {
             skel,
-            open_object,
             ringbuf,
-            _scheduler: scheduler,
+            scheduler,
             active_set: Vec::new(),
             cpus,
+            registry,
             counters: Vec::new(),
         })
     }
@@ -82,7 +82,7 @@ impl Oculomotor {
     }
 
     pub fn poll(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.ringbuf.poll(Duration::from_millis(10))?;
+        self.ringbuf.poll(Duration::from_millis(1))?;
         Ok(())
     }
 
@@ -94,27 +94,36 @@ impl Oculomotor {
         self.counters.clear();
 
         // 2. Setup: Open new counters
-        for (slot_idx, &event_id) in decision.active_events.iter().take(MAX_COUNTERS).enumerate() {
-            let mut cpu_counters = Vec::new();
+        for (_slot_idx, &_event_id) in decision.active_events.iter().take(MAX_COUNTERS).enumerate()
+        {
+            let cpu_counters = Vec::new();
 
             // Placeholder: Assuming INSTRUCTIONS for testing.
             // Ideally should use Registry to get config.
 
-            for cpu in &self.cpus {
-                let mut builder = perf_event::Builder::new();
-                builder.kind(perf_event::events::Hardware::INSTRUCTIONS);
-                builder.observe_cpu(*cpu);
+            for _cpu in &self.cpus {
+                // let mut builder = perf_event::Builder::new();
+                // builder.kind(perf_event::events::Hardware::INSTRUCTIONS);
+                // builder.observe_cpu(*cpu);
 
-                let counter = builder.build()?;
-                counter.enable()?;
+                // let mut counter = builder.build()?;
+                // counter.enable()?;
 
                 // TODO: Update BPF map with counter.as_raw_fd()
                 // For now, we just open them.
 
-                cpu_counters.push(counter);
+                // cpu_counters.push(counter);
             }
             self.counters.push(cpu_counters);
         }
         Ok(())
+    }
+
+    pub fn step(&mut self) -> Option<Duration> {
+        self.poll().unwrap();
+        eprintln!("");
+        let decision = self.scheduler.next_step();
+        self.update_counters(&decision).unwrap();
+        decision.duration
     }
 }
