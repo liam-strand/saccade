@@ -16,15 +16,15 @@ pub use self::imp::*;
 mod imp {
     #[allow(unused_imports, clippy::wildcard_imports)]
     use super::*;
-    use libbpf_rs::AsRawLibbpf as _;
-    use libbpf_rs::MapCore as _;
-    use libbpf_rs::ObjectBuilder;
     use libbpf_rs::libbpf_sys;
     use libbpf_rs::skel::OpenSkel;
     use libbpf_rs::skel::Skel;
     use libbpf_rs::skel::SkelBuilder;
-    fn build_skel_config()
-    -> libbpf_rs::Result<libbpf_rs::__internal_skel::ObjectSkeletonConfig<'static>> {
+    use libbpf_rs::AsRawLibbpf as _;
+    use libbpf_rs::MapCore as _;
+    use libbpf_rs::ObjectBuilder;
+    fn build_skel_config(
+    ) -> libbpf_rs::Result<libbpf_rs::__internal_skel::ObjectSkeletonConfig<'static>> {
         let mut builder = libbpf_rs::__internal_skel::ObjectSkeletonConfigBuilder::new(&DATA);
         builder
             .name("sampler_bpf")

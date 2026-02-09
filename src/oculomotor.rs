@@ -1,19 +1,18 @@
 use crate::event_registry::EventId;
+use crate::sampler::{self, SamplerSkelBuilder};
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
-use libbpf_rs::RingBufferBuilder;
+use libbpf_rs::{OpenObject, RingBufferBuilder};
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::time::Duration;
-
-#[path = "bpf/sampler.skel.rs"]
-mod sampler_skel;
-use sampler_skel::SamplerSkelBuilder;
 
 const MAX_COUNTERS: usize = 4;
 
 pub struct Oculomotor {
-    skel: sampler_skel::SamplerSkel<'static>,
+    skel: sampler::SamplerSkel<'static>,
+    open_object: MaybeUninit<OpenObject>,
     ringbuf: libbpf_rs::RingBuffer<'static>,
     _scheduler: Box<dyn Scheduler>,
     active_set: Vec<EventId>,
@@ -29,8 +28,9 @@ impl Oculomotor {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut skel_builder = SamplerSkelBuilder::default();
         skel_builder.obj_builder.debug(true);
-
-        let mut open_skel = skel_builder.open()?;
+        
+        let mut open_object = MaybeUninit::uninit();
+        let mut open_skel = skel_builder.open(&mut open_object)?;
 
         // Initialize global config before loading.
         // target_pid (0) maps to .bss.
@@ -46,19 +46,21 @@ impl Oculomotor {
         let mut skel = open_skel.load()?;
         skel.attach()?;
 
-        let ringbuf_builder = RingBufferBuilder::new();
-        let ringbuf = ringbuf_builder
-            .add(skel.maps().ringbuf(), |data| {
+        let mut ringbuf_builder = RingBufferBuilder::new();
+        ringbuf_builder
+            .add(&skel.maps.ringbuf, |data| {
                 // TODO: Handle sample data properly (decode Sample struct)
                 0
-            })?
-            .build()?;
+            })?;
+
+        let ringbuf = ringbuf_builder.build()?;
 
         let num_cpus = std::thread::available_parallelism()?.get();
         let cpus = (0..num_cpus).collect();
 
         Ok(Self {
             skel,
+            open_object,
             ringbuf,
             _scheduler: scheduler,
             active_set: Vec::new(),
@@ -68,13 +70,13 @@ impl Oculomotor {
     }
 
     pub fn set_target_pid(&mut self, pid: u32) {
-        if let Some(bss) = self.skel.maps_mut().bss_data.as_mut() {
+        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
             bss.target_pid = pid;
         }
     }
 
     pub fn set_sample_rate(&mut self, interval_ns: u64) {
-        if let Some(data) = self.skel.maps_mut().data_data.as_mut() {
+        if let Some(data) = self.skel.maps.data_data.as_mut() {
             data.min_sample_interval_ns = interval_ns;
         }
     }
