@@ -4,6 +4,7 @@
 //! This is necessary for fine-grained control over process execution, specifically
 //! for `ptrace` operations that are not fully exposed by the standard library.
 
+use std::io;
 use syscalls::{Sysno, syscall4};
 
 /// Invokes the `ptrace` syscall with `PTRACE_TRACEME`.
@@ -18,7 +19,7 @@ use syscalls::{Sysno, syscall4};
 /// # Returns
 ///
 /// Returns `Ok(())` on success, or an error if the syscall fails.
-pub fn ptrace_traceme() -> Result<(), syscalls::Errno> {
+pub fn ptrace_traceme() -> io::Result<()> {
     const PTRACE_TRACEME: usize = 0;
     unsafe {
         syscall4(
@@ -27,7 +28,8 @@ pub fn ptrace_traceme() -> Result<(), syscalls::Errno> {
             0, // pid: ignored
             0, // addr: ignored
             0, // data: ignored
-        )?;
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
     }
     Ok(())
 }
@@ -44,7 +46,7 @@ pub fn ptrace_traceme() -> Result<(), syscalls::Errno> {
 /// # Returns
 ///
 /// Returns `Ok(status)` containing the wait status, or an error if the syscall fails.
-pub fn wait_for_exec(pid: u32) -> Result<i32, syscalls::Errno> {
+pub fn wait_for_exec(pid: u32) -> io::Result<i32> {
     let mut status: i32 = 0;
     unsafe {
         syscall4(
@@ -52,8 +54,9 @@ pub fn wait_for_exec(pid: u32) -> Result<i32, syscalls::Errno> {
             pid as usize,
             &mut status as *mut i32 as usize,
             0, // No options
-            0  // NULL rusage
-        )?;
+            0, // NULL rusage
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
     }
     Ok(status)
 }
@@ -70,7 +73,7 @@ pub fn wait_for_exec(pid: u32) -> Result<i32, syscalls::Errno> {
 /// # Returns
 ///
 /// Returns `Ok(())` on success, or an error if the syscall fails.
-pub fn ptrace_detach(pid: u32) -> Result<(), syscalls::Errno> {
+pub fn ptrace_detach(pid: u32) -> io::Result<()> {
     const PTRACE_DETACH: usize = 17;
     unsafe {
         syscall4(
@@ -79,7 +82,8 @@ pub fn ptrace_detach(pid: u32) -> Result<(), syscalls::Errno> {
             pid as usize,
             0, // addr: ignored
             0, // data: signum (0 means no signal)
-        )?;
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
     }
     Ok(())
 }

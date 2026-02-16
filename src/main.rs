@@ -53,10 +53,7 @@ fn main() -> std::io::Result<()> {
             let mut child = unsafe {
                 Command::new(target[0].clone())
                     .args(&target[1..])
-                    .pre_exec(|| {
-                        syscalls::ptrace_traceme().unwrap();
-                        Ok(())
-                    })
+                    .pre_exec(|| syscalls::ptrace_traceme())
                     .spawn()
                     .expect("Failed to spawn child process")
             };
@@ -65,7 +62,7 @@ fn main() -> std::io::Result<()> {
             let pid = child.id();
 
             // Wait for child to stop at exec
-            syscalls::wait_for_exec(pid).unwrap();
+            syscalls::wait_for_exec(pid)?;
 
             let pid = child.id();
             let thread = thread::spawn(move || {
@@ -107,7 +104,7 @@ fn main() -> std::io::Result<()> {
             eprintln!("Oculomotor is ready.");
 
             // Resume the child process: PTRACE_DETACH
-            syscalls::ptrace_detach(pid).unwrap();
+            syscalls::ptrace_detach(pid)?;
 
             eprintln!("Child process resumed.");
 
