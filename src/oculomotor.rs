@@ -37,15 +37,11 @@ pub struct Oculomotor {
     scheduler: Box<dyn Scheduler>,
     active_set: Vec<EventId>,
     registry: EventRegistry,
-    #[allow(dead_code)]
-    cpus: Vec<usize>,
-    #[allow(dead_code)]
-    output_file: Arc<Mutex<File>>,
+    _cpus: Vec<usize>,
+    _output_file: Arc<Mutex<File>>,
     hw_counters: HardwareCounters,
-    #[allow(dead_code)]
-    timer_links: Vec<libbpf_rs::Link>,
-    #[allow(dead_code)]
-    timer_events: Vec<perf_event::Counter>,
+    _timer_links: Vec<libbpf_rs::Link>,
+    _timer_events: Vec<perf_event::Counter>,
 }
 
 impl Oculomotor {
@@ -150,11 +146,11 @@ impl Oculomotor {
             ringbuf,
             scheduler,
             active_set: Vec::new(),
-            cpus,
+            _cpus: cpus,
             registry,
-            output_file,
-            timer_links,
-            timer_events,
+            _output_file: output_file,
+            _timer_links: timer_links,
+            _timer_events: timer_events,
             hw_counters,
         })
     }
