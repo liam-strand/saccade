@@ -1,3 +1,4 @@
 /target
 .cache
 saccade.csv
+src/bpf/sampler.skel.rs

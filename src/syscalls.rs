@@ -87,3 +87,67 @@ pub fn ptrace_detach(pid: u32) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// A minimal wrapper around cpu_set_t for sched_setaffinity.
+/// Linux kernel expects a bitmask.
+/// We implement a fixed size set (1024 bits = 128 bytes) which is standard.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CpuSet {
+    bits: [u64; 16], // 16 * 64 = 1024 bits
+}
+
+impl CpuSet {
+    pub fn new() -> Self {
+        Self { bits: [0; 16] }
+    }
+
+    pub fn set(&mut self, cpu: usize) {
+        if cpu < 1024 {
+            self.bits[cpu / 64] |= 1 << (cpu % 64);
+        }
+    }
+}
+
+/// Invokes the `sched_setaffinity` syscall to pin the current process/thread to specific CPUs.
+///
+/// # Arguments
+///
+/// * `pid` - The process ID to set affinity for. 0 means current thread.
+/// * `mask` - The CPU set bitmask.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success, or an error if the syscall fails.
+pub fn sched_setaffinity(pid: i32, mask: &CpuSet) -> io::Result<()> {
+    unsafe {
+        syscalls::syscall3(
+            Sysno::sched_setaffinity,
+            pid as usize,
+            std::mem::size_of::<CpuSet>(),
+            mask as *const CpuSet as usize,
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
+    }
+    Ok(())
+}
+
+/// Helper to get the current CPU index using the getcpu syscall.
+pub fn get_cpu() -> io::Result<usize> {
+    let mut cpu: u32 = 0;
+    // syscall3(Sysno::getcpu, &mut cpu, NULL, NULL)
+    unsafe {
+        syscalls::syscall3(Sysno::getcpu, &mut cpu as *mut u32 as usize, 0, 0)
+            .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
+    }
+    Ok(cpu as usize)
+}
+
+/// Invokes the `sched_yield` syscall.
+pub fn sched_yield() -> io::Result<()> {
+    unsafe {
+        syscalls::syscall0(Sysno::sched_yield)
+            .map_err(|e| io::Error::from_raw_os_error(e.into_raw()))?;
+    }
+    Ok(())
+}
