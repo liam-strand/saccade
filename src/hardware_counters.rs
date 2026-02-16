@@ -64,14 +64,14 @@ impl HardwareCounters {
             full_mask.set(i);
         }
 
-        for cpu in 0..self.num_cpus {
+        for (cpu, counter) in new_counters.iter().enumerate() {
             let mut mask = CpuSet::new();
             mask.set(cpu);
             syscalls::sched_setaffinity(0, &mask)?;
             let _ = syscalls::sched_yield();
 
             // Key is the index: (cpu * MAX_COUNTERS) + slot_idx
-            let fd = new_counters[cpu].as_raw_fd() as u32;
+            let fd = counter.as_raw_fd() as u32;
             let map_idx = (cpu * MAX_COUNTERS + slot_idx) as u32;
             let key = map_idx.to_ne_bytes();
             let val = fd.to_ne_bytes();
@@ -83,10 +83,10 @@ impl HardwareCounters {
                         "[ERROR] Failed to update map slot {} for CPU {}: {}",
                         slot_idx, cpu, e
                     );
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Map update failed: {}", e),
-                    )));
+                    return Err(Box::new(std::io::Error::other(format!(
+                        "Map update failed: {}",
+                        e
+                    ))));
                 }
             }
         }

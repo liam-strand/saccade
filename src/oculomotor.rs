@@ -37,7 +37,9 @@ pub struct Oculomotor {
     scheduler: Box<dyn Scheduler>,
     active_set: Vec<EventId>,
     registry: EventRegistry,
+    #[allow(dead_code)]
     cpus: Vec<usize>,
+    #[allow(dead_code)]
     output_file: Arc<Mutex<File>>,
     hw_counters: HardwareCounters,
     #[allow(dead_code)]
@@ -191,13 +193,13 @@ impl Oculomotor {
         }
 
         // Now iterate and update slots
-        for i in 0..MAX_COUNTERS {
+        for (i, event) in desired_events.iter().enumerate() {
             let old_id = self.active_set.get(i).copied();
             let new_id = new_set.get(i).copied();
 
             if old_id != new_id {
                 self.hw_counters
-                    .update_slot(i, desired_events[i], &self.skel.maps.counters)?;
+                    .update_slot(i, *event, &self.skel.maps.counters)?;
             }
         }
 
