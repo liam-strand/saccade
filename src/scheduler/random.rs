@@ -2,6 +2,7 @@ use rand::prelude::*;
 
 use crate::event_registry::EventId;
 use crate::scheduler::{ScheduleDecision, Scheduler};
+use std::time::Duration;
 
 pub struct RandomScheduler {
     events: Vec<EventId>,
@@ -34,7 +35,7 @@ impl Scheduler for RandomScheduler {
                 .choose_multiple(&mut self.rng, 4)
                 .cloned()
                 .collect(),
-            duration: None,
+            duration: Some(Duration::from_millis(10)),
         }
     }
 }
