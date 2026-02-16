@@ -20,6 +20,7 @@ struct {
 // Perf Event Array for reading hardware counters
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, TOTAL_COUNTERS);
     __type(key, u32);
     __type(value, u32);
 } counters SEC(".maps");
@@ -51,7 +52,7 @@ static __always_inline void record_sample(__u32 pid, __u32 tgid, __u64 now, __u6
     // Reserve space in ring buffer
     s = bpf_ringbuf_reserve(&ringbuf, sizeof(*s), 0);
     if (!s)
-        return;
+        {return;}
 
     s->timestamp_ns = now;
     s->duration_ns = delta;
@@ -64,15 +65,14 @@ static __always_inline void record_sample(__u32 pid, __u32 tgid, __u64 now, __u6
     // Iterate 0..MAX_COUNTERS-1. Loop is compatible with verifier limits.
     #pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
-         // bpf_perf_event_read accesses the map at the index.
-         // Since the map is PERF_EVENT_ARRAY, it reads the event corresponding
-         // to the current CPU at that index.
-         struct bpf_perf_event_value val;
-         long err = bpf_perf_event_read_value(&counters, i, &val, sizeof(val));
-         if (err == 0) {
-             s->values[i] = val.counter;
+         u32 idx = (s->cpu_id * MAX_COUNTERS) + i;
+         
+         struct bpf_perf_event_value buf;
+         long err = bpf_perf_event_read_value(&counters, idx, &buf, sizeof(buf));
+         if (err) {
+             s->values[i] = err;
          } else {
-             s->values[i] = 0;
+             s->values[i] = buf.counter;
          }
     }
 
@@ -90,25 +90,19 @@ int handle__sched_switch(u64 *ctx)
     u64 now = bpf_ktime_get_ns();
     u64 *tsp;
 
-    // 1. Handle Switch-OUT (prev)
-    // If the task was being tracked, flush it.
+    // Handle Switch-OUT (prev)
     tsp = bpf_map_lookup_elem(&start_map, &prev_pid);
     if (tsp) {
-        u64 delta = (now - *tsp); // duration since last sample or switch-in
+        u64 delta = (now - *tsp);
         record_sample(prev_pid, prev->tgid, now, delta, SAMPLE_TYPE_FLUSH);
         bpf_map_delete_elem(&start_map, &prev_pid);
     }
 
-    // 2. Handle Switch-IN (next)
-    // Track start time for the target process.
+    // Handle Switch-IN (next)
     if (target_pid != 0 && next_pid != target_pid) {
         return 0;
     }
     
-    // Update start_map.
-    
-    // Optimization: Only update map if strictly TASK_RUNNING?
-    // sched_switch means 'next' is going TO run.
     bpf_map_update_elem(&start_map, &next_pid, &now, BPF_ANY);
 
     return 0;

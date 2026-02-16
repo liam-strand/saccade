@@ -4,6 +4,8 @@
 
 #define TASK_COMM_LEN 16
 #define MAX_COUNTERS 4
+#define MAX_CPUS 256
+#define TOTAL_COUNTERS (MAX_COUNTERS * MAX_CPUS)
 
 enum SampleType {
     SAMPLE_TYPE_INTERMEDIATE = 0,
