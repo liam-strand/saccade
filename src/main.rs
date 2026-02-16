@@ -54,7 +54,7 @@ fn main() -> std::io::Result<()> {
             let mut child = unsafe {
                 Command::new(target[0].clone())
                     .args(&target[1..])
-                    .pre_exec(|| syscalls::ptrace_traceme())
+                    .pre_exec(syscalls::ptrace_traceme)
                     .spawn()
                     .expect("Failed to spawn child process")
             };
