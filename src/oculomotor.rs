@@ -1,17 +1,21 @@
 use crate::event_registry::{EventId, EventRegistry};
+use crate::hardware_counters::HardwareCounters;
 use crate::sampler::{self, SamplerSkelBuilder};
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use perf_event::{Builder, events};
 use std::fs::File;
 use std::io::Write;
 use std::mem::MaybeUninit;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const MAX_COUNTERS: usize = 4;
+use crate::hardware_counters::MAX_COUNTERS;
+
 const TASK_COMM_LEN: usize = 16;
 
 #[repr(C)]
@@ -34,9 +38,12 @@ pub struct Oculomotor {
     active_set: Vec<EventId>,
     registry: EventRegistry,
     cpus: Vec<usize>,
-    // We store counters to keep them alive.
-    counters: Vec<Vec<perf_event::Counter>>,
     output_file: Arc<Mutex<File>>,
+    hw_counters: HardwareCounters,
+    #[allow(dead_code)]
+    timer_links: Vec<libbpf_rs::Link>,
+    #[allow(dead_code)]
+    timer_events: Vec<perf_event::Counter>,
 }
 
 impl Oculomotor {
@@ -47,7 +54,7 @@ impl Oculomotor {
         output_path: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut skel_builder = SamplerSkelBuilder::default();
-        // skel_builder.obj_builder.debug(true);
+        skel_builder.obj_builder.debug(true);
 
         let open_object = Box::new(MaybeUninit::uninit());
         let open_object_ref = Box::leak(open_object);
@@ -61,7 +68,7 @@ impl Oculomotor {
         // min_sample_interval_ns (non-zero) maps to .data (or .bss if init was 0, but it was 1000000).
         // Let's check both or assume .data for initialized.
         if let Some(data) = open_skel.maps.data_data.as_mut() {
-            data.min_sample_interval_ns = 1_000_000;
+            data.min_sample_interval_ns = 1_000;
         }
 
         let mut skel = open_skel.load()?;
@@ -112,7 +119,29 @@ impl Oculomotor {
         let ringbuf = ringbuf_builder.build()?;
 
         let num_cpus = std::thread::available_parallelism()?.get();
-        let cpus = (0..num_cpus).collect();
+        let cpus: Vec<usize> = (0..num_cpus).collect();
+
+        let mut timer_links = Vec::new();
+        let mut timer_events = Vec::new();
+
+        for cpu in &cpus {
+            let mut counter = Builder::new(events::Software::CPU_CLOCK)
+                .one_cpu(*cpu)
+                .any_pid()
+                .sample_frequency(1000)
+                .build()?;
+
+            counter.enable()?;
+
+            let link = skel
+                .progs
+                .handle_timer
+                .attach_perf_event(counter.as_raw_fd())?;
+            timer_links.push(link);
+            timer_events.push(counter);
+        }
+
+        let hw_counters = HardwareCounters::new(cpus.len());
 
         Ok(Self {
             skel,
@@ -121,8 +150,10 @@ impl Oculomotor {
             active_set: Vec::new(),
             cpus,
             registry,
-            counters: Vec::new(),
             output_file,
+            timer_links,
+            timer_events,
+            hw_counters,
         })
     }
 
@@ -147,32 +178,30 @@ impl Oculomotor {
         &mut self,
         decision: &ScheduleDecision,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Teardown: Simply clearing the vector drops the Counters, closing FDs.
-        self.counters.clear();
+        let new_set = &decision.active_events;
 
-        // 2. Setup: Open new counters
-        for (_slot_idx, &_event_id) in decision.active_events.iter().take(MAX_COUNTERS).enumerate()
-        {
-            let cpu_counters = Vec::new();
+        // We need to map the new set of events to the 4 slots.
+        // Simple strategy: Just assign them in order 0..min(4, len).
+        // If the event at slot i is different from what we had, update it.
 
-            // Placeholder: Assuming INSTRUCTIONS for testing.
-            // Ideally should use Registry to get config.
-
-            for _cpu in &self.cpus {
-                // let mut builder = perf_event::Builder::new();
-                // builder.kind(perf_event::events::Hardware::INSTRUCTIONS);
-                // builder.observe_cpu(*cpu);
-
-                // let mut counter = builder.build()?;
-                // counter.enable()?;
-
-                // TODO: Update BPF map with counter.as_raw_fd()
-                // For now, we just open them.
-
-                // cpu_counters.push(counter);
-            }
-            self.counters.push(cpu_counters);
+        // We'll track what we *want* in each slot.
+        let mut desired_events = [None; MAX_COUNTERS];
+        for (i, &event_id) in new_set.iter().take(MAX_COUNTERS).enumerate() {
+            desired_events[i] = Some(self.registry.get_event(event_id));
         }
+
+        // Now iterate and update slots
+        for i in 0..MAX_COUNTERS {
+            let old_id = self.active_set.get(i).copied();
+            let new_id = new_set.get(i).copied();
+
+            if old_id != new_id {
+                self.hw_counters
+                    .update_slot(i, desired_events[i], &self.skel.maps.counters)?;
+            }
+        }
+
+        self.active_set = new_set.clone();
         Ok(())
     }
 
