@@ -4,10 +4,28 @@ use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use std::fs::File;
+use std::io::Write;
 use std::mem::MaybeUninit;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MAX_COUNTERS: usize = 4;
+const TASK_COMM_LEN: usize = 16;
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct SaccadeSample {
+    timestamp_ns: u64,
+    duration_ns: u64,
+    pid: u32,
+    cpu_id: u32,
+    type_: u32,
+    pad: u32,
+    values: [u64; MAX_COUNTERS],
+    task: [u8; TASK_COMM_LEN],
+}
 
 pub struct Oculomotor {
     skel: sampler::SamplerSkel<'static>,
@@ -18,6 +36,7 @@ pub struct Oculomotor {
     cpus: Vec<usize>,
     // We store counters to keep them alive.
     counters: Vec<Vec<perf_event::Counter>>,
+    output_file: Arc<Mutex<File>>,
 }
 
 impl Oculomotor {
@@ -25,6 +44,7 @@ impl Oculomotor {
         target_pid: u32,
         registry: EventRegistry,
         scheduler: Box<dyn Scheduler>,
+        output_path: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut skel_builder = SamplerSkelBuilder::default();
         // skel_builder.obj_builder.debug(true);
@@ -47,9 +67,45 @@ impl Oculomotor {
         let mut skel = open_skel.load()?;
         skel.attach()?;
 
+        let file = File::create(output_path)?;
+        let output_file = Arc::new(Mutex::new(file));
+
+        // Write CSV header
+        {
+            let mut f = output_file.lock().unwrap();
+            writeln!(
+                f,
+                "timestamp,duration,pid,cpu_id,type,val0,val1,val2,val3,task"
+            )?;
+        }
+
+        let callback_file = output_file.clone();
         let mut ringbuf_builder = RingBufferBuilder::new();
-        ringbuf_builder.add(&skel.maps.ringbuf, |_data| {
-            print!(".");
+        ringbuf_builder.add(&skel.maps.ringbuf, move |data| {
+            if data.len() < std::mem::size_of::<SaccadeSample>() {
+                return 0;
+            }
+            let sample = unsafe { &*(data.as_ptr() as *const SaccadeSample) };
+
+            let task_name = std::str::from_utf8(&sample.task)
+                .unwrap_or("<unknown>")
+                .trim_end_matches('\0');
+
+            let mut f = callback_file.lock().unwrap();
+            let _ = writeln!(
+                f,
+                "{},{},{},{},{},{},{},{},{},{}",
+                sample.timestamp_ns,
+                sample.duration_ns,
+                sample.pid,
+                sample.cpu_id,
+                sample.type_,
+                sample.values[0],
+                sample.values[1],
+                sample.values[2],
+                sample.values[3],
+                task_name
+            );
             0
         })?;
 
@@ -66,6 +122,7 @@ impl Oculomotor {
             cpus,
             registry,
             counters: Vec::new(),
+            output_file,
         })
     }
 
@@ -121,7 +178,6 @@ impl Oculomotor {
 
     pub fn step(&mut self) -> Option<Duration> {
         self.poll().unwrap();
-        eprintln!("");
         let decision = self.scheduler.next_step();
         self.update_counters(&decision).unwrap();
         decision.duration
