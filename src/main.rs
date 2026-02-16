@@ -4,8 +4,8 @@ use saccade::event_library::EventLibrary;
 use saccade::event_registry::EventRegistry;
 use saccade::oculomotor::Oculomotor;
 use saccade::perf::Perf;
+use saccade::scheduler::random::RandomScheduler;
 use saccade::scheduler::Scheduler;
-use saccade::scheduler::test::TestScheduler;
 use saccade::syscalls;
 use std::fs::File;
 use std::io::BufReader;
@@ -68,7 +68,7 @@ fn main() -> std::io::Result<()> {
             let pid = child.id();
             let thread = thread::spawn(move || {
                 let registry = EventRegistry::new(lib);
-                let mut scheduler = TestScheduler::new(&registry);
+                let mut scheduler = RandomScheduler::default();
                 scheduler.init(registry.get_event_ids());
                 let mut oculomotor = Oculomotor::new(
                     pid,
