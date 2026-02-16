@@ -48,4 +48,8 @@ impl EventRegistry {
     pub fn get_event(&self, id: EventId) -> &Event {
         &self.counters[id as usize].0
     }
+
+    pub fn get_event_ids(&self) -> Vec<EventId> {
+        (0..self.counters.len() as u32).collect()
+    }
 }

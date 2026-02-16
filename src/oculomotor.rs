@@ -34,8 +34,6 @@ pub struct Oculomotor {
     active_set: Vec<EventId>,
     registry: EventRegistry,
     cpus: Vec<usize>,
-    // We store counters to keep them alive.
-    counters: Vec<Vec<perf_event::Counter>>,
     output_file: Arc<Mutex<File>>,
 }
 
@@ -61,7 +59,7 @@ impl Oculomotor {
         // min_sample_interval_ns (non-zero) maps to .data (or .bss if init was 0, but it was 1000000).
         // Let's check both or assume .data for initialized.
         if let Some(data) = open_skel.maps.data_data.as_mut() {
-            data.min_sample_interval_ns = 1_000_000;
+            data.min_sample_interval_ns = 1_000;
         }
 
         let mut skel = open_skel.load()?;
@@ -121,7 +119,6 @@ impl Oculomotor {
             active_set: Vec::new(),
             cpus,
             registry,
-            counters: Vec::new(),
             output_file,
         })
     }
@@ -147,32 +144,23 @@ impl Oculomotor {
         &mut self,
         decision: &ScheduleDecision,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Teardown: Simply clearing the vector drops the Counters, closing FDs.
-        self.counters.clear();
+        let new_set = &decision.active_events;
 
-        // 2. Setup: Open new counters
-        for (_slot_idx, &_event_id) in decision.active_events.iter().take(MAX_COUNTERS).enumerate()
-        {
-            let cpu_counters = Vec::new();
-
-            // Placeholder: Assuming INSTRUCTIONS for testing.
-            // Ideally should use Registry to get config.
-
-            for _cpu in &self.cpus {
-                // let mut builder = perf_event::Builder::new();
-                // builder.kind(perf_event::events::Hardware::INSTRUCTIONS);
-                // builder.observe_cpu(*cpu);
-
-                // let mut counter = builder.build()?;
-                // counter.enable()?;
-
-                // TODO: Update BPF map with counter.as_raw_fd()
-                // For now, we just open them.
-
-                // cpu_counters.push(counter);
+        // Disable events that are no longer active
+        for &event_id in &self.active_set {
+            if !new_set.contains(&event_id) {
+                self.registry.disable(event_id);
             }
-            self.counters.push(cpu_counters);
         }
+
+        // Enable events that are newly active
+        for &event_id in new_set {
+            if !self.active_set.contains(&event_id) {
+                self.registry.enable(event_id);
+            }
+        }
+
+        self.active_set = new_set.clone();
         Ok(())
     }
 

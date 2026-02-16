@@ -9,7 +9,7 @@ use std::time::Duration;
 pub trait Scheduler {
     /// Initialize the scheduler with the universe of possible events.
     /// This is called once at startup.
-    fn init(&mut self, all_events: &[EventId]);
+    fn init(&mut self, all_events: Vec<EventId>);
 
     /// Calculate the next set of events to monitor.
     fn next_step(&mut self) -> ScheduleDecision;

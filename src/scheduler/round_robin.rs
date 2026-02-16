@@ -23,8 +23,8 @@ impl RoundRobinScheduler {
 }
 
 impl Scheduler for RoundRobinScheduler {
-    fn init(&mut self, events: &[EventId]) {
-        self.events = events.to_vec();
+    fn init(&mut self, events: Vec<EventId>) {
+        self.events = events;
     }
 
     fn next_step(&mut self) -> ScheduleDecision {

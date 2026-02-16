@@ -24,8 +24,8 @@ impl Default for RandomScheduler {
 }
 
 impl Scheduler for RandomScheduler {
-    fn init(&mut self, all_events: &[EventId]) {
-        self.events = all_events.to_vec();
+    fn init(&mut self, all_events: Vec<EventId>) {
+        self.events = all_events;
     }
     fn next_step(&mut self) -> ScheduleDecision {
         ScheduleDecision {
