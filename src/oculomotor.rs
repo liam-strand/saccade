@@ -10,6 +10,8 @@ use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::os::fd::AsRawFd;
+use perf_event::{Builder, events};
 
 const MAX_COUNTERS: usize = 4;
 const TASK_COMM_LEN: usize = 16;
@@ -35,6 +37,10 @@ pub struct Oculomotor {
     registry: EventRegistry,
     cpus: Vec<usize>,
     output_file: Arc<Mutex<File>>,
+    #[allow(dead_code)]
+    timer_links: Vec<libbpf_rs::Link>,
+    #[allow(dead_code)]
+    timer_events: Vec<perf_event::Counter>,
 }
 
 impl Oculomotor {
@@ -110,7 +116,24 @@ impl Oculomotor {
         let ringbuf = ringbuf_builder.build()?;
 
         let num_cpus = std::thread::available_parallelism()?.get();
-        let cpus = (0..num_cpus).collect();
+        let cpus: Vec<usize> = (0..num_cpus).collect();
+
+        let mut timer_links = Vec::new();
+        let mut timer_events = Vec::new();
+
+        for cpu in &cpus {
+            let mut counter = Builder::new(events::Software::CPU_CLOCK)
+                .one_cpu(*cpu)
+                .any_pid()
+                .sample_frequency(1000)
+                .build()?;
+
+            counter.enable()?;
+
+            let link = skel.progs.handle_timer.attach_perf_event(counter.as_raw_fd())?;
+            timer_links.push(link);
+            timer_events.push(counter);
+        }
 
         Ok(Self {
             skel,
@@ -120,6 +143,8 @@ impl Oculomotor {
             cpus,
             registry,
             output_file,
+            timer_links,
+            timer_events,
         })
     }
 
