@@ -81,9 +81,10 @@
 //!
 //! 3. Actuation Routine:
 //!    * To switch active sets:
-//!      1. `ioctl(DISABLE)` on current FDs.
-//!      2. `bpf_map_update_elem` on `PERF_EVENT_ARRAY` (map new FDs to slots).
-//!      3. `ioctl(ENABLE)` on new FDs.
+//!      1. Close existing `perf_event` file descriptors.
+//!      2. Open new `perf_event` FDs for each CPU.
+//!      3. `bpf_map_update_elem` on `PERF_EVENT_ARRAY` using `(cpu * MAX_COUNTERS) + slot_idx` indexing.
+//!      4. `ioctl(ENABLE)` on new FDs.
 //!
 //! ### SCHEDULER INTERFACE
 //!
