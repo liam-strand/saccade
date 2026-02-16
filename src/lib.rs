@@ -5,6 +5,7 @@ pub mod event_registry;
 pub mod oculomotor;
 pub mod perf;
 pub mod scheduler;
+pub mod syscalls;
 
 #[path = "bpf/sampler.skel.rs"]
 mod sampler;

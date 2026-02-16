@@ -5,8 +5,10 @@ use saccade::event_registry::EventRegistry;
 use saccade::oculomotor::Oculomotor;
 use saccade::perf::Perf;
 use saccade::scheduler::round_robin::RoundRobinScheduler;
+use saccade::syscalls;
 use std::fs::File;
 use std::io::BufReader;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -44,10 +46,41 @@ fn main() -> std::io::Result<()> {
             println!("Target program args: {:?}", target);
 
             let (tx, rx) = channel();
+            // Ready channel to synchronize Oculomotor initialization
+            let (ready_tx, ready_rx) = channel();
+
+            eprintln!("Parent process PID: {}", std::process::id());
+            let mut child = unsafe {
+                Command::new(target[0].clone())
+                    .args(&target[1..])
+                    .pre_exec(|| {
+                        syscalls::ptrace_traceme().unwrap();
+                        Ok(())
+                    })
+                    .spawn()
+                    .expect("Failed to spawn child process")
+            };
+            eprintln!("Child process spawned.");
+
+            let pid = child.id();
+
+            // Wait for child to stop at exec
+            syscalls::wait_for_exec(pid).unwrap();
+
+            let pid = child.id();
             let thread = thread::spawn(move || {
                 let registry = EventRegistry::new(lib);
                 let scheduler = RoundRobinScheduler::default();
-                let mut oculomotor = Oculomotor::new(0, registry, Box::new(scheduler)).unwrap();
+                let mut oculomotor = Oculomotor::new(
+                    pid,
+                    registry,
+                    Box::new(scheduler),
+                    std::path::PathBuf::from("saccade.csv"),
+                )
+                .unwrap();
+
+                ready_tx.send(()).unwrap();
+
                 let mut done = false;
                 let mut quantum = Duration::from_nanos(quantum);
                 let mut loops = 0;
@@ -64,14 +97,25 @@ fn main() -> std::io::Result<()> {
                 println!("Oculomotor looped {} times.", loops);
             });
 
-            let mut child = Command::new(target[0].clone())
-                .args(&target[1..])
-                .spawn()
-                .expect("Failed to spawn child process");
+            eprintln!("Oculomotor thread spawned.");
+
+            // Wait for Oculomotor to be ready
+            ready_rx
+                .recv()
+                .expect("Failed to receive ready signal from Oculomotor");
+
+            eprintln!("Oculomotor is ready.");
+
+            // Resume the child process: PTRACE_DETACH
+            syscalls::ptrace_detach(pid).unwrap();
+
+            eprintln!("Child process resumed.");
 
             child.wait().unwrap();
             tx.send(()).unwrap();
             thread.join().unwrap();
+
+            eprintln!("Oculomotor thread joined.");
         }
     }
 
