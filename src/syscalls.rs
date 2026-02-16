@@ -97,6 +97,12 @@ pub struct CpuSet {
     bits: [u64; 16], // 16 * 64 = 1024 bits
 }
 
+impl Default for CpuSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuSet {
     pub fn new() -> Self {
         Self { bits: [0; 16] }

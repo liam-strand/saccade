@@ -11,10 +11,10 @@ pub struct RandomScheduler {
 
 impl RandomScheduler {
     fn new() -> Self {
-        return Self {
+        Self {
             events: Vec::new(),
             rng: rand::rng(),
-        };
+        }
     }
 }
 
