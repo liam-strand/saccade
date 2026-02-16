@@ -1,19 +1,21 @@
 use crate::event_registry::{EventId, EventRegistry};
+use crate::hardware_counters::HardwareCounters;
 use crate::sampler::{self, SamplerSkelBuilder};
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use perf_event::{Builder, events};
 use std::fs::File;
 use std::io::Write;
 use std::mem::MaybeUninit;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::os::fd::AsRawFd;
-use perf_event::{Builder, events};
 
-const MAX_COUNTERS: usize = 4;
+use crate::hardware_counters::MAX_COUNTERS;
+
 const TASK_COMM_LEN: usize = 16;
 
 #[repr(C)]
@@ -37,6 +39,7 @@ pub struct Oculomotor {
     registry: EventRegistry,
     cpus: Vec<usize>,
     output_file: Arc<Mutex<File>>,
+    hw_counters: HardwareCounters,
     #[allow(dead_code)]
     timer_links: Vec<libbpf_rs::Link>,
     #[allow(dead_code)]
@@ -51,7 +54,7 @@ impl Oculomotor {
         output_path: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut skel_builder = SamplerSkelBuilder::default();
-        // skel_builder.obj_builder.debug(true);
+        skel_builder.obj_builder.debug(true);
 
         let open_object = Box::new(MaybeUninit::uninit());
         let open_object_ref = Box::leak(open_object);
@@ -130,10 +133,15 @@ impl Oculomotor {
 
             counter.enable()?;
 
-            let link = skel.progs.handle_timer.attach_perf_event(counter.as_raw_fd())?;
+            let link = skel
+                .progs
+                .handle_timer
+                .attach_perf_event(counter.as_raw_fd())?;
             timer_links.push(link);
             timer_events.push(counter);
         }
+
+        let hw_counters = HardwareCounters::new(cpus.len());
 
         Ok(Self {
             skel,
@@ -145,6 +153,7 @@ impl Oculomotor {
             output_file,
             timer_links,
             timer_events,
+            hw_counters,
         })
     }
 
@@ -171,17 +180,24 @@ impl Oculomotor {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let new_set = &decision.active_events;
 
-        // Disable events that are no longer active
-        for &event_id in &self.active_set {
-            if !new_set.contains(&event_id) {
-                self.registry.disable(event_id);
-            }
+        // We need to map the new set of events to the 4 slots.
+        // Simple strategy: Just assign them in order 0..min(4, len).
+        // If the event at slot i is different from what we had, update it.
+
+        // We'll track what we *want* in each slot.
+        let mut desired_events = [None; MAX_COUNTERS];
+        for (i, &event_id) in new_set.iter().take(MAX_COUNTERS).enumerate() {
+            desired_events[i] = Some(self.registry.get_event(event_id));
         }
 
-        // Enable events that are newly active
-        for &event_id in new_set {
-            if !self.active_set.contains(&event_id) {
-                self.registry.enable(event_id);
+        // Now iterate and update slots
+        for i in 0..MAX_COUNTERS {
+            let old_id = self.active_set.get(i).copied();
+            let new_id = new_set.get(i).copied();
+
+            if old_id != new_id {
+                self.hw_counters
+                    .update_slot(i, desired_events[i], &self.skel.maps.counters)?;
             }
         }
 

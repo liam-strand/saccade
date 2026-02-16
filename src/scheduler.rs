@@ -1,6 +1,7 @@
 pub mod distribution;
 pub mod random;
 pub mod round_robin;
+pub mod test;
 
 use crate::event_registry::EventId;
 use std::time::Duration;
