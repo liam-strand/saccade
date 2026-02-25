@@ -157,3 +157,9 @@ pub fn sched_yield() -> io::Result<()> {
     }
     Ok(())
 }
+
+pub fn gettid() -> io::Result<usize> {
+    unsafe {
+        syscalls::syscall0(Sysno::gettid).map_err(|e| io::Error::from_raw_os_error(e.into_raw()))
+    }
+}

@@ -1,3 +1,4 @@
+use crate::buffered_output::Logger;
 use crate::event_registry::{EventId, EventRegistry};
 use crate::hardware_counters::HardwareCounters;
 use crate::sampler::{self, SamplerSkelBuilder};
@@ -6,29 +7,27 @@ use crate::scheduler::Scheduler;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use perf_event::{Builder, events};
-use std::fs::File;
-use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::hardware_counters::MAX_COUNTERS;
 
-const TASK_COMM_LEN: usize = 16;
+pub const TASK_COMM_LEN: usize = 16;
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-struct SaccadeSample {
-    timestamp_ns: u64,
-    duration_ns: u64,
-    pid: u32,
-    cpu_id: u32,
-    type_: u32,
-    pad: u32,
-    values: [u64; MAX_COUNTERS],
-    task: [u8; TASK_COMM_LEN],
+pub struct SaccadeSample {
+    pub timestamp_ns: u64,
+    pub duration_ns: u64,
+    pub pid: u32,
+    pub cpu_id: u32,
+    pub type_: u32,
+    pub pad: u32,
+    pub values: [u64; MAX_COUNTERS],
+    pub events: [u64; MAX_COUNTERS],
+    pub task: [u8; TASK_COMM_LEN],
 }
 
 pub struct Oculomotor {
@@ -36,9 +35,8 @@ pub struct Oculomotor {
     ringbuf: libbpf_rs::RingBuffer<'static>,
     scheduler: Box<dyn Scheduler>,
     active_set: Vec<EventId>,
-    registry: EventRegistry,
     _cpus: Vec<usize>,
-    _output_file: Arc<Mutex<File>>,
+    _logger: Logger,
     hw_counters: HardwareCounters,
     _timer_links: Vec<libbpf_rs::Link>,
     _timer_events: Vec<perf_event::Counter>,
@@ -51,66 +49,37 @@ impl Oculomotor {
         scheduler: Box<dyn Scheduler>,
         output_path: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut skel_builder = SamplerSkelBuilder::default();
-        skel_builder.obj_builder.debug(true);
+        let skel_builder = SamplerSkelBuilder::default();
 
         let open_object = Box::new(MaybeUninit::uninit());
         let open_object_ref = Box::leak(open_object);
         let mut open_skel = skel_builder.open(open_object_ref)?;
 
-        // Initialize global config before loading.
-        // target_pid (0) maps to .bss.
-        if let Some(bss) = open_skel.maps.bss_data.as_mut() {
-            bss.target_pid = target_pid;
-        }
-        // min_sample_interval_ns (non-zero) maps to .data (or .bss if init was 0, but it was 1000000).
-        // Let's check both or assume .data for initialized.
-        if let Some(data) = open_skel.maps.data_data.as_mut() {
-            data.min_sample_interval_ns = 1_000;
-        }
+        open_skel
+            .maps
+            .bss_data
+            .as_mut()
+            .expect("Failed to set target PID")
+            .target_pid = target_pid;
+        open_skel
+            .maps
+            .data_data
+            .as_mut()
+            .expect("Failed to set min sample interval")
+            .min_sample_interval_ns = 1_000_000;
 
         let mut skel = open_skel.load()?;
         skel.attach()?;
 
-        let file = File::create(output_path)?;
-        let output_file = Arc::new(Mutex::new(file));
+        let logger = Logger::new(output_path, 256_000)?;
+        let sender = logger.clone_sender().expect("Failed to get logger sender");
 
-        // Write CSV header
-        {
-            let mut f = output_file.lock().unwrap();
-            writeln!(
-                f,
-                "timestamp,duration,pid,cpu_id,type,val0,val1,val2,val3,task"
-            )?;
-        }
+        eprintln!("Oculomotor attached to PID {}", target_pid);
 
-        let callback_file = output_file.clone();
         let mut ringbuf_builder = RingBufferBuilder::new();
         ringbuf_builder.add(&skel.maps.ringbuf, move |data| {
-            if data.len() < std::mem::size_of::<SaccadeSample>() {
-                return 0;
-            }
-            let sample = unsafe { &*(data.as_ptr() as *const SaccadeSample) };
-
-            let task_name = std::str::from_utf8(&sample.task)
-                .unwrap_or("<unknown>")
-                .trim_end_matches('\0');
-
-            let mut f = callback_file.lock().unwrap();
-            let _ = writeln!(
-                f,
-                "{},{},{},{},{},{},{},{},{},{}",
-                sample.timestamp_ns,
-                sample.duration_ns,
-                sample.pid,
-                sample.cpu_id,
-                sample.type_,
-                sample.values[0],
-                sample.values[1],
-                sample.values[2],
-                sample.values[3],
-                task_name
-            );
+            let sample = unsafe { *(data.as_ptr() as *const SaccadeSample) };
+            let _ = sender.try_send(sample);
             0
         })?;
 
@@ -119,6 +88,8 @@ impl Oculomotor {
         let num_cpus = std::thread::available_parallelism()?.get();
         let cpus: Vec<usize> = (0..num_cpus).collect();
 
+        eprintln!("Oculomotor has {} CPUs", num_cpus);
+
         let mut timer_links = Vec::new();
         let mut timer_events = Vec::new();
 
@@ -126,7 +97,7 @@ impl Oculomotor {
             let mut counter = Builder::new(events::Software::CPU_CLOCK)
                 .one_cpu(*cpu)
                 .any_pid()
-                .sample_frequency(1000)
+                .sample_frequency(100000)
                 .build()?;
 
             counter.enable()?;
@@ -139,7 +110,11 @@ impl Oculomotor {
             timer_events.push(counter);
         }
 
-        let hw_counters = HardwareCounters::new(cpus.len());
+        eprintln!("Oculomotor has {} timer events", timer_events.len());
+
+        let hw_counters = HardwareCounters::new(cpus.len(), registry, &mut skel);
+
+        eprintln!("Hardware counters initialized");
 
         Ok(Self {
             skel,
@@ -147,8 +122,7 @@ impl Oculomotor {
             scheduler,
             active_set: Vec::new(),
             _cpus: cpus,
-            registry,
-            _output_file: output_file,
+            _logger: logger,
             _timer_links: timer_links,
             _timer_events: timer_events,
             hw_counters,
@@ -178,24 +152,15 @@ impl Oculomotor {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let new_set = &decision.active_events;
 
-        // We need to map the new set of events to the 4 slots.
-        // Simple strategy: Just assign them in order 0..min(4, len).
-        // If the event at slot i is different from what we had, update it.
-
-        // We'll track what we *want* in each slot.
-        let mut desired_events = [None; MAX_COUNTERS];
-        for (i, &event_id) in new_set.iter().take(MAX_COUNTERS).enumerate() {
-            desired_events[i] = Some(self.registry.get_event(event_id));
-        }
-
-        // Now iterate and update slots
-        for (i, event) in desired_events.iter().enumerate() {
-            let old_id = self.active_set.get(i).copied();
-            let new_id = new_set.get(i).copied();
-
-            if old_id != new_id {
-                self.hw_counters
-                    .update_slot(i, *event, &self.skel.maps.counters)?;
+        if self.active_set.is_empty() {
+            for (i, &id) in new_set.iter().enumerate() {
+                self.hw_counters.update_slot(i, id)?;
+            }
+        } else {
+            for (i, &old_id) in self.active_set.iter().enumerate() {
+                if old_id != new_set[i] {
+                    self.hw_counters.update_slot(i, new_set[i])?;
+                }
             }
         }
 

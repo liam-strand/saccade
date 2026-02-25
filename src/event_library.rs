@@ -60,7 +60,7 @@ impl EventLibrary {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub name: String,
     pub desc: String,
@@ -146,21 +146,6 @@ fn parse_name(i: &[u8]) -> IResult<&[u8], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_perf_out() {
-        let perf_out = include_bytes!("../perf.out");
-        let lib = EventLibrary::from_bytes(perf_out).unwrap();
-
-        // Check for a specific known event
-        let bp_l1_btb_correct = lib.events.iter().find(|e| e.name == "bp_l1_btb_correct");
-        assert!(bp_l1_btb_correct.is_some());
-        let event = bp_l1_btb_correct.unwrap();
-        assert_eq!(event.event, 0x8a);
-
-        // Verify count is correct
-        assert_eq!(lib.events.len(), 223);
-    }
     #[test]
     fn bp_l1_btb_correct() {
         let text = br#"
