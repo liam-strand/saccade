@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-#include "vmlinux.h"
 #include "sampler.h"
+#include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 
@@ -17,13 +17,31 @@ struct {
     __uint(max_entries, 256 * 1024); // 256 KB
 } ringbuf SEC(".maps");
 
-// Perf Event Array for reading hardware counters
+// Perf Event Arrays for reading hardware counters
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(max_entries, TOTAL_COUNTERS);
+    __uint(max_entries, MAX_CPUS);
     __type(key, u32);
     __type(value, u32);
-} counters SEC(".maps");
+} counter0 SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32);
+    __type(value, u32);
+} counter1 SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32);
+    __type(value, u32);
+} counter2 SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32);
+    __type(value, u32);
+} counter3 SEC(".maps");
 
 // Map to track the start time and last sample time of target tasks
 // Key: PID, Value: Timestamp (ns) of when the task was scheduled in (or last sampled)
@@ -39,20 +57,36 @@ struct task_struct___pre_5_14 {
     long int state;
 };
 
-static inline long get_task_state(struct task_struct *t)
-{
+static inline long get_task_state(struct task_struct *t) {
     if (bpf_core_field_exists(t->__state))
         return t->__state;
     return ((struct task_struct___pre_5_14 *)t)->state;
 }
 
-static __always_inline void record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
+static inline void *get_counter(int i) {
+    switch (i) {
+        case 0:
+            return &counter0;
+        case 1:
+            return &counter1;
+        case 2:
+            return &counter2;
+        case 3:
+            return &counter3;
+        default:
+            return NULL;
+    }
+}
+
+static __always_inline void
+record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     struct saccade_sample *s;
 
     // Reserve space in ring buffer
     s = bpf_ringbuf_reserve(&ringbuf, sizeof(*s), 0);
-    if (!s)
-        {return;}
+    if (!s) {
+        return;
+    }
 
     s->timestamp_ns = now;
     s->duration_ns = delta;
@@ -61,19 +95,19 @@ static __always_inline void record_sample(__u32 pid, __u32 tgid, __u64 now, __u6
     s->type = type;
     bpf_get_current_comm(&s->task, sizeof(s->task));
 
-    // Read hardware counters
-    // Iterate 0..MAX_COUNTERS-1. Loop is compatible with verifier limits.
-    #pragma unroll
+// Read hardware counters
+#pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
-         u32 idx = (s->cpu_id * MAX_COUNTERS) + i;
-         
-         struct bpf_perf_event_value buf;
-         long err = bpf_perf_event_read_value(&counters, idx, &buf, sizeof(buf));
-         if (err) {
-             s->values[i] = err;
-         } else {
-             s->values[i] = buf.counter;
-         }
+        u32 idx = s->cpu_id;
+
+        struct bpf_perf_event_value buf;
+        long err = bpf_perf_event_read_value(get_counter(i), idx, &buf, sizeof(buf));
+        if (err) {
+            s->values[i] = err;
+        } else {
+            s->values[i] = buf.counter;
+        }
+        s->events[i] = active_counter_ids[i];
     }
 
     bpf_ringbuf_submit(s, 0);
@@ -81,8 +115,7 @@ static __always_inline void record_sample(__u32 pid, __u32 tgid, __u64 now, __u6
 
 // Hook: Context Switch
 SEC("tp_btf/sched_switch")
-int handle__sched_switch(u64 *ctx)
-{
+int handle__sched_switch(u64 *ctx) {
     struct task_struct *prev = (struct task_struct *)ctx[1];
     struct task_struct *next = (struct task_struct *)ctx[2];
     u32 prev_pid = prev->pid;
@@ -102,7 +135,7 @@ int handle__sched_switch(u64 *ctx)
     if (target_pid != 0 && next_pid != target_pid) {
         return 0;
     }
-    
+
     bpf_map_update_elem(&start_map, &next_pid, &now, BPF_ANY);
 
     return 0;
@@ -110,8 +143,7 @@ int handle__sched_switch(u64 *ctx)
 
 // Hook: Timer (perf_event) for intermediate sampling
 SEC("perf_event")
-int handle_timer(struct bpf_perf_event_data *ctx)
-{
+int handle_timer(struct bpf_perf_event_data *ctx) {
     // This hook fires periodically (e.g. 100Hz) on each CPU.
     // Check if the CURRENT task is being tracked.
     u64 now = bpf_ktime_get_ns();

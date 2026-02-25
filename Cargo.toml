@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bus = "2.4.1"
 clap = { version = "4.5.54", features = ["derive"] }
 libbpf-rs = "0.26.0"
 nom = "8.0.0"

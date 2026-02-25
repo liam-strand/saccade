@@ -1,101 +1,82 @@
-use crate::event_library::Event;
-use crate::syscalls::{self, CpuSet};
-use libbpf_rs::{Map, MapCore, MapFlags};
-use perf_event::{Builder, events};
+use crate::event_registry::EventRegistry;
+use crate::sampler::SamplerSkel;
+use libbpf_rs::{MapCore, MapFlags, MapHandle};
+use perf_event::{Builder, Counter, events};
 use std::os::fd::AsRawFd;
 
 pub const MAX_COUNTERS: usize = 4;
 
 pub struct HardwareCounters {
     num_cpus: usize,
-    /// Store active counters.
-    /// Index 1: Slot index (0..MAX_COUNTERS)
-    /// Index 2: CPU index (0..num_cpus)
-    active_counters: Vec<Vec<perf_event::Counter>>,
+    bpf_maps: [MapHandle; MAX_COUNTERS],
+    event_registry: EventRegistry,
+    active_counters: Vec<Vec<Option<Counter>>>,
+    active_counter_ids: *mut [u32; MAX_COUNTERS],
 }
 
 impl HardwareCounters {
-    pub fn new(num_cpus: usize) -> Self {
-        // Initialize with MAX_COUNTERS empty slots
-        let mut active_counters = Vec::with_capacity(MAX_COUNTERS);
-        for _ in 0..MAX_COUNTERS {
-            active_counters.push(Vec::new());
-        }
+    pub fn new(
+        num_cpus: usize,
+        event_registry: EventRegistry,
+        skel: &mut SamplerSkel<'static>,
+    ) -> Self {
+        let bpf_maps = [
+            MapHandle::try_from(&skel.maps.counter0).expect("Failed to get counter0"),
+            MapHandle::try_from(&skel.maps.counter1).expect("Failed to get counter1"),
+            MapHandle::try_from(&skel.maps.counter2).expect("Failed to get counter2"),
+            MapHandle::try_from(&skel.maps.counter3).expect("Failed to get counter3"),
+        ];
 
         Self {
             num_cpus,
-            active_counters,
+            bpf_maps,
+            event_registry,
+            active_counters: std::iter::repeat_with(|| {
+                std::iter::repeat_with(|| None).take(num_cpus).collect()
+            })
+            .take(MAX_COUNTERS)
+            .collect(),
+            active_counter_ids: std::ptr::addr_of_mut!(
+                skel.maps.bss_data.as_mut().unwrap().active_counter_ids
+            ),
         }
     }
 
-    /// Updates a specific counter slot with a new event (or clears it if event is None).
     pub fn update_slot(
         &mut self,
         slot_idx: usize,
-        event: Option<&Event>,
-        bpf_map: &Map,
+        event_id: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let event_config = match event {
-            Some(e) => e,
-            None => {
-                // If we are clearing the slot, we can just clear the vector.
-                // The FDs will be closed and map entries removed by kernel.
-                self.active_counters[slot_idx].clear();
-                return Ok(());
-            }
-        };
-
-        let mut new_counters = Vec::with_capacity(self.num_cpus);
+        let bpf_map = &self.bpf_maps[slot_idx];
+        let event = self.event_registry.get_event(event_id);
 
         for cpu in 0..self.num_cpus {
-            // On x86, encoding is usually: event (0-7), umask (8-15).
-            let mut counter =
-                Builder::new(events::Raw::new(event_config.event).config1(event_config.umask))
-                    .one_cpu(cpu)
-                    .any_pid()
-                    .build()?;
+            let key = (cpu as u32).to_ne_bytes();
 
-            counter.enable()?;
-            new_counters.push(counter);
+            self.active_counters[slot_idx][cpu]
+                .take()
+                .map(|mut c| c.disable());
+
+            let mut new_counter = Builder::new(events::Raw::new(event.event).config1(event.umask))
+                .one_cpu(cpu)
+                .any_pid()
+                .build()
+                .expect("Failed to build counter");
+
+            new_counter.enable().unwrap();
+
+            let new_fd = new_counter.as_raw_fd();
+
+            bpf_map
+                .update(&key, &new_fd.to_ne_bytes(), MapFlags::ANY)
+                .expect("Failed to update map");
+
+            self.active_counters[slot_idx][cpu] = Some(new_counter);
         }
 
-        let mut full_mask = CpuSet::new();
-        for i in 0..self.num_cpus {
-            full_mask.set(i);
+        unsafe {
+            (*self.active_counter_ids)[slot_idx] = event_id;
         }
-
-        for (cpu, counter) in new_counters.iter().enumerate() {
-            let mut mask = CpuSet::new();
-            mask.set(cpu);
-            syscalls::sched_setaffinity(0, &mask)?;
-            let _ = syscalls::sched_yield();
-
-            // Key is the index: (cpu * MAX_COUNTERS) + slot_idx
-            let fd = counter.as_raw_fd() as u32;
-            let map_idx = (cpu * MAX_COUNTERS + slot_idx) as u32;
-            let key = map_idx.to_ne_bytes();
-            let val = fd.to_ne_bytes();
-
-            match bpf_map.update(&key, &val, MapFlags::ANY) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!(
-                        "[ERROR] Failed to update map slot {} for CPU {}: {}",
-                        slot_idx, cpu, e
-                    );
-                    return Err(Box::new(std::io::Error::other(format!(
-                        "Map update failed: {}",
-                        e
-                    ))));
-                }
-            }
-        }
-
-        syscalls::sched_setaffinity(0, &full_mask)?;
-
-        // Store new counters (drops old ones, closing old FDs)
-        self.active_counters[slot_idx] = new_counters;
-
         Ok(())
     }
 }

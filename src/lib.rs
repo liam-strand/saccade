@@ -1,3 +1,4 @@
+pub mod buffered_output;
 pub mod cli;
 pub mod docs;
 pub mod event_library;
