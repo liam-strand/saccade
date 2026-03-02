@@ -97,7 +97,7 @@ impl Oculomotor {
             let mut counter = Builder::new(events::Software::CPU_CLOCK)
                 .one_cpu(*cpu)
                 .any_pid()
-                .sample_frequency(100000)
+                .sample_frequency(16384)
                 .build()?;
 
             counter.enable()?;
@@ -142,7 +142,7 @@ impl Oculomotor {
     }
 
     pub fn poll(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.ringbuf.poll(Duration::from_millis(1))?;
+        self.ringbuf.poll(Duration::from_millis(10))?;
         Ok(())
     }
 
@@ -151,17 +151,28 @@ impl Oculomotor {
         decision: &ScheduleDecision,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let new_set = &decision.active_events;
-        let active_counter_ids = &mut self.skel.maps.bss_data.as_mut().unwrap().active_counter_ids;
+        let (active_counter_ids, prev_counter_values) = self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .map(|d| (&mut d.active_counter_ids, &mut d.prev_counter_values))
+            .unwrap();
 
         if self.active_set.is_empty() {
             for (i, &id) in new_set.iter().enumerate() {
-                self.hw_counters.update_slot(active_counter_ids, i, id)?;
+                self.hw_counters
+                    .update_slot(active_counter_ids, prev_counter_values, i, id)?;
             }
         } else {
             for (i, &old_id) in self.active_set.iter().enumerate() {
                 if old_id != new_set[i] {
-                    self.hw_counters
-                        .update_slot(active_counter_ids, i, new_set[i])?;
+                    self.hw_counters.update_slot(
+                        active_counter_ids,
+                        prev_counter_values,
+                        i,
+                        new_set[i],
+                    )?;
                 }
             }
         }
