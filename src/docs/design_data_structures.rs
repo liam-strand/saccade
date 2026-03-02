@@ -43,8 +43,9 @@
 //!     __u32 pid;
 //!     __u32 cpu_id;
 //!     __u32 type;          // enum SampleType
-//!     __u32 pad;
+//!     __u32 pad0;          // Explicit padding for alignment
 //!     __u64 values[MAX_COUNTERS]; // 4 metrics
+//!     __u64 events[MAX_COUNTERS]; // Event IDs corresponding to the values
 //!     char task[TASK_COMM_LEN];   // Task name
 //! };
 //! ```
@@ -65,18 +66,19 @@
 //!
 //! ## 4. Hardware Counters Map
 //!
-//! We use `BPF_MAP_TYPE_PERF_EVENT_ARRAY` to read hardware counters.
+//! We use multiple `BPF_MAP_TYPE_PERF_EVENT_ARRAY`s to read hardware counters.
 //!
 //! ### BPF Definition
 //!
 //! ```c
 //! struct {
 //!     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-//!     __uint(max_entries, TOTAL_COUNTERS); // MAX_COUNTERS * MAX_CPUS
+//!     __uint(max_entries, MAX_CPUS);
 //!     __type(key, u32);
 //!     __type(value, u32);
-//! } counters SEC(".maps");
+//! } counter0 SEC(".maps");
+//! // ... counter1, counter2, counter3
 //! ```
 //!
-//! Userspace populates this map where key is `(cpu_id * MAX_COUNTERS) + slot_idx`.
+//! Userspace populates these maps where the key is simply `cpu_id`.
 //!
