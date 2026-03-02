@@ -11,7 +11,6 @@ pub struct HardwareCounters {
     bpf_maps: [MapHandle; MAX_COUNTERS],
     event_registry: EventRegistry,
     active_counters: Vec<Vec<Option<Counter>>>,
-    active_counter_ids: *mut [u32; MAX_COUNTERS],
 }
 
 impl HardwareCounters {
@@ -36,14 +35,12 @@ impl HardwareCounters {
             })
             .take(MAX_COUNTERS)
             .collect(),
-            active_counter_ids: std::ptr::addr_of_mut!(
-                skel.maps.bss_data.as_mut().unwrap().active_counter_ids
-            ),
         }
     }
 
     pub fn update_slot(
         &mut self,
+        active_counter_ids: &mut [u32; MAX_COUNTERS],
         slot_idx: usize,
         event_id: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -74,9 +71,8 @@ impl HardwareCounters {
             self.active_counters[slot_idx][cpu] = Some(new_counter);
         }
 
-        unsafe {
-            (*self.active_counter_ids)[slot_idx] = event_id;
-        }
+        active_counter_ids[slot_idx] = event_id;
+
         Ok(())
     }
 }

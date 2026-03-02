@@ -151,15 +151,17 @@ impl Oculomotor {
         decision: &ScheduleDecision,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let new_set = &decision.active_events;
+        let active_counter_ids = &mut self.skel.maps.bss_data.as_mut().unwrap().active_counter_ids;
 
         if self.active_set.is_empty() {
             for (i, &id) in new_set.iter().enumerate() {
-                self.hw_counters.update_slot(i, id)?;
+                self.hw_counters.update_slot(active_counter_ids, i, id)?;
             }
         } else {
             for (i, &old_id) in self.active_set.iter().enumerate() {
                 if old_id != new_set[i] {
-                    self.hw_counters.update_slot(i, new_set[i])?;
+                    self.hw_counters
+                        .update_slot(active_counter_ids, i, new_set[i])?;
                 }
             }
         }
