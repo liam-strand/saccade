@@ -19,47 +19,48 @@
 //!
 //! ### State Management
 //!
-//! * Gate Map: A BPF Map shared between hooks tracks the target process state
-//!   (OPEN / CLOSED).
+//! * Start Map: A BPF Hash Map shared between hooks tracks the target process
+//!   state by recording the timestamp (in nanoseconds) when the task was
+//!   scheduled in. This acts as both a gate and a reference for delta time.
 //!
 //! ### Trigger Logic
 //!
 //! 1. Context Switch Hook (`sched_switch`)
 //!    * Switch-IN (Target):
-//!      - Action: Set Gate -> OPEN.
-//!      - Effect: Enables timer-based sampling.
+//!      - Action: Set timestamp in Start Map.
+//!      - Effect: Enables timer-based sampling with delta reference.
 //!
 //!    * Switch-OUT (Target):
-//!      - Action: FLUSH (Record final sample) -> Set Gate -> CLOSED.
+//!      - Action: FLUSH (Record final sample) -> Delete entry in Start Map.
 //!      - Effect: Captures execution tail; disables timer overhead.
 //!
 //! 2. Timer Hook (`perf_event`)
 //!    * Frequency: High (e.g., 50–100Hz).
-//!    * Action: Check Gate.
-//!      - If CLOSED: Exit immediately.
-//!      - If OPEN: Record Intermediate Sample.
+//!    * Action: Check Start Map.
+//!      - If not present: Exit immediately.
+//!      - If present: Record Intermediate Sample, update timestamp.
 //!
 //! ### Sequence Flow
 //!
 //!
 //! ```mermaid
-//! (Target Inactive - Gate: CLOSED)
+//! (Target Inactive - Start Map: Empty)
 //! [OS Scheduler] -- Switch IN (Target) --> [eBPF]
-//! [eBPF] -- Set OPEN --> [Gate Map]
+//! [eBPF] -- Set Timestamp --> [Start Map]
 //!
 //!    LOOP: Timer Tick
-//!    [eBPF] -- Check State --> [Gate Map]
-//!    [Gate Map] -- Returns OPEN --> [eBPF]
+//!    [eBPF] -- Check State --> [Start Map]
+//!    [Start Map] -- Returns Timestamp --> [eBPF]
 //!    [eBPF] -- Push Sample (Intermediate) --> [Userspace]
 //!
 //! [OS Scheduler] -- Switch OUT (Target) --> [eBPF]
 //! [eBPF] -- Push Sample (Flush) --> [Userspace]
-//! [eBPF] -- Set CLOSED --> [Gate Map]
+//! [eBPF] -- Delete Entry --> [Start Map]
 //!
-//! (Target Inactive - Gate: CLOSED)
+//! (Target Inactive - Start Map: Empty)
 //!    LOOP: Timer Tick
-//!    [eBPF] -- Check State --> [Gate Map]
-//!    [Gate Map] -- Returns CLOSED --> [eBPF]
+//!    [eBPF] -- Check State --> [Start Map]
+//!    [Start Map] -- Entry Not Found --> [eBPF]
 //!    (Exit - No Ops)
 //! ```
 //!
@@ -81,9 +82,9 @@
 //!
 //! 3. Actuation Routine:
 //!    * To switch active sets:
-//!      1. Close existing `perf_event` file descriptors.
+//!      1. Disable and close existing `perf_event` file descriptors for the slot.
 //!      2. Open new `perf_event` FDs for each CPU.
-//!      3. `bpf_map_update_elem` on `PERF_EVENT_ARRAY` using `(cpu * MAX_COUNTERS) + slot_idx` indexing.
+//!      3. `bpf_map_update_elem` on the specific `PERF_EVENT_ARRAY` for the slot (e.g., `counter0`) using `cpu` indexing.
 //!      4. `ioctl(ENABLE)` on new FDs.
 //!
 //! ### SCHEDULER INTERFACE
