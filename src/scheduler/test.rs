@@ -48,7 +48,7 @@ impl Scheduler for TestScheduler {
         if len == 0 {
             return ScheduleDecision {
                 active_events: vec![],
-                duration: Some(Duration::from_millis(100)),
+                duration: None,
             };
         }
 

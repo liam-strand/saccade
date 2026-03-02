@@ -2,9 +2,11 @@ use crate::event_registry::EventRegistry;
 use crate::sampler::SamplerSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle};
 use perf_event::{Builder, Counter, events};
+use rayon::prelude::*;
 use std::os::fd::AsRawFd;
 
 pub const MAX_COUNTERS: usize = 4;
+pub const MAX_CPUS: usize = 256;
 
 pub struct HardwareCounters {
     num_cpus: usize,
@@ -41,6 +43,7 @@ impl HardwareCounters {
     pub fn update_slot(
         &mut self,
         active_counter_ids: &mut [u32; MAX_COUNTERS],
+        prev_counter_values: &mut [[u64; MAX_COUNTERS]; MAX_CPUS],
         slot_idx: usize,
         event_id: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -48,12 +51,15 @@ impl HardwareCounters {
         let event = self.event_registry.get_event(event_id);
 
         for cpu in 0..self.num_cpus {
-            let key = (cpu as u32).to_ne_bytes();
-
             self.active_counters[slot_idx][cpu]
                 .take()
                 .map(|mut c| c.disable());
+        }
 
+        active_counter_ids[slot_idx] = event_id;
+        prev_counter_values[slot_idx] = [0; MAX_COUNTERS];
+
+        for cpu in 0..self.num_cpus {
             let mut new_counter = Builder::new(events::Raw::new(event.event).config1(event.umask))
                 .one_cpu(cpu)
                 .any_pid()
@@ -65,13 +71,15 @@ impl HardwareCounters {
             let new_fd = new_counter.as_raw_fd();
 
             bpf_map
-                .update(&key, &new_fd.to_ne_bytes(), MapFlags::ANY)
+                .update(
+                    &(cpu as u32).to_ne_bytes(),
+                    &new_fd.to_ne_bytes(),
+                    MapFlags::ANY,
+                )
                 .expect("Failed to update map");
 
             self.active_counters[slot_idx][cpu] = Some(new_counter);
         }
-
-        active_counter_ids[slot_idx] = event_id;
 
         Ok(())
     }

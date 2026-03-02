@@ -4,12 +4,11 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 
-#define TASK_RUNNING 0
-
 // Global variables for control (placed in .bss by default which is map-based in libbpf-rs)
 volatile __u64 min_sample_interval_ns = 1000000; // 1ms default
 volatile __u32 target_pid = 0;
-volatile __u32 active_counter_ids[MAX_COUNTERS] = {0, 0, 0, 0};
+volatile __u32 active_counter_ids[MAX_COUNTERS] = {0};
+volatile __u64 prev_counter_values[MAX_CPUS][MAX_COUNTERS] = {0};
 
 // Ring Buffer for samples
 struct {
@@ -99,13 +98,17 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
 #pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
         u32 idx = s->cpu_id;
+        if (idx >= MAX_CPUS || i >= MAX_COUNTERS) {
+            continue;
+        }
 
         struct bpf_perf_event_value buf;
         long err = bpf_perf_event_read_value(get_counter(i), idx, &buf, sizeof(buf));
         if (err) {
-            s->values[i] = err;
+            s->values[i] = 18000000000000000000 - err;
         } else {
-            s->values[i] = buf.counter;
+            s->values[i] = buf.counter - prev_counter_values[idx][i];
+            prev_counter_values[idx][i] = buf.counter;
         }
         s->events[i] = active_counter_ids[i];
     }
