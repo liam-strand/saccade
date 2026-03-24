@@ -107,3 +107,7 @@ Samples are written to `saccade.csv` with columns:
 ```
 timestamp_ns,duration_ns,pid,cpu_id,type,values_0,values_1,values_2,values_3,events_0,events_1,events_2,events_3,task
 ```
+
+## Future Direction
+
+The `Scheduler` trait is designed to eventually support ML-steered counter selection. The current schedulers (random, round-robin, test) serve as baselines and data-collection tools. A future ML scheduler would use sample data to make informed decisions about which counters to activate, but the approach (ONNX, PyTorch, etc.) is not yet decided. The trait interface may need to evolve to accept observation data when this work begins.
