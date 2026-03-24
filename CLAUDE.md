@@ -24,13 +24,13 @@ Requires Linux with eBPF support (5.8+ for ringbuf), `clang`/`llvm` for eBPF com
 
 ```bash
 cargo build                    # builds Rust + compiles eBPF via build.rs
-sudo cargo run -- generate event_lib.json   # generate hardware event library
-sudo cargo run -- run -- <target> [args...]  # profile a target program
+cargo run -- generate event_lib.json   # generate hardware event library
+cargo run -- run -- <target> [args...]  # profile a target program
 ```
 
 The `build.rs` script uses `libbpf-cargo` SkeletonBuilder to compile `src/bpf/sampler.bpf.c` into `src/bpf/sampler.skel.rs` (gitignored, auto-generated).
 
-All `cargo run` invocations require **sudo** (configured in `.cargo/config.toml`) because eBPF operations need root privileges.
+The `run` subcommand requires **sudo** because eBPF operations need root privileges; the provided `.cargo/config.toml` configures `cargo run` to use **sudo** by default for convenience, even for subcommands like `generate` that do not directly use eBPF.
 
 ## CLI
 
@@ -88,6 +88,8 @@ cargo test           # runs unit tests (event_library parser tests)
 cargo clippy         # lint
 cargo fmt            # format
 ```
+
+Note: `.cargo/config.toml` sets `runner = "sudo -E"`, so `cargo test` will execute test binaries under sudo. This may trigger a sudo prompt.
 
 Unit tests are in `src/event_library.rs` (`#[cfg(test)]` module) testing the nom parser against sample `perf list` output.
 
