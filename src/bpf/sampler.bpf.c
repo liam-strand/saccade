@@ -85,15 +85,14 @@ static __always_inline void set_stopped(u64 idx, bool v) {
     }
 }
 
-static __always_inline bool
-handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
+static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
     if (cpu_id >= MAX_CPUS || !stopped[cpu_id]) {
         return false;
     }
     set_stopped(cpu_id, false);
 
-    // Snapshot counter baselines so next sample excludes dead-time drift
-    #pragma unroll
+// Snapshot counter baselines so next sample excludes dead-time drift
+#pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
         struct bpf_perf_event_value buf;
         long err = bpf_perf_event_read_value(get_counter(i), cpu_id, &buf, sizeof(buf));
@@ -214,7 +213,7 @@ int handle_timer(struct bpf_perf_event_data *ctx) {
     }
 
     if (handle_resume(cpu_id, pid, now)) {
-        return 0;  // Resumed — baseline reset, no sample
+        return 0; // Resumed — baseline reset, no sample
     }
     set_stopped(cpu_id, false);
 
