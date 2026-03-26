@@ -8,6 +8,7 @@ pub mod oculomotor;
 pub mod perf;
 pub mod scheduler;
 pub mod syscalls;
+pub mod virtual_counter;
 
 #[path = "bpf/sampler.skel.rs"]
 mod sampler;
