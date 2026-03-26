@@ -97,7 +97,7 @@ impl Oculomotor {
             let mut counter = Builder::new(events::Software::CPU_CLOCK)
                 .one_cpu(*cpu)
                 .any_pid()
-                .sample_frequency(16384)
+                .sample_frequency(15000)
                 .build()?;
 
             counter.enable()?;
