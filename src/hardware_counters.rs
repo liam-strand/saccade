@@ -48,18 +48,7 @@ impl HardwareCounters {
         let bpf_map = &self.bpf_maps[slot_idx];
         let event = self.event_registry.get_event(event_id);
 
-        skel.maps.bss_data.as_mut().unwrap().tracking = false;
-
-        while skel
-            .maps
-            .data_data
-            .as_ref()
-            .unwrap()
-            .stopped
-            .iter()
-            .take(self.num_cpus)
-            .any(|e| !e)
-        {}
+        self.stop_counters(skel);
 
         self.active_counters[slot_idx]
             .iter_mut()
@@ -96,8 +85,28 @@ impl HardwareCounters {
 
                 *counter = Some(new_counter);
             });
-        skel.maps.bss_data.as_mut().unwrap().tracking = true;
+
+        self.start_counters(skel);
 
         Ok(())
+    }
+
+    fn stop_counters(&self, skel: &mut SamplerSkel<'static>) {
+        skel.maps.bss_data.as_mut().unwrap().tracking = false;
+
+        while skel
+            .maps
+            .data_data
+            .as_ref()
+            .unwrap()
+            .stopped
+            .iter()
+            .take(self.num_cpus)
+            .any(|e| !e)
+        {}
+    }
+
+    fn start_counters(&self, skel: &mut SamplerSkel<'static>) {
+        skel.maps.bss_data.as_mut().unwrap().tracking = true;
     }
 }
