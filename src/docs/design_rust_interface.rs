@@ -10,8 +10,10 @@
 //! pub struct Oculomotor {
 //!     skel: SamplerSkel<'static>,
 //!     ringbuf: RingBuffer<'static>,
+//!     scheduler: Box<dyn Scheduler>,
+//!     active_set: Vec<EventId>,      // currently scheduled events
 //!     hw_counters: HardwareCounters,
-//!     // ...
+//!     // timer_links / timer_events kept alive for Drop
 //! }
 //! ```
 //!
@@ -46,15 +48,17 @@
 //! The `HardwareCounters` struct manages the `perf_event` file descriptors and BPF map updates.
 //!
 //! ### The `update_slot` method
-//! When the `Scheduler` requests a new event for a slot:
+//! When `Oculomotor` requests a new event for a slot:
 //!
-//! 1.  **Create**: Open new `perf_event` FDs for *each* CPU for the requested event.
-//! 2.  **Map Update**:
-//!     *   We have separate BPF maps (`counter0`, `counter1`, etc.), each sized `MAX_CPUS`.
-//!     *   For each CPU `c` and slot `i`:
-//!         *   Calculate index: `c`.
-//!         *   Update the specific map `bpf_maps[i]` at index `c` with the FD for that CPU.
-//!         *   **Note**: This update must be performed with thread affinity set to the target CPU to ensure correct `perf_event` association in the kernel.
+//! 1.  **World-stop**: Set `tracking = false` in BPF globals; spin until all
+//!     CPUs set their `stopped[cpu]` flag.
+//! 2.  **Disable**: Call `disable()` on the old `perf_event` FD for the slot
+//!     on each CPU (if one exists).
+//! 3.  **Create & Enable**: Open a new `perf_event` FD per CPU for the
+//!     requested event and immediately call `enable()`.
+//! 4.  **Map Update**: For each CPU `c` and slot `i`, update BPF map
+//!     `bpf_maps[i]` at key `c` with the new FD.
+//! 5.  **Resume**: Set `tracking = true` in BPF globals.
 //!
 //! ## 4. Data Ingestion
 //!
@@ -62,7 +66,7 @@
 //! impl Oculomotor {
 //!     pub fn poll(&self) -> Result<(), Box<dyn std::error::Error>> {
 //!         // Polls the ring buffer.
-//!         self.ringbuf.poll(Duration::from_millis(1))?;
+//!         self.ringbuf.poll(Duration::from_millis(10))?;
 //!         Ok(())
 //!     }
 //! }
@@ -70,11 +74,12 @@
 //!
 //! ## Summary of Flow
 //!
-//! 1.  **User**: `saccade run --target-pid 123`
-//! 2.  **Main**: `Oculomotor::new(123)` -> Loads BPF.
+//! 1.  **User**: `saccade run -- <target> [args...]`
+//! 2.  **Main**: Spawns the target process under ptrace, then calls
+//!     `Oculomotor::new(pid, ...)` which loads and attaches the BPF programs.
 //! 3.  **Main Loop**:
 //!     *   `oculomotor.step()`:
-//!         *   `poll()` -> Consumes samples from ringbuf.
+//!         *   `poll()` -> Consumes samples from ringbuf, forwards to logger.
 //!         *   `scheduler.next_step()` -> Returns `ScheduleDecision`.
-//!         *   `oculomotor.update_counters(&decision)` -> Updates hardware counters via `HardwareCounters`.
+//!         *   `oculomotor.update_counters(&decision)` -> Updates hardware counters via `HardwareCounters` for any slots whose event changed.
 //!
