@@ -5,6 +5,10 @@ use std::path::PathBuf;
 #[command(name = "saccade")]
 #[command(about = "Saccade Performance Tool", long_about = None)]
 pub struct Cli {
+    /// Enable verbose debug output
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

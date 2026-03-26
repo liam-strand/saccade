@@ -74,7 +74,7 @@ impl Oculomotor {
         let logger = Logger::new(output_path, 256_000)?;
         let sender = logger.clone_sender().expect("Failed to get logger sender");
 
-        eprintln!("Oculomotor attached to PID {}", target_pid);
+        tracing::debug!("Oculomotor attached to PID {}", target_pid);
 
         let mut ringbuf_builder = RingBufferBuilder::new();
         ringbuf_builder.add(&skel.maps.ringbuf, move |data| {
@@ -88,7 +88,7 @@ impl Oculomotor {
         let num_cpus = std::thread::available_parallelism()?.get();
         let cpus: Vec<usize> = (0..num_cpus).collect();
 
-        eprintln!("Oculomotor has {} CPUs", num_cpus);
+        tracing::debug!("Oculomotor has {} CPUs", num_cpus);
 
         let mut timer_links = Vec::new();
         let mut timer_events = Vec::new();
@@ -110,11 +110,11 @@ impl Oculomotor {
             timer_events.push(counter);
         }
 
-        eprintln!("Oculomotor has {} timer events", timer_events.len());
+        tracing::debug!("Oculomotor has {} timer events", timer_events.len());
 
         let hw_counters = HardwareCounters::new(cpus.len(), registry, &mut skel);
 
-        eprintln!("Hardware counters initialized");
+        tracing::debug!("Hardware counters initialized");
 
         Ok(Self {
             skel,

@@ -13,17 +13,29 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+use tracing::debug;
 
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 
+    let level = if cli.verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .without_time()
+        .init();
+
     match cli.command {
         Commands::Generate { output } => {
-            println!("Generating event library to {:?}", output);
+            tracing::info!("Generating event library to {:?}", output);
             let lib = EventLibrary::from_bytes(&Perf::list()).unwrap();
             let buf = File::create(output)?;
             serde_json::to_writer_pretty(buf, &lib)?;
-            println!("Successfully generated event library.");
+            tracing::info!("Successfully generated event library.");
         }
         Commands::Run {
             library,
@@ -32,20 +44,20 @@ fn main() -> std::io::Result<()> {
         } => {
             let lib = match library {
                 Some(path) => {
-                    println!("Loading event library from {:?}", path);
+                    debug!("Loading event library from {:?}", path);
                     let file = File::open(path)?;
                     let reader = BufReader::new(file);
                     serde_json::from_reader(reader)?
                 }
                 None => {
-                    println!("Generating event library on the fly...");
+                    debug!("Generating event library on the fly...");
                     EventLibrary::from_bytes(&Perf::list()).unwrap()
                 }
             };
-            println!("Loaded {} events.", lib.events.len());
-            println!("Target program args: {:?}", target);
+            debug!("Loaded {} events.", lib.events.len());
+            debug!("Target program args: {:?}", target);
 
-            eprintln!("Parent process PID: {}", std::process::id());
+            debug!("Parent process PID: {}", std::process::id());
             let mut child = unsafe {
                 Command::new(target[0].clone())
                     .args(&target[1..])
@@ -53,7 +65,7 @@ fn main() -> std::io::Result<()> {
                     .spawn()
                     .expect("Failed to spawn child process")
             };
-            eprintln!("Child process spawned.");
+            debug!("Child process spawned.");
 
             let pid = child.id();
 
@@ -61,7 +73,7 @@ fn main() -> std::io::Result<()> {
             syscalls::wait_for_exec(pid)?;
 
             let pid = child.id();
-            println!("Oculomotor starting at {}", syscalls::gettid().unwrap());
+            debug!("Oculomotor starting at {}", syscalls::gettid().unwrap());
             let registry = EventRegistry::new(lib);
             let mut scheduler = RandomScheduler::default();
             scheduler.init(registry.get_event_ids());
@@ -73,7 +85,7 @@ fn main() -> std::io::Result<()> {
             )
             .unwrap();
 
-            eprintln!("Oculomotor is ready.");
+            debug!("Oculomotor is ready.");
 
             // Resume the child process: PTRACE_DETACH
             syscalls::ptrace_detach(pid)?;
@@ -91,7 +103,7 @@ fn main() -> std::io::Result<()> {
                 thread::sleep(quantum);
                 loops += 1;
             }
-            eprintln!("Child process exited after {} loops.", loops);
+            debug!("Child process exited after {} loops.", loops);
 
             child.wait().unwrap();
         }
