@@ -1,5 +1,6 @@
 use crate::event_registry::{EventId, EventRegistry};
 use crate::scheduler::{ScheduleDecision, Scheduler};
+use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
 
 pub struct TestScheduler {
@@ -41,7 +42,7 @@ impl Scheduler for TestScheduler {
         // No-op, we used the registry in new()
     }
 
-    fn next_step(&mut self) -> ScheduleDecision {
+    fn next_step(&mut self, _state: &VirtualCounterState) -> ScheduleDecision {
         let chunk_size = 4;
         let len = self.events.len();
 
