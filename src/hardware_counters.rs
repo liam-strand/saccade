@@ -69,7 +69,6 @@ impl HardwareCounters {
             });
 
         skel.maps.bss_data.as_mut().unwrap().active_counter_ids[slot_idx] = event_id;
-        skel.maps.bss_data.as_mut().unwrap().prev_counter_values[slot_idx] = [0; MAX_COUNTERS];
 
         self.active_counters[slot_idx]
             .iter_mut()

@@ -10,7 +10,7 @@ volatile __u32 target_pid = 0;
 volatile __u32 active_counter_ids[MAX_COUNTERS] = {0};
 volatile __u64 prev_counter_values[MAX_CPUS][MAX_COUNTERS] = {0};
 volatile bool tracking = false;
-volatile bool stopped[MAX_CPUS] = {true};
+volatile bool stopped[MAX_CPUS] = {[0 ... MAX_CPUS - 1] = true};
 
 // Ring Buffer for samples
 struct {
@@ -58,13 +58,13 @@ struct task_struct___pre_5_14 {
     long int state;
 };
 
-static inline long get_task_state(struct task_struct *t) {
+static __always_inline long get_task_state(struct task_struct *t) {
     if (bpf_core_field_exists(t->__state))
         return t->__state;
     return ((struct task_struct___pre_5_14 *)t)->state;
 }
 
-static inline void *get_counter(int i) {
+static __always_inline void *get_counter(int i) {
     switch (i) {
         case 0:
             return &counter0;
@@ -79,7 +79,7 @@ static inline void *get_counter(int i) {
     }
 }
 
-static inline void set_stopped(u64 idx, bool v) {
+static __always_inline void set_stopped(u64 idx, bool v) {
     if (idx < MAX_CPUS) {
         stopped[idx] = v;
     }
