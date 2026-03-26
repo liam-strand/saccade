@@ -85,6 +85,33 @@ static inline void set_stopped(u64 idx, bool v) {
     }
 }
 
+static __always_inline bool
+handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
+    if (cpu_id >= MAX_CPUS || !stopped[cpu_id]) {
+        return false;
+    }
+    set_stopped(cpu_id, false);
+
+    // Snapshot counter baselines so next sample excludes dead-time drift
+    #pragma unroll
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        struct bpf_perf_event_value buf;
+        long err = bpf_perf_event_read_value(get_counter(i), cpu_id, &buf, sizeof(buf));
+        if (!err) {
+            prev_counter_values[cpu_id][i] = buf.counter;
+        } else {
+            prev_counter_values[cpu_id][i] = 0;
+        }
+    }
+
+    // Reset start_map timestamp to exclude dead time
+    u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
+    if (tsp) {
+        bpf_map_update_elem(&start_map, &pid, &now, BPF_EXIST);
+    }
+    return true;
+}
+
 static __always_inline void
 record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     struct saccade_sample *s;
@@ -140,6 +167,19 @@ int handle__sched_switch(u64 *ctx) {
         set_stopped(cpu_id, true);
         return 0;
     }
+
+    if (handle_resume(cpu_id, prev_pid, now)) {
+        // Resumed from stopped — baselines reset, skip flush.
+        // prev is being switched out: remove its start_map entry
+        // (handle_resume may have reset its timestamp, but prev is
+        // no longer on-CPU so leaving it would produce a bogus sample).
+        bpf_map_delete_elem(&start_map, &prev_pid);
+        // Still handle switch-in for next.
+        if (target_pid != 0 && next_pid != target_pid)
+            return 0;
+        bpf_map_update_elem(&start_map, &next_pid, &now, BPF_ANY);
+        return 0;
+    }
     set_stopped(cpu_id, false);
 
     // Handle Switch-OUT (prev)
@@ -164,18 +204,22 @@ int handle__sched_switch(u64 *ctx) {
 SEC("perf_event")
 int handle_timer(struct bpf_perf_event_data *ctx) {
     u64 cpu_id = bpf_get_smp_processor_id();
+    u64 now = bpf_ktime_get_ns();
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u32 tgid = bpf_get_current_pid_tgid();
 
     if (!tracking) {
         set_stopped(cpu_id, true);
         return 0;
     }
+
+    if (handle_resume(cpu_id, pid, now)) {
+        return 0;  // Resumed — baseline reset, no sample
+    }
     set_stopped(cpu_id, false);
 
     // This hook fires periodically (e.g. 100Hz) on each CPU.
     // Check if the CURRENT task is being tracked.
-    u64 now = bpf_ktime_get_ns();
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    u32 tgid = bpf_get_current_pid_tgid();
 
     u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
     if (!tsp) {
