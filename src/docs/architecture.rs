@@ -6,8 +6,8 @@
 //!
 //! | LAYER                | COMPONENT  | TECHNOLOGY       | //! RESPONSIBILITY                                                                                     |
 //! | :------------------- | :--------- | :--------------- | //! :------------------------------------------------------------------------------------------------- |
-//! | **L4: Intelligence** | Scheduler  | ONNX / Torch     | Policy Layer. Determines counter selection based on information //! gain.                              |
-//! | **L3: Control**      | Oculomotor | Rust + libbpf-rs | User Agent. Manages FD lifecycle ("Hot Pool"), aggregates samples, executes policy, //! handles ioctl. |
+//! | **L4: Intelligence** | Scheduler  | Rust (pluggable trait) | Policy Layer. Determines counter selection based on pluggable policy. ML-steered scheduling is a planned future direction (technology TBD). |
+//! | **L3: Control**      | Oculomotor | Rust + libbpf-rs | User Agent. Manages FD lifecycle (on-demand, world-stop), aggregates samples, executes policy, handles ioctl. |
 //! | **L2: Data**         | Retina     | eBPF (C)         | Sampling Layer. Implements Gated Sampling via sched_switch and //! perf_event.                         |
 //! | **L1: Hardware**     | PMU        | Linux Perf       | Hardware Layer. Physical counters managed via standard //! perf_event_open.                            |
 //!
@@ -35,7 +35,7 @@
 //!      - Effect: Captures execution tail; disables timer overhead.
 //!
 //! 2. Timer Hook (`perf_event`)
-//!    * Frequency: High (e.g., 50–100Hz).
+//!    * Frequency: High (15,000 Hz software CPU_CLOCK, one timer per CPU).
 //!    * Action: Check Start Map.
 //!      - If not present: Exit immediately.
 //!      - If present: Record Intermediate Sample, update timestamp.
@@ -66,26 +66,33 @@
 //!
 //! ## RESOURCE MANAGEMENT (USERSPACE)
 //!
-//! Hardware counter reconfiguration must occur within microseconds. The system
-//! avoids close/open syscalls during runtime using a "Hot Pool" strategy.
+//! Hardware counter slots are reconfigured on demand via a world-stop mechanism
+//! that briefly pauses eBPF sampling to ensure consistent counter state.
 //!
 //! ### Implementation Specifications
 //!
 //! 1. Initialization:
-//!    * Open perf_event_open file descriptors (FDs) for ALL cataloged events
-//!      at startup.
-//!    * Initial state: disabled=1, pinned=0.
+//!    * `HardwareCounters` is created with empty slots (no FDs pre-allocated).
+//!    * Counters are opened on demand when `update_slot` is first called.
 //!
 //! 2. Logical Groups:
-//!    * The Scheduler maintains "Active Groups" as lists of FDs, not
-//!      kernel-side Perf Groups.
+//!    * The Scheduler returns `ScheduleDecision` containing a `Vec<EventId>`.
+//!    * `Oculomotor` compares the new set against the active set and calls
+//!      `update_slot` only for slots whose event changed.
+//!    * `HardwareCounters` manages all perf event FDs; the Scheduler never
+//!      sees or touches FDs directly.
 //!
-//! 3. Actuation Routine:
+//! 3. Actuation Routine (world-stop):
 //!    * To switch active sets:
-//!      1. Disable and close existing `perf_event` file descriptors for the slot.
-//!      2. Open new `perf_event` FDs for each CPU.
-//!      3. `bpf_map_update_elem` on the specific `PERF_EVENT_ARRAY` for the slot (e.g., `counter0`) using `cpu` indexing.
-//!      4. `ioctl(ENABLE)` on new FDs.
+//!      1. Set `tracking = false` in BPF global state, signalling eBPF hooks to
+//!         stop sampling and set their per-CPU `stopped[cpu]` flag.
+//!      2. Spin until all active CPUs report `stopped[cpu] == true`.
+//!      3. Disable the old `perf_event` FD for the slot on each CPU.
+//!      4. Open a new `perf_event` FD per CPU for the requested event and
+//!         immediately enable it.
+//!      5. `bpf_map_update_elem` on the slot's `PERF_EVENT_ARRAY` (e.g.,
+//!         `counter0`) keyed by `cpu_id`.
+//!      6. Set `tracking = true` to resume sampling.
 //!
 //! ### SCHEDULER INTERFACE
 //!
@@ -94,17 +101,25 @@
 //!
 //! #### Trait Definition
 //!
-//! The scheduler must accept an Observation (aggregated rates) and return a
-//! ScheduleDecision.
+//! ```ignore
+//! pub trait Scheduler {
+//!     fn init(&mut self, all_events: Vec<EventId>);
+//!     fn next_step(&mut self) -> ScheduleDecision;
+//! }
+//! ```
+//!
+//! `next_step` currently takes no observation input; the scheduler is
+//! stateless with respect to prior samples. Passing prior-quantum samples
+//! into `next_step` is planned future work (required for any intelligent
+//! scheduling policy).
 //!
 //! * Round-Robin Scheduler:
 //!   - Logic: Deterministic rotation through defined groups.
 //!   - Use Case: Baseline profiling, data collection for training.
 //!
-//! * RL Scheduler:
-//!   - Logic: ONNX model inference.
-//!   - Input: Vectorized event rates + phase embedding.
-//!   - Output: Optimal counter set ID.
+//! * Random Scheduler:
+//!   - Logic: Picks 4 events at random each step.
+//!   - Use Case: Comparison baseline.
 //!
 //! ## DATA HANDLING
 //!
@@ -113,11 +128,17 @@
 //! The mapping between logical ML features and hardware config values must be
 //! decoupled.
 //! ```json
-//! [
-//!   { "id": 0, "name": "instructions", "config": "0x0001" },
-//!   { "id": 1, "name": "l3_miss_skylake", "config": "0x0151" }
-//! ]
+//! {
+//!   "events": [
+//!     { "name": "instructions", "desc": "Retired instructions", "event": 192, "umask": 0 },
+//!     { "name": "l3_miss_skylake", "desc": "L3 cache miss", "event": 46, "umask": 65 }
+//!   ]
+//! }
 //! ```
+//!
+//! The `event` and `umask` fields are raw `u64` values passed directly to
+//! `perf_event_open`. `EventId` is a positional index into this list, assigned
+//! at load time by `EventRegistry`.
 //!
 //! ### Rate Calculation (Delta Math)
 //!
