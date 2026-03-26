@@ -9,6 +9,8 @@ volatile __u64 min_sample_interval_ns = 1000000; // 1ms default
 volatile __u32 target_pid = 0;
 volatile __u32 active_counter_ids[MAX_COUNTERS] = {0};
 volatile __u64 prev_counter_values[MAX_CPUS][MAX_COUNTERS] = {0};
+volatile bool tracking = false;
+volatile bool stopped[MAX_CPUS] = {true};
 
 // Ring Buffer for samples
 struct {
@@ -77,6 +79,12 @@ static inline void *get_counter(int i) {
     }
 }
 
+static inline void set_stopped(u64 idx, bool v) {
+    if (idx < MAX_CPUS) {
+        stopped[idx] = v;
+    }
+}
+
 static __always_inline void
 record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     struct saccade_sample *s;
@@ -106,6 +114,7 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
         long err = bpf_perf_event_read_value(get_counter(i), idx, &buf, sizeof(buf));
         if (err) {
             s->values[i] = 18000000000000000000 - err;
+            prev_counter_values[idx][i] = 0;
         } else {
             s->values[i] = buf.counter - prev_counter_values[idx][i];
             prev_counter_values[idx][i] = buf.counter;
@@ -124,7 +133,14 @@ int handle__sched_switch(u64 *ctx) {
     u32 prev_pid = prev->pid;
     u32 next_pid = next->pid;
     u64 now = bpf_ktime_get_ns();
+    u64 cpu_id = bpf_get_smp_processor_id();
     u64 *tsp;
+
+    if (!tracking) {
+        set_stopped(cpu_id, true);
+        return 0;
+    }
+    set_stopped(cpu_id, false);
 
     // Handle Switch-OUT (prev)
     tsp = bpf_map_lookup_elem(&start_map, &prev_pid);
@@ -147,6 +163,14 @@ int handle__sched_switch(u64 *ctx) {
 // Hook: Timer (perf_event) for intermediate sampling
 SEC("perf_event")
 int handle_timer(struct bpf_perf_event_data *ctx) {
+    u64 cpu_id = bpf_get_smp_processor_id();
+
+    if (!tracking) {
+        set_stopped(cpu_id, true);
+        return 0;
+    }
+    set_stopped(cpu_id, false);
+
     // This hook fires periodically (e.g. 100Hz) on each CPU.
     // Check if the CURRENT task is being tracked.
     u64 now = bpf_ktime_get_ns();

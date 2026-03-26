@@ -66,7 +66,7 @@ impl Oculomotor {
             .data_data
             .as_mut()
             .expect("Failed to set min sample interval")
-            .min_sample_interval_ns = 1_000_000;
+            .min_sample_interval_ns = 100000;
 
         let mut skel = open_skel.load()?;
         skel.attach()?;
@@ -151,28 +151,16 @@ impl Oculomotor {
         decision: &ScheduleDecision,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let new_set = &decision.active_events;
-        let (active_counter_ids, prev_counter_values) = self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .map(|d| (&mut d.active_counter_ids, &mut d.prev_counter_values))
-            .unwrap();
 
         if self.active_set.is_empty() {
             for (i, &id) in new_set.iter().enumerate() {
-                self.hw_counters
-                    .update_slot(active_counter_ids, prev_counter_values, i, id)?;
+                self.hw_counters.update_slot(&mut self.skel, i, id)?;
             }
         } else {
             for (i, &old_id) in self.active_set.iter().enumerate() {
                 if old_id != new_set[i] {
-                    self.hw_counters.update_slot(
-                        active_counter_ids,
-                        prev_counter_values,
-                        i,
-                        new_set[i],
-                    )?;
+                    self.hw_counters
+                        .update_slot(&mut self.skel, i, new_set[i])?;
                 }
             }
         }
