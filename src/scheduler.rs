@@ -4,6 +4,7 @@ pub mod round_robin;
 pub mod test;
 
 use crate::event_registry::EventId;
+use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
 
 /// The main Policy interface
@@ -13,7 +14,8 @@ pub trait Scheduler {
     fn init(&mut self, all_events: Vec<EventId>);
 
     /// Calculate the next set of events to monitor.
-    fn next_step(&mut self) -> ScheduleDecision;
+    /// `state` provides rate estimates and uncertainty for all counters.
+    fn next_step(&mut self, state: &VirtualCounterState) -> ScheduleDecision;
 }
 
 /// Output from the scheduler: what should we do next?
