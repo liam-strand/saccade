@@ -2,6 +2,7 @@ use rand::prelude::*;
 
 use crate::event_registry::EventId;
 use crate::scheduler::{ScheduleDecision, Scheduler};
+use crate::virtual_counter::VirtualCounterState;
 
 pub struct RandomScheduler {
     events: Vec<EventId>,
@@ -27,7 +28,7 @@ impl Scheduler for RandomScheduler {
     fn init(&mut self, all_events: Vec<EventId>) {
         self.events = all_events;
     }
-    fn next_step(&mut self) -> ScheduleDecision {
+    fn next_step(&mut self, _state: &VirtualCounterState) -> ScheduleDecision {
         ScheduleDecision {
             active_events: self
                 .events
