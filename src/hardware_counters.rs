@@ -2,7 +2,6 @@ use crate::event_registry::EventRegistry;
 use crate::sampler::SamplerSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle};
 use perf_event::{Builder, Counter, events};
-use rayon::prelude::*;
 use std::os::fd::AsRawFd;
 
 pub const MAX_COUNTERS: usize = 4;
@@ -42,44 +41,63 @@ impl HardwareCounters {
 
     pub fn update_slot(
         &mut self,
-        active_counter_ids: &mut [u32; MAX_COUNTERS],
-        prev_counter_values: &mut [[u64; MAX_COUNTERS]; MAX_CPUS],
+        skel: &mut SamplerSkel<'static>,
         slot_idx: usize,
         event_id: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bpf_map = &self.bpf_maps[slot_idx];
         let event = self.event_registry.get_event(event_id);
 
-        for cpu in 0..self.num_cpus {
-            self.active_counters[slot_idx][cpu]
-                .take()
-                .map(|mut c| c.disable());
-        }
+        skel.maps.bss_data.as_mut().unwrap().tracking = false;
 
-        active_counter_ids[slot_idx] = event_id;
-        prev_counter_values[slot_idx] = [0; MAX_COUNTERS];
+        while skel
+            .maps
+            .data_data
+            .as_ref()
+            .unwrap()
+            .stopped
+            .iter()
+            .take(self.num_cpus)
+            .any(|e| !e)
+        {}
 
-        for cpu in 0..self.num_cpus {
-            let mut new_counter = Builder::new(events::Raw::new(event.event).config1(event.umask))
-                .one_cpu(cpu)
-                .any_pid()
-                .build()
-                .expect("Failed to build counter");
+        self.active_counters[slot_idx]
+            .iter_mut()
+            .take(self.num_cpus)
+            .for_each(|slot| {
+                slot.as_mut().map(|c| c.disable());
+            });
 
-            new_counter.enable().unwrap();
+        skel.maps.bss_data.as_mut().unwrap().active_counter_ids[slot_idx] = event_id;
+        skel.maps.bss_data.as_mut().unwrap().prev_counter_values[slot_idx] = [0; MAX_COUNTERS];
 
-            let new_fd = new_counter.as_raw_fd();
+        self.active_counters[slot_idx]
+            .iter_mut()
+            .take(self.num_cpus)
+            .enumerate()
+            .for_each(|(cpu, counter)| {
+                let mut new_counter =
+                    Builder::new(events::Raw::new(event.event).config1(event.umask))
+                        .one_cpu(cpu)
+                        .any_pid()
+                        .build()
+                        .expect("Failed to build counter");
 
-            bpf_map
-                .update(
-                    &(cpu as u32).to_ne_bytes(),
-                    &new_fd.to_ne_bytes(),
-                    MapFlags::ANY,
-                )
-                .expect("Failed to update map");
+                new_counter.enable().unwrap();
 
-            self.active_counters[slot_idx][cpu] = Some(new_counter);
-        }
+                let new_fd = new_counter.as_raw_fd();
+
+                bpf_map
+                    .update(
+                        &(cpu as u32).to_ne_bytes(),
+                        &new_fd.to_ne_bytes(),
+                        MapFlags::ANY,
+                    )
+                    .expect("Failed to update map");
+
+                *counter = Some(new_counter);
+            });
+        skel.maps.bss_data.as_mut().unwrap().tracking = true;
 
         Ok(())
     }
