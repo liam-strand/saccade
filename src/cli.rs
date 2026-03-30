@@ -34,4 +34,30 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         target: Vec<String>,
     },
+    /// Run simulation with golden (synthetic) counter rates
+    Simulate {
+        /// Event library JSON file (required, no perf fallback)
+        #[arg(short, long)]
+        library: PathBuf,
+
+        /// Golden rates JSON file
+        #[arg(short, long)]
+        golden: PathBuf,
+
+        /// Scheduler quantum in nanoseconds
+        #[arg(short, long, default_value_t = 1000000)]
+        quantum: u64,
+
+        /// Number of quanta to simulate
+        #[arg(short, long, default_value_t = 1000)]
+        steps: u64,
+
+        /// Output CSV file (optional)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Scheduler to use: random, round_robin
+        #[arg(long, default_value = "random")]
+        scheduler: String,
+    },
 }

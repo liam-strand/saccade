@@ -18,6 +18,7 @@ serde_json = "1.0.149"
 strum = { version = "0.27.2", features = ["strum_macros"] }
 strum_macros = "0.27.2"
 syscalls = { version = "0.7.0", features = ["x86", "x86_64"] }
+rand_distr = "0.5"
 
 [build-dependencies]
 libbpf-cargo = "0.26.0"
