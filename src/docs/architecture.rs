@@ -7,7 +7,7 @@
 //! | LAYER                | COMPONENT  | TECHNOLOGY       | //! RESPONSIBILITY                                                                                     |
 //! | :------------------- | :--------- | :--------------- | //! :------------------------------------------------------------------------------------------------- |
 //! | **L4: Intelligence** | Scheduler  | Rust (pluggable trait) | Policy Layer. Determines counter selection based on pluggable policy. ML-steered scheduling is a planned future direction (technology TBD). |
-//! | **L3: Control**      | Oculomotor | Rust + libbpf-rs | User Agent. Manages FD lifecycle (on-demand, world-stop), aggregates samples, executes policy, handles ioctl. |
+//! | **L3: Control**      | Oculomotor | Rust + libbpf-rs | User Agent. Backend-agnostic orchestrator: aggregates observations, updates VirtualCounterState, executes scheduler policy. Delegates hardware details to a pluggable `CounterBackend` (`HardwareBackend` for real eBPF/perf, `VirtualBackend` for simulation). |
 //! | **L2: Data**         | Retina     | eBPF (C)         | Sampling Layer. Implements Gated Sampling via sched_switch and //! perf_event.                         |
 //! | **L1: Hardware**     | PMU        | Linux Perf       | Hardware Layer. Physical counters managed via standard //! perf_event_open.                            |
 //!
@@ -77,7 +77,8 @@
 //!
 //! 2. Logical Groups:
 //!    * The Scheduler returns `ScheduleDecision` containing a `Vec<EventId>`.
-//!    * `Oculomotor` compares the new set against the active set and calls
+//!    * `Oculomotor` passes the old and new active sets to
+//!      `backend.update_counters()`. `HardwareBackend` diffs the sets and calls
 //!      `update_slot` only for slots whose event changed.
 //!    * `HardwareCounters` manages all perf event FDs; the Scheduler never
 //!      sees or touches FDs directly.
@@ -104,14 +105,14 @@
 //! ```ignore
 //! pub trait Scheduler {
 //!     fn init(&mut self, all_events: Vec<EventId>);
-//!     fn next_step(&mut self) -> ScheduleDecision;
+//!     fn next_step(&mut self, state: &VirtualCounterState) -> ScheduleDecision;
 //! }
 //! ```
 //!
-//! `next_step` currently takes no observation input; the scheduler is
-//! stateless with respect to prior samples. Passing prior-quantum samples
-//! into `next_step` is planned future work (required for any intelligent
-//! scheduling policy).
+//! `next_step` receives the current `VirtualCounterState`, which provides
+//! per-counter rate estimates (EMA) and uncertainty values. This allows
+//! intelligent schedulers to prioritize counters with high uncertainty or
+//! interesting rate changes.
 //!
 //! * Round-Robin Scheduler:
 //!   - Logic: Deterministic rotation through defined groups.

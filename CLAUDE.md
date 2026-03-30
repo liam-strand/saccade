@@ -10,7 +10,7 @@ Four layers, from low-level to high-level:
 
 1. **Hardware (PMU)** — CPU performance monitoring units provide raw counter values
 2. **eBPF (Retina)** — Kernel-side C code (`src/bpf/sampler.bpf.c`) hooks `sched_switch` and `perf_event` timer to collect samples into a ring buffer
-3. **Rust (Oculomotor)** — Userspace orchestrator manages eBPF lifecycle, hardware counter FDs, and ring buffer polling
+3. **Rust (Oculomotor)** — Userspace orchestrator drives the VCS + scheduler loop via a pluggable `CounterBackend` trait (`HardwareBackend` for real eBPF/perf, `VirtualBackend` for simulation)
 4. **Scheduler** — Trait-based policy deciding which 4 counters to activate each quantum
 
 ## Languages
@@ -30,16 +30,21 @@ cargo run -- run -- <target> [args...]  # profile a target program
 
 The `build.rs` script uses `libbpf-cargo` SkeletonBuilder to compile `src/bpf/sampler.bpf.c` into `src/bpf/sampler.skel.rs` (gitignored, auto-generated).
 
-The `run` subcommand requires **sudo** because eBPF operations need root privileges; the provided `.cargo/config.toml` configures `cargo run` to use **sudo** by default for convenience, even for subcommands like `generate` that do not directly use eBPF.
+The `run` subcommand requires **sudo** because eBPF operations need root privileges. Use `sudo cargo run -- run ...` or `sudo ./target/debug/saccade run ...`.
 
 ## CLI
 
-Two subcommands (defined in `src/cli.rs`):
+Three subcommands (defined in `src/cli.rs`):
 
 - `generate <output>` — runs `perf list --details`, parses output with nom, writes JSON event library
-- `run [--library <path>] [--quantum <ns>] -- <target> [args...]` — profiles a target program
+- `run [--library <path>] [--quantum <ns>] -- <target> [args...]` — profiles a target program (requires sudo)
   - `--library`: path to pre-generated event library JSON (otherwise generates on the fly)
   - `--quantum`: scheduler quantum in nanoseconds (default: 1,000,000 = 1ms)
+- `simulate --library <path> --golden <path> [--steps <n>] [--quantum <ns>] [--output <csv>] [--scheduler <name>]` — run with synthetic golden counter rates (no sudo required)
+  - `--library`: event library JSON (required)
+  - `--golden`: golden rates JSON mapping event names to rates (events/ns), with optional `noise_stddev` and `seed`
+  - `--steps`: number of quanta to simulate (default: 1000)
+  - `--scheduler`: `random` or `round_robin` (default: `random`)
 
 ## Source Structure
 
@@ -48,7 +53,10 @@ src/
 ├── main.rs              # Entry point: CLI parsing, process spawning, main loop
 ├── lib.rs               # Module declarations
 ├── cli.rs               # Clap command definitions
-├── oculomotor.rs        # eBPF lifecycle, ring buffer polling, counter updates
+├── counter_backend.rs   # CounterBackend trait + Observation struct
+├── hardware_backend.rs  # Real eBPF + perf counter backend (implements CounterBackend)
+├── virtual_backend.rs   # Synthetic golden-rate backend for simulation (implements CounterBackend)
+├── oculomotor.rs        # Backend-agnostic orchestrator: VCS updates + scheduler loop
 ├── hardware_counters.rs # Perf FD pool: open/enable/disable per-CPU counters
 ├── event_library.rs     # Nom parser for `perf list` output → Event structs
 ├── event_registry.rs    # EventId ↔ Event mapping
@@ -89,7 +97,7 @@ cargo clippy         # lint
 cargo fmt            # format
 ```
 
-Note: `.cargo/config.toml` sets `runner = "sudo -E"`, so `cargo test` will execute test binaries under sudo. This may trigger a sudo prompt.
+Note: `cargo test` runs without sudo. Integration binaries in `src/bin/` require sudo.
 
 Unit tests are in `src/event_library.rs` (`#[cfg(test)]` module) testing the nom parser against sample `perf list` output.
 
@@ -98,6 +106,7 @@ Example/integration binaries are in `src/bin/` (`test_raw.rs`, `test_multicpu.rs
 ## Key Design Patterns
 
 - **Scheduler trait** (`src/scheduler.rs`): `init(events)` + `next_step() -> ScheduleDecision`. Decision contains up to 4 `EventId`s and an optional duration.
+- **CounterBackend trait** (`src/counter_backend.rs`): `poll_observations()` + `update_counters()`. `HardwareBackend` wraps eBPF + perf; `VirtualBackend` generates synthetic samples from golden rates.
 - **Hot Pool** (`src/hardware_counters.rs`): Hardware counter FDs are opened per-slot-per-CPU. When the scheduler changes an event in a slot, only that slot's counters are replaced (disable old, build new, enable, update BPF map).
 - **eBPF control channel**: Global variables in BSS/data sections (`target_pid`, `min_sample_interval_ns`, `active_counter_ids`) written from Rust via `skel.maps.bss_data` / `skel.maps.data_data`.
 - **Gated sampling**: eBPF only records samples for tasks tracked in `start_map`. Context switch-in adds entry, switch-out flushes and removes. Timer hook emits intermediate samples if enough time has elapsed.
