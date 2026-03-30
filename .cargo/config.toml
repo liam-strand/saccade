@@ -1,2 +1,2 @@
-[target.'cfg(target_os = "linux")']
-runner = "sudo -E"
+# Note: `cargo run -- run` requires sudo for eBPF operations.
+# Use `sudo cargo run -- run ...` or `sudo ./target/debug/saccade run ...`

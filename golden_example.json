@@ -1,0 +1,12 @@
+{
+  "rates": {
+    "bp_l1_btb_correct": 2.5,
+    "bp_l1_tlb_fetch_hit": 1.2,
+    "bp_de_redirect": 0.3,
+    "bp_dyn_ind_pred": 0.8,
+    "bp_l1_tlb_fetch_hit.if1g": 0.1,
+    "bp_l1_tlb_fetch_hit.if2m": 0.4
+  },
+  "noise_stddev": 0.05,
+  "seed": 42
+}
