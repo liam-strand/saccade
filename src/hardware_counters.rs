@@ -1,11 +1,9 @@
+use crate::counter_backend::MAX_COUNTERS;
 use crate::event_registry::EventRegistry;
 use crate::sampler::SamplerSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle};
 use perf_event::{Builder, Counter, events};
 use std::os::fd::AsRawFd;
-
-pub const MAX_COUNTERS: usize = 4;
-pub const MAX_CPUS: usize = 256;
 
 pub struct HardwareCounters {
     num_cpus: usize,

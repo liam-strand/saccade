@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use crate::oculomotor::SaccadeSample;
+use crate::counter_backend::SaccadeSample;
 
 pub struct Logger {
     sender: Option<SyncSender<SaccadeSample>>,
