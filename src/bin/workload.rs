@@ -22,6 +22,10 @@ struct Phase {
 enum PhaseKind {
     CacheThrash { array_size_kb: usize },
     FpHeavy { vector_size: usize },
+    BranchMispredict { array_size: usize },
+    TlbThrash { num_pages: usize },
+    MemStream { buffer_size_mb: usize },
+    IntDiv { divisor_range: usize },
 }
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -78,6 +82,121 @@ fn run_fp_heavy(vector_size: usize, duration: Duration) {
     black_box(sum);
 }
 
+#[inline(never)]
+fn run_branch_mispredict(array_size: usize, duration: Duration) {
+    let mut rng = 0xdeadbeef_u64;
+    let data: Vec<u8> = (0..array_size)
+        .map(|_| xorshift64(&mut rng) as u8)
+        .collect();
+    let deadline = Instant::now() + duration;
+    let mut sum = 0_u64;
+    let mut iter = 0_u64;
+
+    loop {
+        for i in 0..array_size {
+            // Asymmetric branches (add vs mul) prevent cmov conversion
+            if data[i] < 128 {
+                sum = sum.wrapping_add(data[i] as u64);
+            } else {
+                sum = sum.wrapping_mul(3);
+            }
+        }
+        iter += 1;
+        if iter & 0x3FF == 0 && Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    black_box(sum);
+}
+
+#[inline(never)]
+fn run_tlb_thrash(num_pages: usize, duration: Duration) {
+    let total_bytes = num_pages * 4096;
+    let mut data = vec![0u8; total_bytes];
+    // Initialize one byte per page to prevent zero-page deduplication
+    let mut rng = 0xdeadbeef_u64;
+    for i in 0..num_pages {
+        data[i * 4096] = xorshift64(&mut rng) as u8;
+    }
+
+    // Fisher-Yates shuffle for random page access order
+    let mut page_order: Vec<usize> = (0..num_pages).collect();
+    for i in (1..num_pages).rev() {
+        let j = (xorshift64(&mut rng) as usize) % (i + 1);
+        page_order.swap(i, j);
+    }
+
+    let deadline = Instant::now() + duration;
+    let mut sum = 0_u64;
+    let mut iter = 0_u64;
+
+    loop {
+        for &page_idx in &page_order {
+            let offset = page_idx * 4096;
+            sum = sum.wrapping_add(data[offset] as u64);
+            data[offset] = data[offset].wrapping_add(1);
+        }
+        iter += 1;
+        if iter & 0x3FF == 0 && Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    black_box(sum);
+}
+
+#[inline(never)]
+fn run_mem_stream(buffer_size_mb: usize, duration: Duration) {
+    let len = buffer_size_mb * 1024 * 1024 / 8;
+    let mut data: Vec<u64> = (0..len as u64).collect();
+    let deadline = Instant::now() + duration;
+    let mut sum = 0_u64;
+    let mut iter = 0_u64;
+
+    loop {
+        for i in 0..len {
+            sum = sum.wrapping_add(data[i]);
+            data[i] = sum;
+        }
+        iter += 1;
+        // Fewer iterations between time checks since each pass is slow for large buffers
+        if iter & 0x3 == 0 && Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    black_box(sum);
+}
+
+#[inline(never)]
+fn run_int_div(divisor_range: usize, duration: Duration) {
+    let mut rng = 0xdeadbeef_u64;
+    let divisor_count = 1024;
+    let divisors: Vec<u64> = (0..divisor_count)
+        .map(|_| (xorshift64(&mut rng) % divisor_range as u64) + 1)
+        .collect();
+
+    let deadline = Instant::now() + duration;
+    let mut dividend = 0xcafebabe_u64;
+    let mut sum = 0_u64;
+    let mut iter = 0_u64;
+
+    loop {
+        let idx = (iter as usize) % divisor_count;
+        dividend = dividend.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let quotient = dividend / divisors[idx];
+        let remainder = dividend % divisors[idx];
+        sum = sum.wrapping_add(quotient).wrapping_add(remainder);
+        iter += 1;
+        if iter & 0x3FF == 0 && Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    black_box(sum);
+}
+
 fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
     let handles: Vec<_> = (0..threads)
         .map(|_| {
@@ -85,6 +204,10 @@ fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
             thread::spawn(move || match kind {
                 PhaseKind::CacheThrash { array_size_kb } => run_cache_thrash(array_size_kb, duration),
                 PhaseKind::FpHeavy { vector_size } => run_fp_heavy(vector_size, duration),
+                PhaseKind::BranchMispredict { array_size } => run_branch_mispredict(array_size, duration),
+                PhaseKind::TlbThrash { num_pages } => run_tlb_thrash(num_pages, duration),
+                PhaseKind::MemStream { buffer_size_mb } => run_mem_stream(buffer_size_mb, duration),
+                PhaseKind::IntDiv { divisor_range } => run_int_div(divisor_range, duration),
             })
         })
         .collect();
@@ -115,6 +238,26 @@ fn validate(config: &WorkloadConfig) -> Result<(), String> {
                     return Err(format!("phase {i}: vector_size must be > 0"));
                 }
             }
+            PhaseKind::BranchMispredict { array_size } => {
+                if *array_size == 0 {
+                    return Err(format!("phase {i}: array_size must be > 0"));
+                }
+            }
+            PhaseKind::TlbThrash { num_pages } => {
+                if *num_pages == 0 {
+                    return Err(format!("phase {i}: num_pages must be > 0"));
+                }
+            }
+            PhaseKind::MemStream { buffer_size_mb } => {
+                if *buffer_size_mb == 0 {
+                    return Err(format!("phase {i}: buffer_size_mb must be > 0"));
+                }
+            }
+            PhaseKind::IntDiv { divisor_range } => {
+                if *divisor_range == 0 {
+                    return Err(format!("phase {i}: divisor_range must be > 0"));
+                }
+            }
         }
     }
     Ok(())
@@ -124,6 +267,10 @@ fn phase_label(phase: &Phase) -> String {
     let kind_str = match &phase.kind {
         PhaseKind::CacheThrash { array_size_kb } => format!("cache_thrash: array_size_kb={array_size_kb}"),
         PhaseKind::FpHeavy { vector_size } => format!("fp_heavy: vector_size={vector_size}"),
+        PhaseKind::BranchMispredict { array_size } => format!("branch_mispredict: array_size={array_size}"),
+        PhaseKind::TlbThrash { num_pages } => format!("tlb_thrash: num_pages={num_pages}"),
+        PhaseKind::MemStream { buffer_size_mb } => format!("mem_stream: buffer_size_mb={buffer_size_mb}"),
+        PhaseKind::IntDiv { divisor_range } => format!("int_div: divisor_range={divisor_range}"),
     };
     format!("{kind_str}, duration_secs={}, threads={}", phase.duration_secs, phase.threads)
 }
