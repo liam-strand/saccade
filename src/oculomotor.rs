@@ -45,8 +45,17 @@ impl Oculomotor {
         for obs in &observations {
             if obs.total_duration_ns > 0 {
                 let rate = obs.total_count as f64 / obs.total_duration_ns as f64;
-                self.vcs
-                    .measurement_update(obs.event_id, rate, self.last_step_ns + elapsed_ns);
+                let stddev = if obs.num_samples < 2 {
+                    0.0
+                } else {
+                    obs.stddev_rate
+                };
+                self.vcs.measurement_update(
+                    obs.event_id,
+                    rate,
+                    stddev,
+                    self.last_step_ns + elapsed_ns,
+                );
                 observed.push(obs.event_id);
             }
         }

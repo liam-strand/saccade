@@ -109,7 +109,17 @@ impl CounterBackend for HardwareBackend {
     fn poll_observations(&mut self) -> Vec<Observation> {
         let _ = self.ringbuf.poll(Duration::from_millis(10));
 
-        let mut by_event: HashMap<EventId, Observation> = HashMap::new();
+        // Per-event Welford accumulator: (n, mean, M2, min, max, total_count, total_duration_ns)
+        struct Acc {
+            n: u32,
+            mean: f64,
+            m2: f64,
+            min: f64,
+            max: f64,
+            total_count: u64,
+            total_duration_ns: u64,
+        }
+        let mut by_event: HashMap<EventId, Acc> = HashMap::new();
 
         while let Ok(sample) = self.observation_rx.try_recv() {
             for slot in 0..MAX_COUNTERS {
@@ -118,17 +128,49 @@ impl CounterBackend for HardwareBackend {
                 if value == 0 && sample.events[slot] == 0 {
                     continue;
                 }
-                let obs = by_event.entry(event_id).or_insert(Observation {
-                    event_id,
+                let duration = sample.duration_ns.max(1);
+                let rate = value as f64 / duration as f64;
+                let acc = by_event.entry(event_id).or_insert(Acc {
+                    n: 0,
+                    mean: 0.0,
+                    m2: 0.0,
+                    min: f64::MAX,
+                    max: f64::MIN,
                     total_count: 0,
                     total_duration_ns: 0,
                 });
-                obs.total_count += value;
-                obs.total_duration_ns += sample.duration_ns;
+                acc.n += 1;
+                let delta = rate - acc.mean;
+                acc.mean += delta / acc.n as f64;
+                acc.m2 += delta * (rate - acc.mean);
+                if rate < acc.min {
+                    acc.min = rate;
+                }
+                if rate > acc.max {
+                    acc.max = rate;
+                }
+                acc.total_count += value;
+                acc.total_duration_ns += duration;
             }
         }
 
-        by_event.into_values().collect()
+        by_event
+            .into_iter()
+            .map(|(event_id, acc)| Observation {
+                event_id,
+                total_count: acc.total_count,
+                total_duration_ns: acc.total_duration_ns,
+                mean_rate: acc.mean,
+                stddev_rate: if acc.n < 2 {
+                    0.0
+                } else {
+                    (acc.m2 / acc.n as f64).sqrt()
+                },
+                min_rate: if acc.n == 0 { 0.0 } else { acc.min },
+                max_rate: if acc.n == 0 { 0.0 } else { acc.max },
+                num_samples: acc.n,
+            })
+            .collect()
     }
 
     fn update_counters(

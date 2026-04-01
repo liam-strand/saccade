@@ -27,7 +27,7 @@ pub enum Commands {
         library: Option<PathBuf>,
 
         /// Default Scheduler Quantum (in nanoseconds)
-        #[arg(short, long, default_value_t = 1000000)]
+        #[arg(short, long, default_value_t = 10_000_000)]
         quantum: u64,
 
         /// Target program and arguments
@@ -45,7 +45,7 @@ pub enum Commands {
         golden: PathBuf,
 
         /// Scheduler quantum in nanoseconds
-        #[arg(short, long, default_value_t = 1000000)]
+        #[arg(short, long, default_value_t = 10_000_000)]
         quantum: u64,
 
         /// Number of quanta to simulate

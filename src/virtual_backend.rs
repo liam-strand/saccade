@@ -71,10 +71,16 @@ impl CounterBackend for VirtualBackend {
                 lambda as u64
             };
 
+            let mean_rate = count as f64 / self.quantum_ns as f64;
             observations.push(Observation {
                 event_id,
                 total_count: count,
                 total_duration_ns: self.quantum_ns,
+                mean_rate,
+                stddev_rate: 0.0,
+                min_rate: mean_rate,
+                max_rate: mean_rate,
+                num_samples: 1,
             });
 
             if slot < MAX_COUNTERS {

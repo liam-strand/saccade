@@ -6,6 +6,8 @@ use crate::event_registry::EventId;
 pub struct CounterEstimate {
     /// Exponential moving average of event rate (events per nanosecond)
     pub rate: f64,
+    /// Within-quantum stddev of per-sample rates from the last observation; 0.0 if < 2 samples.
+    pub rate_stddev: f64,
     /// Uncertainty in the rate estimate — grows when the counter is inactive
     pub uncertainty: f64,
     /// Timestamp (ns) of the last measurement update
@@ -18,6 +20,7 @@ impl Default for CounterEstimate {
     fn default() -> Self {
         Self {
             rate: 0.0,
+            rate_stddev: 0.0,
             uncertainty: 1.0, // start fully uncertain
             last_updated_ns: 0,
             sample_count: 0,
@@ -51,7 +54,13 @@ impl VirtualCounterState {
     ///
     /// `rate` is the measured event rate (events/ns) aggregated across all CPUs.
     /// `timestamp_ns` is the current time.
-    pub fn measurement_update(&mut self, event_id: EventId, rate: f64, timestamp_ns: u64) {
+    pub fn measurement_update(
+        &mut self,
+        event_id: EventId,
+        rate: f64,
+        stddev: f64,
+        timestamp_ns: u64,
+    ) {
         if let Some(est) = self.estimates.get_mut(event_id as usize) {
             if est.sample_count == 0 {
                 // First observation: initialize directly
@@ -60,6 +69,7 @@ impl VirtualCounterState {
                 // EMA update
                 est.rate = self.alpha * rate + (1.0 - self.alpha) * est.rate;
             }
+            est.rate_stddev = stddev;
             est.uncertainty = 0.0; // just observed — full confidence
             est.last_updated_ns = timestamp_ns;
             est.sample_count += 1;
@@ -77,6 +87,12 @@ impl VirtualCounterState {
                 est.uncertainty = 1.0;
             }
         }
+    }
+
+    pub fn rate_stddev(&self, event_id: EventId) -> f64 {
+        self.estimates
+            .get(event_id as usize)
+            .map_or(0.0, |e| e.rate_stddev)
     }
 
     pub fn rate(&self, event_id: EventId) -> f64 {
