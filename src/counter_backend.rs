@@ -23,6 +23,13 @@ pub struct Observation {
     pub event_id: EventId,
     pub total_count: u64,
     pub total_duration_ns: u64,
+    /// Mean event rate (events/ns) across all samples this quantum.
+    pub mean_rate: f64,
+    /// Population stddev of per-sample rates; 0.0 when num_samples < 2.
+    pub stddev_rate: f64,
+    pub min_rate: f64,
+    pub max_rate: f64,
+    pub num_samples: u32,
 }
 
 /// Abstraction over the source of performance counter data.
