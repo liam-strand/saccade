@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::hint::black_box;
+use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
 
@@ -9,16 +10,18 @@ struct WorkloadConfig {
 }
 
 #[derive(Deserialize)]
+struct Phase {
+    duration_secs: u64,
+    threads: usize,
+    #[serde(flatten)]
+    kind: PhaseKind,
+}
+
+#[derive(Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Phase {
-    CacheThrash {
-        array_size_kb: usize,
-        duration_secs: u64,
-    },
-    FpHeavy {
-        vector_size: usize,
-        duration_secs: u64,
-    },
+enum PhaseKind {
+    CacheThrash { array_size_kb: usize },
+    FpHeavy { vector_size: usize },
 }
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -54,14 +57,11 @@ fn run_cache_thrash(array_size_kb: usize, duration: Duration) {
 
 #[inline(never)]
 fn run_fp_heavy(vector_size: usize, duration: Duration) {
-    let a: Vec<f64> = (0..vector_size)
-        .map(|i| (i as f64 + 1.0).sqrt())
-        .collect();
-    let mut b: Vec<f64> = (0..vector_size)
-        .map(|i| (i as f64 + 1.0).cbrt())
-        .collect();
+    let a: Vec<f64> = (0..vector_size).map(|i| (i as f64 + 1.0).sqrt()).collect();
+    let mut b: Vec<f64> = (0..vector_size).map(|i| (i as f64 + 1.0).cbrt()).collect();
     let deadline = Instant::now() + duration;
     let mut sum = 1.0_f64;
+    let mut iter = 0_u64;
 
     loop {
         for i in 0..vector_size {
@@ -69,7 +69,8 @@ fn run_fp_heavy(vector_size: usize, duration: Duration) {
         }
         // Feed result back to prevent hoisting; perturbation is tiny enough to be numerically stable
         b[0] += black_box(sum) * 1e-15;
-        if Instant::now() >= deadline {
+        iter += 1;
+        if iter & 0x3FF == 0 && Instant::now() >= deadline {
             break;
         }
     }
@@ -77,32 +78,41 @@ fn run_fp_heavy(vector_size: usize, duration: Duration) {
     black_box(sum);
 }
 
+fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let kind = kind.clone();
+            thread::spawn(move || match kind {
+                PhaseKind::CacheThrash { array_size_kb } => run_cache_thrash(array_size_kb, duration),
+                PhaseKind::FpHeavy { vector_size } => run_fp_heavy(vector_size, duration),
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
 fn validate(config: &WorkloadConfig) -> Result<(), String> {
     if config.phases.is_empty() {
         return Err("phases must not be empty".to_string());
     }
     for (i, phase) in config.phases.iter().enumerate() {
-        match phase {
-            Phase::CacheThrash {
-                array_size_kb,
-                duration_secs,
-            } => {
+        if phase.duration_secs == 0 {
+            return Err(format!("phase {i}: duration_secs must be > 0"));
+        }
+        if phase.threads == 0 {
+            return Err(format!("phase {i}: threads must be > 0"));
+        }
+        match &phase.kind {
+            PhaseKind::CacheThrash { array_size_kb } => {
                 if *array_size_kb == 0 {
                     return Err(format!("phase {i}: array_size_kb must be > 0"));
                 }
-                if *duration_secs == 0 {
-                    return Err(format!("phase {i}: duration_secs must be > 0"));
-                }
             }
-            Phase::FpHeavy {
-                vector_size,
-                duration_secs,
-            } => {
+            PhaseKind::FpHeavy { vector_size } => {
                 if *vector_size == 0 {
                     return Err(format!("phase {i}: vector_size must be > 0"));
-                }
-                if *duration_secs == 0 {
-                    return Err(format!("phase {i}: duration_secs must be > 0"));
                 }
             }
         }
@@ -111,16 +121,11 @@ fn validate(config: &WorkloadConfig) -> Result<(), String> {
 }
 
 fn phase_label(phase: &Phase) -> String {
-    match phase {
-        Phase::CacheThrash {
-            array_size_kb,
-            duration_secs,
-        } => format!("cache_thrash: array_size_kb={array_size_kb}, duration_secs={duration_secs}"),
-        Phase::FpHeavy {
-            vector_size,
-            duration_secs,
-        } => format!("fp_heavy: vector_size={vector_size}, duration_secs={duration_secs}"),
-    }
+    let kind_str = match &phase.kind {
+        PhaseKind::CacheThrash { array_size_kb } => format!("cache_thrash: array_size_kb={array_size_kb}"),
+        PhaseKind::FpHeavy { vector_size } => format!("fp_heavy: vector_size={vector_size}"),
+    };
+    format!("{kind_str}, duration_secs={}, threads={}", phase.duration_secs, phase.threads)
 }
 
 fn main() {
@@ -150,17 +155,7 @@ fn main() {
 
     for (i, phase) in config.phases.iter().enumerate() {
         eprintln!("[phase {i}/{n}] {}", phase_label(phase));
-        match phase {
-            Phase::CacheThrash {
-                array_size_kb,
-                duration_secs,
-            } => run_cache_thrash(*array_size_kb, Duration::from_secs(*duration_secs)),
-            Phase::FpHeavy {
-                vector_size,
-                duration_secs,
-            } => run_fp_heavy(*vector_size, Duration::from_secs(*duration_secs)),
-        }
-        eprintln!("[phase {i}/{n}] complete");
+        run_phase(&phase.kind, Duration::from_secs(phase.duration_secs), phase.threads);
     }
 
     eprintln!("[workload] done");
