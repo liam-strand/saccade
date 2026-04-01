@@ -82,24 +82,36 @@ fn run_fp_heavy(vector_size: usize, duration: Duration) {
     black_box(sum);
 }
 
+// Separate non-inlined functions for each branch path.
+// The compiler cannot speculatively call both and then cmov-select the result,
+// so these force a real conditional branch instruction at the call site.
 #[inline(never)]
-fn run_branch_mispredict(array_size: usize, duration: Duration) {
+fn bp_add(sum: u64, val: u64) -> u64 {
+    sum.wrapping_add(val)
+}
+
+#[inline(never)]
+fn bp_mul(sum: u64, val: u64) -> u64 {
+    sum.wrapping_mul(val | 1)
+}
+
+#[inline(never)]
+fn run_branch_mispredict(batch_size: usize, duration: Duration) {
     let mut rng = 0xdeadbeef_u64;
-    let data: Vec<u8> = (0..array_size)
-        .map(|_| xorshift64(&mut rng) as u8)
-        .collect();
     let deadline = Instant::now() + duration;
-    let mut sum = 0_u64;
+    let mut sum = 1_u64;
     let mut iter = 0_u64;
 
     loop {
-        for i in 0..array_size {
-            // Asymmetric branches (add vs mul) prevent cmov conversion
-            if data[i] < 128 {
-                sum = sum.wrapping_add(data[i] as u64);
+        // Generate branch conditions on-the-fly so the predictor cannot
+        // learn a fixed pattern from a pre-computed array.
+        for _ in 0..batch_size {
+            let val = xorshift64(&mut rng);
+            sum = if val & 128 != 0 {
+                bp_add(sum, val)
             } else {
-                sum = sum.wrapping_mul(3);
-            }
+                bp_mul(sum, val)
+            };
         }
         iter += 1;
         if iter & 0x3FF == 0 && Instant::now() >= deadline {
@@ -267,7 +279,7 @@ fn phase_label(phase: &Phase) -> String {
     let kind_str = match &phase.kind {
         PhaseKind::CacheThrash { array_size_kb } => format!("cache_thrash: array_size_kb={array_size_kb}"),
         PhaseKind::FpHeavy { vector_size } => format!("fp_heavy: vector_size={vector_size}"),
-        PhaseKind::BranchMispredict { array_size } => format!("branch_mispredict: array_size={array_size}"),
+        PhaseKind::BranchMispredict { array_size } => format!("branch_mispredict: batch_size={array_size}"),
         PhaseKind::TlbThrash { num_pages } => format!("tlb_thrash: num_pages={num_pages}"),
         PhaseKind::MemStream { buffer_size_mb } => format!("mem_stream: buffer_size_mb={buffer_size_mb}"),
         PhaseKind::IntDiv { divisor_range } => format!("int_div: divisor_range={divisor_range}"),
