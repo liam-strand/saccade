@@ -33,4 +33,8 @@ impl EventRegistry {
     pub fn get_event_ids(&self) -> Vec<EventId> {
         (0..self.events.len() as u32).collect()
     }
+
+    pub fn get_event_name(&self, id: EventId) -> &str {
+        &self.events[id as usize].name
+    }
 }
