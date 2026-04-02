@@ -3,11 +3,11 @@ use crate::event_registry::EventId;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::mpsc::SyncSender;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GoldenRates {
     pub rates: HashMap<String, f64>,
     #[serde(default)]

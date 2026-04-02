@@ -9,7 +9,7 @@ use nom::{
 use serde::{Deserialize, Serialize};
 use std::str;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EventLibrary {
     pub events: Vec<Event>,
 }
