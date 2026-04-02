@@ -1,4 +1,5 @@
 pub mod distribution;
+pub mod fixed;
 pub mod random;
 pub mod round_robin;
 pub mod test;

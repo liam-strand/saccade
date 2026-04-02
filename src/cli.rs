@@ -34,6 +34,25 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         target: Vec<String>,
     },
+    /// Run the target repeatedly, each time with a different fixed batch of 4 counters,
+    /// until all available counters have been covered once.
+    Sweep {
+        /// Use library from specified file
+        #[arg(short, long)]
+        library: Option<PathBuf>,
+
+        /// Scheduler quantum in nanoseconds
+        #[arg(short, long, default_value_t = 10_000_000)]
+        quantum: u64,
+
+        /// Output JSON file for per-counter rates (golden rates format)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Target program and arguments
+        #[arg(last = true, required = true)]
+        target: Vec<String>,
+    },
     /// Run simulation with golden (synthetic) counter rates
     Simulate {
         /// Event library JSON file (required, no perf fallback)
