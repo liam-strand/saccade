@@ -1,6 +1,7 @@
 use crate::buffered_output::Logger;
 use crate::counter_backend::CounterBackend;
 use crate::event_registry::EventId;
+use crate::perfetto_trace::PerfettoWriter;
 use crate::scheduler::Scheduler;
 use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
@@ -12,6 +13,7 @@ pub struct Oculomotor {
     _logger: Option<Logger>,
     vcs: VirtualCounterState,
     last_step_ns: u64,
+    trace_writer: Option<PerfettoWriter>,
 }
 
 impl Oculomotor {
@@ -20,6 +22,7 @@ impl Oculomotor {
         scheduler: Box<dyn Scheduler>,
         num_events: usize,
         logger: Option<Logger>,
+        trace_writer: Option<PerfettoWriter>,
     ) -> Self {
         Self {
             backend,
@@ -28,6 +31,7 @@ impl Oculomotor {
             _logger: logger,
             vcs: VirtualCounterState::new(num_events),
             last_step_ns: 0,
+            trace_writer,
         }
     }
 
@@ -74,6 +78,11 @@ impl Oculomotor {
             .update_counters(&self.active_set, &decision.active_events)
             .unwrap();
         self.active_set = decision.active_events.clone();
+
+        if let Some(ref mut writer) = self.trace_writer {
+            let _ = writer.emit_step(self.last_step_ns, &self.vcs, &self.active_set);
+        }
+
         decision.duration
     }
 

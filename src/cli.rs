@@ -30,6 +30,10 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 10_000_000)]
         quantum: u64,
 
+        /// Output Perfetto trace file for VCS state
+        #[arg(long)]
+        trace: Option<PathBuf>,
+
         /// Target program and arguments
         #[arg(last = true, required = true)]
         target: Vec<String>,
@@ -78,5 +82,9 @@ pub enum Commands {
         /// Scheduler to use: random, round_robin
         #[arg(long, default_value = "random")]
         scheduler: String,
+
+        /// Output Perfetto trace file for VCS state
+        #[arg(long)]
+        trace: Option<PathBuf>,
     },
 }
