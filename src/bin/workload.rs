@@ -326,8 +326,13 @@ fn main() {
     eprintln!("[workload] pid={}, phases={n}", process::id());
 
     for (i, phase) in config.phases.iter().enumerate() {
-        eprintln!("[phase {i}/{n}] {}", phase_label(phase));
-        run_phase(&phase.kind, Duration::from_secs(phase.duration_secs), phase.threads);
+        let idx = i + 1;
+        eprintln!("[phase {idx}/{n}] {}", phase_label(phase));
+        run_phase(
+            &phase.kind,
+            Duration::from_secs(phase.duration_secs),
+            phase.threads,
+        );
     }
 
     eprintln!("[workload] done");
