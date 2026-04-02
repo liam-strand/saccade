@@ -6,6 +6,7 @@ use saccade::event_registry::EventRegistry;
 use saccade::hardware_backend::HardwareBackend;
 use saccade::oculomotor::Oculomotor;
 use saccade::perf::Perf;
+use saccade::perfetto_trace::PerfettoWriter;
 use saccade::scheduler::Scheduler;
 use saccade::scheduler::fixed::FixedScheduler;
 use saccade::scheduler::random::RandomScheduler;
@@ -46,6 +47,7 @@ fn main() -> std::io::Result<()> {
         Commands::Run {
             library,
             quantum,
+            trace,
             target,
         } => {
             let lib = match library {
@@ -63,6 +65,11 @@ fn main() -> std::io::Result<()> {
 
             let registry = EventRegistry::new(lib);
             let num_events = registry.get_event_ids().len();
+            let event_names: Vec<String> = registry
+                .get_event_ids()
+                .iter()
+                .map(|&id| registry.get_event_name(id).to_string())
+                .collect();
             debug!("Loaded {} events.", num_events);
             debug!("Target program args: {:?}", target);
 
@@ -89,11 +96,21 @@ fn main() -> std::io::Result<()> {
             let backend = HardwareBackend::new(pid, registry, logger_tx)
                 .expect("Failed to create hardware backend");
 
+            let trace_writer = match trace {
+                Some(path) => {
+                    let mut writer = PerfettoWriter::new(path, event_names)?;
+                    writer.register_tracks()?;
+                    Some(writer)
+                }
+                None => None,
+            };
+
             let mut oculomotor = Oculomotor::new(
                 Box::new(backend),
                 Box::new(scheduler),
                 num_events,
                 Some(logger),
+                trace_writer,
             );
 
             debug!("Oculomotor is ready.");
@@ -186,6 +203,7 @@ fn main() -> std::io::Result<()> {
                     Box::new(scheduler),
                     num_events,
                     Some(logger),
+                    None,
                 );
 
                 syscalls::ptrace_detach(pid)?;
@@ -259,6 +277,7 @@ fn main() -> std::io::Result<()> {
             steps,
             output,
             scheduler: scheduler_name,
+            trace,
         } => {
             debug!("Loading event library from {:?}", library);
             let file = File::open(library)?;
@@ -267,6 +286,11 @@ fn main() -> std::io::Result<()> {
 
             let registry = EventRegistry::new(lib);
             let num_events = registry.get_event_ids().len();
+            let sim_event_names: Vec<String> = registry
+                .get_event_ids()
+                .iter()
+                .map(|&id| registry.get_event_name(id).to_string())
+                .collect();
             debug!("Loaded {} events.", num_events);
 
             debug!("Loading golden rates from {:?}", golden);
@@ -310,7 +334,22 @@ fn main() -> std::io::Result<()> {
                 logger_tx,
             );
 
-            let mut oculomotor = Oculomotor::new(Box::new(backend), scheduler, num_events, logger);
+            let trace_writer = match trace {
+                Some(path) => {
+                    let mut writer = PerfettoWriter::new(path, sim_event_names)?;
+                    writer.register_tracks()?;
+                    Some(writer)
+                }
+                None => None,
+            };
+
+            let mut oculomotor = Oculomotor::new(
+                Box::new(backend),
+                scheduler,
+                num_events,
+                logger,
+                trace_writer,
+            );
 
             tracing::info!("Simulating {} steps (quantum={}ns)...", steps, quantum);
 
