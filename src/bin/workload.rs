@@ -214,9 +214,13 @@ fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
         .map(|_| {
             let kind = kind.clone();
             thread::spawn(move || match kind {
-                PhaseKind::CacheThrash { array_size_kb } => run_cache_thrash(array_size_kb, duration),
+                PhaseKind::CacheThrash { array_size_kb } => {
+                    run_cache_thrash(array_size_kb, duration)
+                }
                 PhaseKind::FpHeavy { vector_size } => run_fp_heavy(vector_size, duration),
-                PhaseKind::BranchMispredict { array_size } => run_branch_mispredict(array_size, duration),
+                PhaseKind::BranchMispredict { array_size } => {
+                    run_branch_mispredict(array_size, duration)
+                }
                 PhaseKind::TlbThrash { num_pages } => run_tlb_thrash(num_pages, duration),
                 PhaseKind::MemStream { buffer_size_mb } => run_mem_stream(buffer_size_mb, duration),
                 PhaseKind::IntDiv { divisor_range } => run_int_div(divisor_range, duration),
@@ -277,14 +281,23 @@ fn validate(config: &WorkloadConfig) -> Result<(), String> {
 
 fn phase_label(phase: &Phase) -> String {
     let kind_str = match &phase.kind {
-        PhaseKind::CacheThrash { array_size_kb } => format!("cache_thrash: array_size_kb={array_size_kb}"),
+        PhaseKind::CacheThrash { array_size_kb } => {
+            format!("cache_thrash: array_size_kb={array_size_kb}")
+        }
         PhaseKind::FpHeavy { vector_size } => format!("fp_heavy: vector_size={vector_size}"),
-        PhaseKind::BranchMispredict { array_size } => format!("branch_mispredict: batch_size={array_size}"),
+        PhaseKind::BranchMispredict { array_size } => {
+            format!("branch_mispredict: batch_size={array_size}")
+        }
         PhaseKind::TlbThrash { num_pages } => format!("tlb_thrash: num_pages={num_pages}"),
-        PhaseKind::MemStream { buffer_size_mb } => format!("mem_stream: buffer_size_mb={buffer_size_mb}"),
+        PhaseKind::MemStream { buffer_size_mb } => {
+            format!("mem_stream: buffer_size_mb={buffer_size_mb}")
+        }
         PhaseKind::IntDiv { divisor_range } => format!("int_div: divisor_range={divisor_range}"),
     };
-    format!("{kind_str}, duration_secs={}, threads={}", phase.duration_secs, phase.threads)
+    format!(
+        "{kind_str}, duration_secs={}, threads={}",
+        phase.duration_secs, phase.threads
+    )
 }
 
 fn main() {
