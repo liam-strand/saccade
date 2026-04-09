@@ -59,8 +59,13 @@ impl Profiler {
 
         for (&event_id, agg) in aggregates {
             let stddev = if agg.num_samples < 2 { 0.0 } else { agg.stddev_rate };
-            self.vcs
-                .measurement_update(event_id, agg.mean_rate, stddev, self.current_time_ns);
+            self.vcs.measurement_update_with_count(
+                event_id,
+                agg.mean_rate,
+                stddev,
+                agg.num_samples,
+                self.current_time_ns,
+            );
         }
 
         for id in 0..self.vcs.num_events() as EventId {

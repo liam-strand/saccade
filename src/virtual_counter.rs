@@ -52,13 +52,28 @@ impl VirtualCounterState {
 
     /// Update the rate estimate for a counter that was physically sampled this quantum.
     ///
-    /// `rate` is the measured event rate (events/ns) aggregated across all CPUs.
+    /// `rate` is the mean event rate (events/ns) across all samples in the quantum.
+    /// `stddev` is the within-quantum rate standard deviation.
+    /// `num_samples` is the number of physical samples that produced this observation.
     /// `timestamp_ns` is the current time.
     pub fn measurement_update(
         &mut self,
         event_id: EventId,
         rate: f64,
         stddev: f64,
+        timestamp_ns: u64,
+    ) {
+        self.measurement_update_with_count(event_id, rate, stddev, 1, timestamp_ns);
+    }
+
+    /// Like `measurement_update` but explicitly provides the number of physical samples.
+    /// With more samples, the measurement is more reliable (lower noise).
+    pub fn measurement_update_with_count(
+        &mut self,
+        event_id: EventId,
+        rate: f64,
+        stddev: f64,
+        num_samples: u32,
         timestamp_ns: u64,
     ) {
         if let Some(est) = self.estimates.get_mut(event_id as usize) {
@@ -72,7 +87,7 @@ impl VirtualCounterState {
             est.rate_stddev = stddev;
             est.uncertainty = 0.0; // just observed — full confidence
             est.last_updated_ns = timestamp_ns;
-            est.sample_count += 1;
+            est.sample_count += num_samples as u64;
         }
     }
 
