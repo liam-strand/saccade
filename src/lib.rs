@@ -4,6 +4,8 @@ pub mod counter_backend;
 pub mod event;
 pub mod quantum;
 pub mod sample;
+pub mod sink;
+pub mod source;
 pub mod docs;
 pub mod event_library;
 pub mod event_registry;
