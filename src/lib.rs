@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod commands;
 pub mod docs;
 pub mod event;
 pub mod hardware_counters;
