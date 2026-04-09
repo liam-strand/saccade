@@ -167,9 +167,9 @@ fn run_mem_stream(buffer_size_mb: usize, duration: Duration) {
     let mut iter = 0_u64;
 
     loop {
-        for i in 0..len {
-            sum = sum.wrapping_add(data[i]);
-            data[i] = sum;
+        for item in data.iter_mut().take(len) {
+            sum = sum.wrapping_add(*item);
+            *item = sum;
         }
         iter += 1;
         // Fewer iterations between time checks since each pass is slow for large buffers

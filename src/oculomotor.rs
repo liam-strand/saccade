@@ -1,7 +1,7 @@
 use crate::buffered_output::Logger;
 use crate::counter_backend::CounterBackend;
 use crate::event_registry::EventId;
-use crate::perfetto_trace::PerfettoWriter;
+use crate::perfetto::PerfettoWriter;
 use crate::scheduler::Scheduler;
 use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
@@ -88,5 +88,9 @@ impl Oculomotor {
 
     pub fn vcs(&self) -> &VirtualCounterState {
         &self.vcs
+    }
+
+    pub fn last_step_ns(&self) -> u64 {
+        self.last_step_ns
     }
 }
