@@ -1,6 +1,6 @@
 use rand::prelude::*;
 
-use crate::event_registry::EventId;
+use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::virtual_counter::VirtualCounterState;

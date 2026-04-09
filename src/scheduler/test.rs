@@ -1,4 +1,4 @@
-use crate::event_registry::{EventId, EventRegistry};
+use crate::event::{EventId, EventRegistry};
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::virtual_counter::VirtualCounterState;

@@ -4,7 +4,7 @@ pub mod random;
 pub mod round_robin;
 pub mod test;
 
-use crate::event_registry::EventId;
+use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
