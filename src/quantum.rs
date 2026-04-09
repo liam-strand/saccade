@@ -58,7 +58,8 @@ impl Quantum {
     /// Lazily compute per-event rate aggregates using Welford's online algorithm.
     /// Rate for each sample = `count / duration_ns`. Result is cached.
     pub fn aggregates(&self) -> &HashMap<EventId, EventAggregate> {
-        self.aggregates.get_or_init(|| aggregate_samples(&self.samples))
+        self.aggregates
+            .get_or_init(|| aggregate_samples(&self.samples))
     }
 
     /// Returns the set of event IDs that have at least one sample in this quantum.

@@ -93,7 +93,6 @@ impl SampleSource for VirtualSampleSource {
     }
 }
 
-
 /// Per-event time-varying rates, keyed by EventId.
 /// Each entry is a sorted Vec of (timestamp_ns, rate_events_per_ns).
 pub struct TimeVaryingRates {

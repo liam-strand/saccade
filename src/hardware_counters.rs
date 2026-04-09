@@ -1,5 +1,5 @@
-use crate::sample::MAX_COUNTERS;
 use crate::event::EventRegistry;
+use crate::sample::MAX_COUNTERS;
 use crate::sampler::SamplerSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle};
 use perf_event::{Builder, Counter, events};
