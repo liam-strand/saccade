@@ -2,6 +2,7 @@ use crate::buffered_output::Logger;
 use crate::counter_backend::CounterBackend;
 use crate::event_registry::EventId;
 use crate::perfetto::PerfettoWriter;
+use crate::quantum::Quantum;
 use crate::scheduler::Scheduler;
 use crate::virtual_counter::VirtualCounterState;
 use std::time::Duration;
@@ -73,7 +74,9 @@ impl Oculomotor {
 
         self.last_step_ns += elapsed_ns;
 
-        let decision = self.scheduler.next_step(&self.vcs);
+        // Build a minimal Quantum for the new scheduler signature
+        let quantum = Quantum::new(Vec::new(), self.last_step_ns, elapsed_ns);
+        let decision = self.scheduler.next_step(&quantum, &self.vcs);
         self.backend
             .update_counters(&self.active_set, &decision.active_events)
             .unwrap();
