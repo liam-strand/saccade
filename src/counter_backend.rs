@@ -1,22 +1,11 @@
 use crate::event_registry::EventId;
 
-pub const MAX_COUNTERS: usize = 4;
-pub const MAX_CPUS: usize = 256;
-pub const TASK_COMM_LEN: usize = 16;
+// Re-export from sample so existing code that imports from counter_backend still compiles.
+pub use crate::sample::{MAX_COUNTERS, MAX_CPUS, TASK_COMM_LEN, WireSample};
 
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SaccadeSample {
-    pub timestamp_ns: u64,
-    pub duration_ns: u64,
-    pub pid: u32,
-    pub cpu_id: u32,
-    pub type_: u32,
-    pub pad: u32,
-    pub values: [u64; MAX_COUNTERS],
-    pub events: [u64; MAX_COUNTERS],
-    pub task: [u8; TASK_COMM_LEN],
-}
+/// Backwards-compat alias used by the sweep dummy channel and CSV logger.
+/// New code should use `WireSample` directly.
+pub type SaccadeSample = WireSample;
 
 /// Aggregated observation for a single event from the previous quantum.
 pub struct Observation {
