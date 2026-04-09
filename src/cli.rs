@@ -49,23 +49,23 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 10_000_000)]
         quantum: u64,
 
-        /// Output JSON file for per-counter rates (golden rates format)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// Output Perfetto trace file with per-event time-varying rates
+        #[arg(long)]
+        trace: Option<PathBuf>,
 
         /// Target program and arguments
         #[arg(last = true, required = true)]
         target: Vec<String>,
     },
-    /// Run simulation with golden (synthetic) counter rates
+    /// Run simulation replaying time-varying rates from a sweep trace
     Simulate {
         /// Event library JSON file (required, no perf fallback)
         #[arg(short, long)]
         library: PathBuf,
 
-        /// Golden rates JSON file
-        #[arg(short, long)]
-        golden: PathBuf,
+        /// Perfetto trace file with time-varying rates (from sweep --trace)
+        #[arg(short = 'r', long)]
+        rates_trace: PathBuf,
 
         /// Scheduler quantum in nanoseconds
         #[arg(short, long, default_value_t = 10_000_000)]

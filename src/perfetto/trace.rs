@@ -5,6 +5,7 @@ use perfetto_protos::trace_packet::TracePacket;
 use perfetto_protos::track_descriptor::TrackDescriptor;
 use perfetto_protos::track_event::TrackEvent;
 use protobuf::Message;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -43,18 +44,6 @@ impl PerfettoWriter {
                 let mut desc = TrackDescriptor::new();
                 desc.set_uuid(rate_uuid(i as u32));
                 desc.set_name(format!("{}/rate", name));
-                desc.counter = protobuf::MessageField::some(counter);
-
-                self.write_track_descriptor_packet(desc)?;
-            }
-
-            // Uncertainty track
-            {
-                let counter = CounterDescriptor::new();
-
-                let mut desc = TrackDescriptor::new();
-                desc.set_uuid(uncertainty_uuid(i as u32));
-                desc.set_name(format!("{}/uncertainty", name));
                 desc.counter = protobuf::MessageField::some(counter);
 
                 self.write_track_descriptor_packet(desc)?;
@@ -128,6 +117,26 @@ impl PerfettoWriter {
         Ok(())
     }
 
+    /// Write pre-collected time-series data as counter packets.
+    /// `series`: event_id → sorted Vec of (timestamp_ns, rate).
+    /// Emits rate and uncertainty (0.0 = observed) packets sorted by timestamp.
+    pub fn write_raw_series(
+        &mut self,
+        series: &HashMap<u32, Vec<(u64, f64)>>,
+    ) -> std::io::Result<()> {
+        let mut points: Vec<(u64, u32, f64)> = series
+            .iter()
+            .flat_map(|(&id, pts)| pts.iter().map(move |&(ts, rate)| (ts, id, rate)))
+            .collect();
+        points.sort_unstable_by_key(|&(ts, _, _)| ts);
+
+        for (ts, id, rate) in points {
+            self.write_counter_packet(ts, rate_uuid(id), rate)?;
+            self.write_counter_packet(ts, uncertainty_uuid(id), 0.0)?;
+        }
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
@@ -158,4 +167,53 @@ fn write_varint(w: &mut impl Write, mut value: u64) -> std::io::Result<()> {
         }
         w.write_all(&[byte | 0x80])?;
     }
+}
+
+/// Decode a protobuf varint from a byte slice.
+/// Returns `(value, bytes_consumed)` or `None` if the slice is truncated.
+pub(crate) fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (i, &byte) in data.iter().enumerate() {
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Parse a `.perfetto-trace` byte slice into `TracePacket`s.
+///
+/// The wire format is the `Trace` protobuf container:
+///   repeated TracePacket packet = 1;
+/// Each packet is encoded as: tag 0x0A + varint length + packet bytes.
+pub(crate) fn read_trace_packets(data: &[u8]) -> std::io::Result<Vec<TracePacket>> {
+    let mut packets = Vec::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        if data[pos] != 0x0A {
+            return Err(std::io::Error::other(format!(
+                "Unexpected tag byte 0x{:02X} at offset {}",
+                data[pos], pos
+            )));
+        }
+        pos += 1;
+        let (len, consumed) = read_varint(&data[pos..])
+            .ok_or_else(|| std::io::Error::other("Truncated varint in trace file"))?;
+        pos += consumed;
+        let end = pos + len as usize;
+        if end > data.len() {
+            return Err(std::io::Error::other("Packet extends beyond end of file"));
+        }
+        let packet =
+            TracePacket::parse_from_bytes(&data[pos..end]).map_err(std::io::Error::other)?;
+        packets.push(packet);
+        pos = end;
+    }
+    Ok(packets)
 }

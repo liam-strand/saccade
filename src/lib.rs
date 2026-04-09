@@ -8,7 +8,7 @@ pub mod hardware_backend;
 pub mod hardware_counters;
 pub mod oculomotor;
 pub mod perf;
-pub mod perfetto_trace;
+pub mod perfetto;
 pub mod scheduler;
 pub mod syscalls;
 pub mod virtual_backend;

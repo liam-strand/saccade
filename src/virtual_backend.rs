@@ -3,20 +3,43 @@ use crate::event_registry::EventId;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::mpsc::SyncSender;
 
-#[derive(Serialize, Deserialize)]
-pub struct GoldenRates {
-    pub rates: HashMap<String, f64>,
-    #[serde(default)]
-    pub noise_stddev: f64,
-    pub seed: Option<u64>,
+/// Per-event time-varying rates, keyed by EventId.
+/// Each entry is a sorted Vec of (timestamp_ns, rate_events_per_ns).
+pub struct TimeVaryingRates {
+    pub series: HashMap<EventId, Vec<(u64, f64)>>,
+}
+
+impl TimeVaryingRates {
+    /// Return the interpolated rate for `event_id` at `time_ns`.
+    /// Holds the first/last observed rate before/after the recorded range.
+    pub fn rate_at(&self, event_id: EventId, time_ns: u64) -> f64 {
+        let Some(points) = self.series.get(&event_id) else {
+            return 0.0;
+        };
+        if points.is_empty() {
+            return 0.0;
+        }
+        if time_ns <= points[0].0 {
+            return points[0].1;
+        }
+        let last = points[points.len() - 1];
+        if time_ns >= last.0 {
+            return last.1;
+        }
+        // Find the two surrounding points via binary search.
+        let idx = points.partition_point(|&(ts, _)| ts <= time_ns);
+        let (t0, r0) = points[idx - 1];
+        let (t1, r1) = points[idx];
+        let frac = (time_ns - t0) as f64 / (t1 - t0) as f64;
+        r0 + frac * (r1 - r0)
+    }
 }
 
 pub struct VirtualBackend {
-    golden_rates: HashMap<EventId, f64>,
+    rates: TimeVaryingRates,
     noise_stddev: f64,
     active_set: Vec<EventId>,
     quantum_ns: u64,
@@ -27,7 +50,7 @@ pub struct VirtualBackend {
 
 impl VirtualBackend {
     pub fn new(
-        golden_rates: HashMap<EventId, f64>,
+        rates: TimeVaryingRates,
         noise_stddev: f64,
         quantum_ns: u64,
         seed: Option<u64>,
@@ -38,7 +61,7 @@ impl VirtualBackend {
             None => StdRng::from_os_rng(),
         };
         Self {
-            golden_rates,
+            rates,
             noise_stddev,
             active_set: Vec::new(),
             quantum_ns,
@@ -61,7 +84,7 @@ impl CounterBackend for VirtualBackend {
         };
 
         for (slot, &event_id) in self.active_set.iter().enumerate() {
-            let base_rate = self.golden_rates.get(&event_id).copied().unwrap_or(0.0);
+            let base_rate = self.rates.rate_at(event_id, self.current_time_ns);
             let lambda = base_rate * self.quantum_ns as f64;
 
             let count = if lambda > 0.0 && self.noise_stddev > 0.0 {

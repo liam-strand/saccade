@@ -128,6 +128,11 @@ impl CounterBackend for HardwareBackend {
                 if value == 0 && sample.events[slot] == 0 {
                     continue;
                 }
+                if sample.duration_ns == 0 {
+                    eprintln!("ZERO DURATION!!!");
+                    panic!("ZERO DURATION!!!");
+                }
+
                 let duration = sample.duration_ns.max(1);
                 let rate = value as f64 / duration as f64;
                 let acc = by_event.entry(event_id).or_insert(Acc {

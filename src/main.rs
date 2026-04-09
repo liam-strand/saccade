@@ -1,4 +1,5 @@
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use saccade::buffered_output::Logger;
 use saccade::cli::{Cli, Commands};
 use saccade::event_library::EventLibrary;
@@ -6,16 +7,16 @@ use saccade::event_registry::EventRegistry;
 use saccade::hardware_backend::HardwareBackend;
 use saccade::oculomotor::Oculomotor;
 use saccade::perf::Perf;
-use saccade::perfetto_trace::PerfettoWriter;
+use saccade::perfetto::{self, PerfettoWriter};
 use saccade::scheduler::Scheduler;
 use saccade::scheduler::fixed::FixedScheduler;
 use saccade::scheduler::random::RandomScheduler;
 use saccade::scheduler::round_robin::RoundRobinScheduler;
 use saccade::syscalls;
-use saccade::virtual_backend::{GoldenRates, VirtualBackend};
+use saccade::virtual_backend::{TimeVaryingRates, VirtualBackend};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::BufReader;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::thread;
@@ -88,8 +89,10 @@ fn main() -> std::io::Result<()> {
 
             debug!("Oculomotor starting at {}", syscalls::gettid().unwrap());
 
-            let mut scheduler = RandomScheduler::default();
-            scheduler.init(registry.get_event_ids());
+            // let mut scheduler = RandomScheduler::default();
+            // scheduler.init(registry.get_event_ids());
+        
+            let scheduler = FixedScheduler::new(vec![registry.lookup("ic_fw32").unwrap()]);
 
             let logger = Logger::new("saccade.csv", 256_000)?;
             let logger_tx = logger.clone_sender().expect("Failed to get logger sender");
@@ -137,7 +140,7 @@ fn main() -> std::io::Result<()> {
         Commands::Sweep {
             library,
             quantum,
-            output,
+            trace,
             target,
         } => {
             let lib = match library {
@@ -162,20 +165,27 @@ fn main() -> std::io::Result<()> {
                 num_batches
             );
 
-            // Accumulate per-event rates across all runs: event_id -> (total_count, total_duration_ns)
-            let mut totals: HashMap<u32, (u64, u64)> = HashMap::new();
+            // Accumulate per-event rate time-series across all runs:
+            // event_id -> Vec<(timestamp_ns, rate)>
+            let mut all_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
 
-            for (run_idx, batch) in batches.iter().enumerate() {
+            let pb = ProgressBar::new(num_batches as u64);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta_precise})",
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+            );
+
+            for (_run_idx, batch) in batches.iter().enumerate() {
                 let registry = EventRegistry::new(lib.clone());
-                tracing::info!(
-                    "Sweep run {}/{}: counters {:?}",
-                    run_idx + 1,
-                    num_batches,
-                    batch
-                        .iter()
-                        .map(|&id| registry.get_event_name(id))
-                        .collect::<Vec<_>>()
-                );
+                let counter_names = batch
+                    .iter()
+                    .map(|&id| registry.get_event_name(id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                pb.set_message(counter_names);
                 let num_events = registry.get_event_ids().len();
 
                 let mut child = unsafe {
@@ -193,16 +203,17 @@ fn main() -> std::io::Result<()> {
 
                 let scheduler = FixedScheduler::new(batch.clone());
 
-                let logger = Logger::new(format!("saccade_sweep_{}.csv", run_idx), 256_000)?;
-                let logger_tx = logger.clone_sender().expect("Failed to get logger sender");
-                let backend = HardwareBackend::new(pid, registry, logger_tx)
+                // TODO: make logger_tx optional in HardwareBackend; use dummy channel for now
+                let (dummy_tx, _dummy_rx) =
+                    std::sync::mpsc::sync_channel::<saccade::counter_backend::SaccadeSample>(1);
+                let backend = HardwareBackend::new(pid, registry, dummy_tx)
                     .expect("Failed to create hardware backend");
 
                 let mut oculomotor = Oculomotor::new(
                     Box::new(backend),
                     Box::new(scheduler),
                     num_events,
-                    Some(logger),
+                    None,
                     None,
                 );
 
@@ -215,64 +226,41 @@ fn main() -> std::io::Result<()> {
                     .is_none()
                 {
                     oculomotor.step();
+                    let ts = oculomotor.last_step_ns();
+                    let vcs = oculomotor.vcs();
+                    for &id in batch.iter() {
+                        let est = &vcs.all_estimates()[id as usize];
+                        if est.sample_count > 0 {
+                            all_series.entry(id).or_default().push((ts, est.rate));
+                        }
+                    }
                     thread::sleep(quantum_dur);
                 }
                 child.wait().unwrap();
-
-                // Extract rates for this batch's counters from VCS
-                let vcs = oculomotor.vcs();
-                for &id in batch {
-                    let est = &vcs.all_estimates()[id as usize];
-                    if est.sample_count > 0 {
-                        // Accumulate weighted by sample count as a proxy for duration
-                        let entry = totals.entry(id).or_insert((0, 0));
-                        // Store (weighted_rate_sum, sample_count) for averaging
-                        entry.0 += (est.rate * est.sample_count as f64) as u64;
-                        entry.1 += est.sample_count;
-                    }
-                }
+                pb.inc(1);
             }
+            pb.finish_and_clear();
 
-            // Build golden rates map: event_name -> mean rate (events/ns)
-            let mut rates: HashMap<String, f64> = HashMap::new();
-            {
-                let registry = EventRegistry::new(lib.clone());
-                for (&id, &(weighted_sum, count)) in &totals {
-                    if count > 0 {
-                        let name = registry.get_event_name(id).to_string();
-                        rates.insert(name, weighted_sum as f64 / count as f64);
-                    }
-                }
-            }
-
-            let golden = saccade::virtual_backend::GoldenRates {
-                rates,
-                noise_stddev: 0.0,
-                seed: None,
-            };
-
-            match output {
+            match trace {
                 Some(path) => {
-                    let file = File::create(&path)?;
-                    let writer = BufWriter::new(file);
-                    serde_json::to_writer_pretty(writer, &golden)?;
-                    tracing::info!("Sweep complete. Rates written to {:?}", path);
+                    let registry = EventRegistry::new(lib.clone());
+                    let event_names: Vec<String> = (0..lib.events.len() as u32)
+                        .map(|id| registry.get_event_name(id).to_string())
+                        .collect();
+                    let mut writer = PerfettoWriter::new(&path, event_names)?;
+                    writer.register_tracks()?;
+                    writer.write_raw_series(&all_series)?;
+                    writer.flush()?;
+                    tracing::info!("Sweep complete. Trace written to {:?}", path);
                 }
                 None => {
-                    eprintln!("\n{:<50} {:<16}", "Event", "Rate (ev/ns)");
-                    eprintln!("{}", "-".repeat(68));
-                    let mut entries: Vec<_> = golden.rates.iter().collect();
-                    entries.sort_by(|a, b| a.0.cmp(b.0));
-                    for (name, rate) in entries {
-                        eprintln!("{:<50} {:.8}", name, rate);
-                    }
-                    tracing::info!("Sweep complete.");
+                    tracing::info!("Sweep complete. (No --trace specified; results discarded.)");
                 }
             }
         }
         Commands::Simulate {
             library,
-            golden,
+            rates_trace,
             quantum,
             steps,
             output,
@@ -293,22 +281,20 @@ fn main() -> std::io::Result<()> {
                 .collect();
             debug!("Loaded {} events.", num_events);
 
-            debug!("Loading golden rates from {:?}", golden);
-            let golden_file = File::open(golden)?;
-            let golden_reader = BufReader::new(golden_file);
-            let golden_rates: GoldenRates =
-                serde_json::from_reader(golden_reader).expect("Failed to parse golden rates JSON");
+            debug!("Loading rate time-series from {:?}", rates_trace);
+            let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
 
             // Resolve event names to EventIds
-            let mut rate_map: HashMap<u32, f64> = HashMap::new();
-            for (name, rate) in &golden_rates.rates {
-                if let Some(id) = registry.lookup(name) {
-                    rate_map.insert(id, *rate);
-                    debug!("Golden rate: {} (id={}) -> {} events/ns", name, id, rate);
+            let mut series_map: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+            for (name, data) in timeseries.series {
+                if let Some(id) = registry.lookup(&name) {
+                    debug!("Rate series: {} (id={}) -> {} points", name, id, data.len());
+                    series_map.insert(id, data);
                 } else {
-                    tracing::warn!("Unknown event in golden rates: {}", name);
+                    tracing::warn!("Unknown event in rates trace: {}", name);
                 }
             }
+            let tv_rates = TimeVaryingRates { series: series_map };
 
             let mut scheduler: Box<dyn Scheduler> = match scheduler_name.as_str() {
                 "random" => Box::new(RandomScheduler::default()),
@@ -326,13 +312,7 @@ fn main() -> std::io::Result<()> {
             };
             let logger_tx = logger.as_ref().and_then(|l| l.clone_sender());
 
-            let backend = VirtualBackend::new(
-                rate_map,
-                golden_rates.noise_stddev,
-                quantum,
-                golden_rates.seed,
-                logger_tx,
-            );
+            let backend = VirtualBackend::new(tv_rates, 0.0, quantum, None, logger_tx);
 
             let trace_writer = match trace {
                 Some(path) => {
