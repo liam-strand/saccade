@@ -1,19 +1,22 @@
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use saccade::buffered_output::Logger;
 use saccade::cli::{Cli, Commands};
 use saccade::event_library::EventLibrary;
 use saccade::event_registry::EventRegistry;
-use saccade::hardware_backend::HardwareBackend;
-use saccade::oculomotor::Oculomotor;
 use saccade::perf::Perf;
 use saccade::perfetto::{self, PerfettoWriter};
-use saccade::scheduler::Scheduler;
+use saccade::profiler::ProfilerBuilder;
 use saccade::scheduler::fixed::FixedScheduler;
 use saccade::scheduler::random::RandomScheduler;
 use saccade::scheduler::round_robin::RoundRobinScheduler;
+use saccade::sink::csv::CsvSink;
+use saccade::sink::null::NullSink;
+use saccade::sink::perfetto::PerfettoSink;
+use saccade::source::SampleSource;
+use saccade::source::hardware::HardwareSampleSource;
+use saccade::source::virtual_source::VirtualSampleSource;
 use saccade::syscalls;
-use saccade::virtual_backend::{TimeVaryingRates, VirtualBackend};
+use saccade::virtual_backend::TimeVaryingRates;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -22,6 +25,30 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
+
+fn load_library(path: Option<std::path::PathBuf>) -> std::io::Result<EventLibrary> {
+    match path {
+        Some(p) => {
+            debug!("Loading event library from {:?}", p);
+            let file = File::open(p)?;
+            let reader = BufReader::new(file);
+            Ok(serde_json::from_reader(reader)?)
+        }
+        None => {
+            debug!("Generating event library on the fly...");
+            Ok(EventLibrary::from_bytes(&Perf::list()).unwrap())
+        }
+    }
+}
+
+fn spawn_child(target: &[String]) -> std::io::Result<std::process::Child> {
+    unsafe {
+        Command::new(&target[0])
+            .args(&target[1..])
+            .pre_exec(syscalls::ptrace_traceme)
+            .spawn()
+    }
+}
 
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
@@ -45,117 +72,71 @@ fn main() -> std::io::Result<()> {
             serde_json::to_writer_pretty(buf, &lib)?;
             tracing::info!("Successfully generated event library.");
         }
+
         Commands::Run {
             library,
             quantum,
             trace,
             target,
         } => {
-            let lib = match library {
-                Some(path) => {
-                    debug!("Loading event library from {:?}", path);
-                    let file = File::open(path)?;
-                    let reader = BufReader::new(file);
-                    serde_json::from_reader(reader)?
-                }
-                None => {
-                    debug!("Generating event library on the fly...");
-                    EventLibrary::from_bytes(&Perf::list()).unwrap()
-                }
-            };
-
+            let lib = load_library(library)?;
             let registry = EventRegistry::new(lib);
             let num_events = registry.get_event_ids().len();
-            let event_names: Vec<String> = registry
-                .get_event_ids()
+            let all_ids = registry.get_event_ids();
+            let event_names: Vec<String> = all_ids
                 .iter()
                 .map(|&id| registry.get_event_name(id).to_string())
                 .collect();
             debug!("Loaded {} events.", num_events);
-            debug!("Target program args: {:?}", target);
 
-            debug!("Parent process PID: {}", std::process::id());
-            let mut child = unsafe {
-                Command::new(target[0].clone())
-                    .args(&target[1..])
-                    .pre_exec(syscalls::ptrace_traceme)
-                    .spawn()
-                    .expect("Failed to spawn child process")
-            };
-            debug!("Child process spawned.");
-
+            let mut child = spawn_child(&target)?;
             let pid = child.id();
             syscalls::wait_for_exec(pid)?;
 
-            debug!("Oculomotor starting at {}", syscalls::gettid().unwrap());
+            let source = HardwareSampleSource::new(pid, registry, None)
+                .expect("Failed to create hardware source");
 
-            // let mut scheduler = RandomScheduler::default();
-            // scheduler.init(registry.get_event_ids());
-        
-            let scheduler = FixedScheduler::new(vec![registry.lookup("ic_fw32").unwrap()]);
+            // TODO: make the initial event set configurable via --events flag
+            let initial_events: Vec<u32> =
+                all_ids[..source.num_slots().min(all_ids.len())].to_vec();
+            let scheduler = FixedScheduler::new(initial_events);
 
-            let logger = Logger::new("saccade.csv", 256_000)?;
-            let logger_tx = logger.clone_sender().expect("Failed to get logger sender");
-            let backend = HardwareBackend::new(pid, registry, logger_tx)
-                .expect("Failed to create hardware backend");
+            let mut builder = ProfilerBuilder::new()
+                .num_events(num_events)
+                .source(source)
+                .scheduler(scheduler, all_ids)
+                .add_sink(CsvSink::new("saccade.csv")?);
 
-            let trace_writer = match trace {
-                Some(path) => {
-                    let mut writer = PerfettoWriter::new(path, event_names)?;
-                    writer.register_tracks()?;
-                    Some(writer)
-                }
-                None => None,
-            };
+            if let Some(path) = trace {
+                builder = builder.add_sink(PerfettoSink::new(path, event_names)?);
+            }
 
-            let mut oculomotor = Oculomotor::new(
-                Box::new(backend),
-                Box::new(scheduler),
-                num_events,
-                Some(logger),
-                trace_writer,
-            );
+            let mut profiler = builder.build();
 
-            debug!("Oculomotor is ready.");
-
+            debug!("Profiler is ready.");
             syscalls::ptrace_detach(pid)?;
 
-            let mut quantum = Duration::from_nanos(quantum);
+            let mut quantum_dur = Duration::from_nanos(quantum);
             let mut loops = 0;
-            while child
-                .try_wait()
-                .expect("Failed to wait for child")
-                .is_none()
-            {
-                if let Some(duration) = oculomotor.step() {
-                    quantum = duration;
+            while child.try_wait().expect("Failed to wait for child").is_none() {
+                if let Some(d) = profiler.step() {
+                    quantum_dur = d;
                 }
-                thread::sleep(quantum);
+                thread::sleep(quantum_dur);
                 loops += 1;
             }
-            debug!("Child process exited after {} loops.", loops);
-
             child.wait().unwrap();
+            profiler.finish_sinks();
+            debug!("Child process exited after {} loops.", loops);
         }
+
         Commands::Sweep {
             library,
             quantum,
             trace,
             target,
         } => {
-            let lib = match library {
-                Some(path) => {
-                    debug!("Loading event library from {:?}", path);
-                    let file = File::open(path)?;
-                    let reader = BufReader::new(file);
-                    serde_json::from_reader(reader)?
-                }
-                None => {
-                    debug!("Generating event library on the fly...");
-                    EventLibrary::from_bytes(&Perf::list()).unwrap()
-                }
-            };
-
+            let lib = load_library(library)?;
             let all_ids: Vec<u32> = (0..lib.events.len() as u32).collect();
             let batches: Vec<Vec<u32>> = all_ids.chunks(4).map(|c| c.to_vec()).collect();
             let num_batches = batches.len();
@@ -165,7 +146,6 @@ fn main() -> std::io::Result<()> {
                 num_batches
             );
 
-            // Accumulate per-event rate time-series across all runs:
             // event_id -> Vec<(timestamp_ns, rate)>
             let mut all_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
 
@@ -178,7 +158,7 @@ fn main() -> std::io::Result<()> {
                 .progress_chars("=>-"),
             );
 
-            for (_run_idx, batch) in batches.iter().enumerate() {
+            for batch in &batches {
                 let registry = EventRegistry::new(lib.clone());
                 let counter_names = batch
                     .iter()
@@ -189,7 +169,7 @@ fn main() -> std::io::Result<()> {
                 let num_events = registry.get_event_ids().len();
 
                 let mut child = unsafe {
-                    Command::new(target[0].clone())
+                    Command::new(&target[0])
                         .args(&target[1..])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -201,34 +181,27 @@ fn main() -> std::io::Result<()> {
                 let pid = child.id();
                 syscalls::wait_for_exec(pid)?;
 
+                let source =
+                    HardwareSampleSource::new(pid, registry, None)
+                        .expect("Failed to create hardware source");
+
                 let scheduler = FixedScheduler::new(batch.clone());
 
-                // TODO: make logger_tx optional in HardwareBackend; use dummy channel for now
-                let (dummy_tx, _dummy_rx) =
-                    std::sync::mpsc::sync_channel::<saccade::counter_backend::SaccadeSample>(1);
-                let backend = HardwareBackend::new(pid, registry, dummy_tx)
-                    .expect("Failed to create hardware backend");
-
-                let mut oculomotor = Oculomotor::new(
-                    Box::new(backend),
-                    Box::new(scheduler),
-                    num_events,
-                    None,
-                    None,
-                );
+                let mut profiler = ProfilerBuilder::new()
+                    .num_events(num_events)
+                    .source(source)
+                    .scheduler(scheduler, (0..num_events as u32).collect())
+                    .add_sink(NullSink)
+                    .build();
 
                 syscalls::ptrace_detach(pid)?;
 
                 let quantum_dur = Duration::from_nanos(quantum);
-                while child
-                    .try_wait()
-                    .expect("Failed to wait for child")
-                    .is_none()
-                {
-                    oculomotor.step();
-                    let ts = oculomotor.last_step_ns();
-                    let vcs = oculomotor.vcs();
-                    for &id in batch.iter() {
+                while child.try_wait().expect("Failed to wait for child").is_none() {
+                    profiler.step();
+                    let ts = profiler.current_time_ns();
+                    let vcs = profiler.vcs();
+                    for &id in batch {
                         let est = &vcs.all_estimates()[id as usize];
                         if est.sample_count > 0 {
                             all_series.entry(id).or_default().push((ts, est.rate));
@@ -258,6 +231,7 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
+
         Commands::Simulate {
             library,
             rates_trace,
@@ -269,13 +243,12 @@ fn main() -> std::io::Result<()> {
         } => {
             debug!("Loading event library from {:?}", library);
             let file = File::open(library)?;
-            let reader = BufReader::new(file);
-            let lib: EventLibrary = serde_json::from_reader(reader)?;
+            let lib: EventLibrary = serde_json::from_reader(BufReader::new(file))?;
 
             let registry = EventRegistry::new(lib);
             let num_events = registry.get_event_ids().len();
-            let sim_event_names: Vec<String> = registry
-                .get_event_ids()
+            let all_ids = registry.get_event_ids();
+            let event_names: Vec<String> = all_ids
                 .iter()
                 .map(|&id| registry.get_event_name(id).to_string())
                 .collect();
@@ -284,7 +257,6 @@ fn main() -> std::io::Result<()> {
             debug!("Loading rate time-series from {:?}", rates_trace);
             let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
 
-            // Resolve event names to EventIds
             let mut series_map: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
             for (name, data) in timeseries.series {
                 if let Some(id) = registry.lookup(&name) {
@@ -294,51 +266,40 @@ fn main() -> std::io::Result<()> {
                     tracing::warn!("Unknown event in rates trace: {}", name);
                 }
             }
-            let tv_rates = TimeVaryingRates { series: series_map };
 
-            let mut scheduler: Box<dyn Scheduler> = match scheduler_name.as_str() {
-                "random" => Box::new(RandomScheduler::default()),
-                "round_robin" => Box::new(RoundRobinScheduler::default()),
+            let source =
+                VirtualSampleSource::new(TimeVaryingRates { series: series_map }, 0.0, quantum, None, 4);
+
+            let mut builder = ProfilerBuilder::new()
+                .num_events(num_events)
+                .source(source);
+
+            builder = match scheduler_name.as_str() {
+                "random" => builder.scheduler(RandomScheduler::default(), all_ids),
+                "round_robin" => builder.scheduler(RoundRobinScheduler::default(), all_ids),
                 other => {
                     eprintln!("Unknown scheduler: {}. Using random.", other);
-                    Box::new(RandomScheduler::default())
+                    builder.scheduler(RandomScheduler::default(), all_ids)
                 }
             };
-            scheduler.init(registry.get_event_ids(), 4);
 
-            let logger = match output {
-                Some(path) => Some(Logger::new(path, 256_000)?),
-                None => None,
-            };
-            let logger_tx = logger.as_ref().and_then(|l| l.clone_sender());
-
-            let backend = VirtualBackend::new(tv_rates, 0.0, quantum, None, logger_tx);
-
-            let trace_writer = match trace {
-                Some(path) => {
-                    let mut writer = PerfettoWriter::new(path, sim_event_names)?;
-                    writer.register_tracks()?;
-                    Some(writer)
-                }
-                None => None,
-            };
-
-            let mut oculomotor = Oculomotor::new(
-                Box::new(backend),
-                scheduler,
-                num_events,
-                logger,
-                trace_writer,
-            );
-
-            tracing::info!("Simulating {} steps (quantum={}ns)...", steps, quantum);
-
-            for _ in 0..steps {
-                oculomotor.step();
+            if let Some(path) = output {
+                builder = builder.add_sink(CsvSink::new(path)?);
+            }
+            if let Some(path) = trace {
+                builder = builder.add_sink(PerfettoSink::new(path, event_names)?);
             }
 
+            let mut profiler = builder.build();
+
+            tracing::info!("Simulating {} steps (quantum={}ns)...", steps, quantum);
+            for _ in 0..steps {
+                profiler.step();
+            }
+            profiler.finish_sinks();
+
             // Print VCS summary
-            let vcs = oculomotor.vcs();
+            let vcs = profiler.vcs();
             eprintln!(
                 "\n{:<6} {:<14} {:<14} Samples",
                 "ID", "Rate (ev/ns)", "Uncertainty"
@@ -352,7 +313,6 @@ fn main() -> std::io::Result<()> {
                     );
                 }
             }
-
             tracing::info!("Simulation complete.");
         }
     }
