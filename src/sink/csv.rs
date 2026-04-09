@@ -37,13 +37,7 @@ impl OutputSink for CsvSink {
             writeln!(
                 self.writer,
                 "{},{},{},{},{},{},{}",
-                s.timestamp_ns,
-                s.duration_ns,
-                s.cpu_id,
-                s.pid,
-                s.event_id,
-                s.count,
-                task_name,
+                s.timestamp_ns, s.duration_ns, s.cpu_id, s.pid, s.event_id, s.count, task_name,
             )?;
         }
         Ok(())

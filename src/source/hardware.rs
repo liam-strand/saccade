@@ -97,7 +97,10 @@ impl HardwareSampleSource {
             timer_events.push(counter);
         }
 
-        debug!("HardwareSampleSource has {} timer events", timer_events.len());
+        debug!(
+            "HardwareSampleSource has {} timer events",
+            timer_events.len()
+        );
 
         let hw_counters = HardwareCounters::new(cpus.len(), registry, &mut skel);
 

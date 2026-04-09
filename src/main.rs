@@ -1,5 +1,5 @@
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressIterator, ProgressStyle};
 use saccade::cli::{Cli, Commands};
 use saccade::event::EventLibrary;
 use saccade::event::EventRegistry;
@@ -10,13 +10,12 @@ use saccade::scheduler::fixed::FixedScheduler;
 use saccade::scheduler::random::RandomScheduler;
 use saccade::scheduler::round_robin::RoundRobinScheduler;
 use saccade::sink::csv::CsvSink;
-use saccade::sink::null::NullSink;
 use saccade::sink::perfetto::PerfettoSink;
 use saccade::source::SampleSource;
 use saccade::source::hardware::HardwareSampleSource;
+use saccade::source::virtual_source::TimeVaryingRates;
 use saccade::source::virtual_source::VirtualSampleSource;
 use saccade::syscalls;
-use saccade::source::virtual_source::TimeVaryingRates;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -118,7 +117,11 @@ fn main() -> std::io::Result<()> {
 
             let mut quantum_dur = Duration::from_nanos(quantum);
             let mut loops = 0;
-            while child.try_wait().expect("Failed to wait for child").is_none() {
+            while child
+                .try_wait()
+                .expect("Failed to wait for child")
+                .is_none()
+            {
                 if let Some(d) = profiler.step() {
                     quantum_dur = d;
                 }
@@ -149,24 +152,13 @@ fn main() -> std::io::Result<()> {
             // event_id -> Vec<(timestamp_ns, rate)>
             let mut all_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
 
-            let pb = ProgressBar::new(num_batches as u64);
-            pb.set_style(
+            for batch in batches.iter().progress_with_style(
                 ProgressStyle::with_template(
-                    "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta_precise})",
+                    "[{elapsed_precise}] {wide_bar} {pos}/{len} ({eta_precise})",
                 )
-                .unwrap()
-                .progress_chars("=>-"),
-            );
-
-            for batch in &batches {
+                .unwrap(),
+            ) {
                 let registry = EventRegistry::new(lib.clone());
-                let counter_names = batch
-                    .iter()
-                    .map(|&id| registry.get_event_name(id))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                pb.set_message(counter_names);
-                let num_events = registry.get_event_ids().len();
 
                 let mut child = unsafe {
                     Command::new(&target[0])
@@ -181,38 +173,35 @@ fn main() -> std::io::Result<()> {
                 let pid = child.id();
                 syscalls::wait_for_exec(pid)?;
 
-                let source =
-                    HardwareSampleSource::new(pid, registry, None)
-                        .expect("Failed to create hardware source");
+                let mut source = HardwareSampleSource::new(pid, registry, None)
+                    .expect("Failed to create hardware source");
 
-                let scheduler = FixedScheduler::new(batch.clone());
-
-                let mut profiler = ProfilerBuilder::new()
-                    .num_events(num_events)
-                    .source(source)
-                    .scheduler(scheduler, (0..num_events as u32).collect())
-                    .add_sink(NullSink)
-                    .build();
-
+                source
+                    .apply_schedule(&[], batch)
+                    .expect("Failed to apply schedule");
                 syscalls::ptrace_detach(pid)?;
 
                 let quantum_dur = Duration::from_nanos(quantum);
-                while child.try_wait().expect("Failed to wait for child").is_none() {
-                    profiler.step();
-                    let ts = profiler.current_time_ns();
-                    let vcs = profiler.vcs();
-                    for &id in batch {
-                        let est = &vcs.all_estimates()[id as usize];
-                        if est.sample_count > 0 {
-                            all_series.entry(id).or_default().push((ts, est.rate));
-                        }
+                let mut batch_t0: Option<u64> = None;
+                while child
+                    .try_wait()
+                    .expect("Failed to wait for child")
+                    .is_none()
+                {
+                    let (raw_samples, _elapsed_ns) = source.collect();
+                    for s in raw_samples {
+                        assert_ne!(s.duration_ns, 0);
+                        let t0 = *batch_t0.get_or_insert(s.timestamp_ns);
+                        let rel_ts = s.timestamp_ns.saturating_sub(t0);
+                        all_series
+                            .entry(s.event_id)
+                            .or_default()
+                            .push((rel_ts, s.count as f64 / s.duration_ns as f64));
                     }
                     thread::sleep(quantum_dur);
                 }
                 child.wait().unwrap();
-                pb.inc(1);
             }
-            pb.finish_and_clear();
 
             match trace {
                 Some(path) => {
@@ -267,12 +256,15 @@ fn main() -> std::io::Result<()> {
                 }
             }
 
-            let source =
-                VirtualSampleSource::new(TimeVaryingRates { series: series_map }, 0.0, quantum, None, 4);
+            let source = VirtualSampleSource::new(
+                TimeVaryingRates { series: series_map },
+                0.0,
+                quantum,
+                None,
+                4,
+            );
 
-            let mut builder = ProfilerBuilder::new()
-                .num_events(num_events)
-                .source(source);
+            let mut builder = ProfilerBuilder::new().num_events(num_events).source(source);
 
             builder = match scheduler_name.as_str() {
                 "random" => builder.scheduler(RandomScheduler::default(), all_ids),

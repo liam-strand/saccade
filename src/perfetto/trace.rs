@@ -48,6 +48,19 @@ impl PerfettoWriter {
 
                 self.write_track_descriptor_packet(desc)?;
             }
+
+            // Uncertainty track
+            {
+                let mut counter = CounterDescriptor::new();
+                counter.set_unit_name("uncertainty".to_string());
+
+                let mut desc = TrackDescriptor::new();
+                desc.set_uuid(uncertainty_uuid(i as u32));
+                desc.set_name(format!("{}/uncertainty", name));
+                desc.counter = protobuf::MessageField::some(counter);
+
+                self.write_track_descriptor_packet(desc)?;
+            }
         }
 
         Ok(())

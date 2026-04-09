@@ -58,7 +58,11 @@ impl Profiler {
         let observed: Vec<EventId> = aggregates.keys().copied().collect();
 
         for (&event_id, agg) in aggregates {
-            let stddev = if agg.num_samples < 2 { 0.0 } else { agg.stddev_rate };
+            let stddev = if agg.num_samples < 2 {
+                0.0
+            } else {
+                agg.stddev_rate
+            };
             self.vcs.measurement_update_with_count(
                 event_id,
                 agg.mean_rate,
@@ -114,11 +118,7 @@ impl ProfilerBuilder {
     }
 
     pub fn scheduler(mut self, mut s: impl Scheduler + 'static, all_events: Vec<EventId>) -> Self {
-        let num_slots = self
-            .source
-            .as_ref()
-            .map(|src| src.num_slots())
-            .unwrap_or(4);
+        let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
         s.init(all_events, num_slots);
         self.scheduler = Some(Box::new(s));
         self
@@ -137,7 +137,9 @@ impl ProfilerBuilder {
     pub fn build(self) -> Profiler {
         Profiler {
             source: self.source.expect("ProfilerBuilder: source is required"),
-            scheduler: self.scheduler.expect("ProfilerBuilder: scheduler is required"),
+            scheduler: self
+                .scheduler
+                .expect("ProfilerBuilder: scheduler is required"),
             sinks: self.sinks,
             vcs: VirtualCounterState::new(self.num_events),
             active_set: Vec::new(),
