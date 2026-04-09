@@ -1,6 +1,7 @@
 use crate::counter_backend::{CounterBackend, MAX_COUNTERS, Observation, SaccadeSample};
 use crate::event_registry::{EventId, EventRegistry};
 use crate::hardware_counters::HardwareCounters;
+use crate::sample::{MAX_CPUS, SampleType};
 use crate::sampler::SamplerSkelBuilder;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
@@ -19,6 +20,9 @@ pub struct HardwareBackend {
     _timer_links: Vec<libbpf_rs::Link>,
     _timer_events: Vec<perf_event::Counter>,
     observation_rx: Receiver<SaccadeSample>,
+    /// Per-(cpu, slot) baseline counter values. Used to compute deltas from the
+    /// absolute counter readings that the BPF now sends.
+    baselines: [[u64; MAX_COUNTERS]; MAX_CPUS],
 }
 
 impl HardwareBackend {
@@ -101,6 +105,7 @@ impl HardwareBackend {
             _timer_links: timer_links,
             _timer_events: timer_events,
             observation_rx: obs_rx,
+            baselines: [[0u64; MAX_COUNTERS]; MAX_CPUS],
         })
     }
 }
@@ -109,7 +114,7 @@ impl CounterBackend for HardwareBackend {
     fn poll_observations(&mut self) -> Vec<Observation> {
         let _ = self.ringbuf.poll(Duration::from_millis(10));
 
-        // Per-event Welford accumulator: (n, mean, M2, min, max, total_count, total_duration_ns)
+        // Per-event Welford accumulator
         struct Acc {
             n: u32,
             mean: f64,
@@ -122,19 +127,37 @@ impl CounterBackend for HardwareBackend {
         let mut by_event: HashMap<EventId, Acc> = HashMap::new();
 
         while let Ok(sample) = self.observation_rx.try_recv() {
+            let cpu = sample.cpu_id as usize;
+            if cpu >= MAX_CPUS {
+                continue;
+            }
+
+            // RESUME marker: update baselines, skip aggregation
+            if sample.type_ == SampleType::Resume as u32 {
+                for slot in 0..MAX_COUNTERS {
+                    self.baselines[cpu][slot] = sample.counters[slot];
+                }
+                continue;
+            }
+
+            if sample.duration_ns == 0 {
+                continue;
+            }
+
             for slot in 0..MAX_COUNTERS {
                 let event_id = sample.events[slot] as EventId;
-                let value = sample.values[slot];
-                if value == 0 && sample.events[slot] == 0 {
+                if event_id == 0 && sample.events[slot] == 0 {
                     continue;
                 }
-                if sample.duration_ns == 0 {
-                    eprintln!("ZERO DURATION!!!");
-                    panic!("ZERO DURATION!!!");
-                }
 
-                let duration = sample.duration_ns.max(1);
-                let rate = value as f64 / duration as f64;
+                let abs_value = sample.counters[slot];
+                let baseline = self.baselines[cpu][slot];
+                // Compute delta; if counter rolled back (e.g. counter was swapped), treat as 0.
+                let count = abs_value.saturating_sub(baseline);
+                self.baselines[cpu][slot] = abs_value;
+
+                let duration = sample.duration_ns;
+                let rate = count as f64 / duration as f64;
                 let acc = by_event.entry(event_id).or_insert(Acc {
                     n: 0,
                     mean: 0.0,
@@ -154,7 +177,7 @@ impl CounterBackend for HardwareBackend {
                 if rate > acc.max {
                     acc.max = rate;
                 }
-                acc.total_count += value;
+                acc.total_count += count;
                 acc.total_duration_ns += duration;
             }
         }
