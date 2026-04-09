@@ -1,4 +1,4 @@
-use crate::event_registry::EventId;
+use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::virtual_counter::VirtualCounterState;
 

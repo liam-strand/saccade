@@ -1,4 +1,4 @@
-use crate::event_registry::EventId;
+use crate::event::EventId;
 
 /// Per-counter estimate, maintained for every event in the registry.
 /// Tracks a running rate estimate and an uncertainty measure.

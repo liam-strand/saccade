@@ -1,7 +1,8 @@
-use crate::event_registry::EventId;
+use std::collections::HashMap;
+
+use crate::event::EventId;
 use crate::sample::RawSample;
 use crate::source::SampleSource;
-use crate::virtual_backend::TimeVaryingRates;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
@@ -89,5 +90,38 @@ impl SampleSource for VirtualSampleSource {
 
     fn num_slots(&self) -> usize {
         self.num_slots
+    }
+}
+
+
+/// Per-event time-varying rates, keyed by EventId.
+/// Each entry is a sorted Vec of (timestamp_ns, rate_events_per_ns).
+pub struct TimeVaryingRates {
+    pub series: HashMap<EventId, Vec<(u64, f64)>>,
+}
+
+impl TimeVaryingRates {
+    /// Return the interpolated rate for `event_id` at `time_ns`.
+    /// Holds the first/last observed rate before/after the recorded range.
+    pub fn rate_at(&self, event_id: EventId, time_ns: u64) -> f64 {
+        let Some(points) = self.series.get(&event_id) else {
+            return 0.0;
+        };
+        if points.is_empty() {
+            return 0.0;
+        }
+        if time_ns <= points[0].0 {
+            return points[0].1;
+        }
+        let last = points[points.len() - 1];
+        if time_ns >= last.0 {
+            return last.1;
+        }
+        // Find the two surrounding points via binary search.
+        let idx = points.partition_point(|&(ts, _)| ts <= time_ns);
+        let (t0, r0) = points[idx - 1];
+        let (t1, r1) = points[idx];
+        let frac = (time_ns - t0) as f64 / (t1 - t0) as f64;
+        r0 + frac * (r1 - r0)
     }
 }
