@@ -107,7 +107,7 @@ impl CounterBackend for VirtualBackend {
             });
 
             if slot < MAX_COUNTERS {
-                sample.values[slot] = count;
+                sample.counters[slot] = count;
                 sample.events[slot] = event_id as u64;
             }
         }

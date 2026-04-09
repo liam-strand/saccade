@@ -8,7 +8,6 @@
 volatile __u64 min_sample_interval_ns = 1000000; // 1ms default
 volatile __u32 target_pid = 0;
 volatile __u32 active_counter_ids[MAX_COUNTERS] = {0};
-volatile __u64 prev_counter_values[MAX_CPUS][MAX_COUNTERS] = {0};
 volatile bool tracking = false;
 volatile bool stopped[MAX_CPUS] = {[0 ... MAX_CPUS - 1] = true};
 
@@ -85,32 +84,6 @@ static __always_inline void set_stopped(u64 idx, bool v) {
     }
 }
 
-static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
-    if (cpu_id >= MAX_CPUS || !stopped[cpu_id]) {
-        return false;
-    }
-    set_stopped(cpu_id, false);
-
-// Snapshot counter baselines so next sample excludes dead-time drift
-#pragma unroll
-    for (int i = 0; i < MAX_COUNTERS; i++) {
-        struct bpf_perf_event_value buf;
-        long err = bpf_perf_event_read_value(get_counter(i), cpu_id, &buf, sizeof(buf));
-        if (!err) {
-            prev_counter_values[cpu_id][i] = buf.counter;
-        } else {
-            prev_counter_values[cpu_id][i] = 0;
-        }
-    }
-
-    // Reset start_map timestamp to exclude dead time
-    u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
-    if (tsp) {
-        bpf_map_update_elem(&start_map, &pid, &now, BPF_EXIST);
-    }
-    return true;
-}
-
 static __always_inline void
 record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     struct saccade_sample *s;
@@ -128,7 +101,7 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     s->type = type;
     bpf_get_current_comm(&s->task, sizeof(s->task));
 
-// Read hardware counters
+// Read hardware counters — send absolute values; delta computation happens in userspace.
 #pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
         u32 idx = s->cpu_id;
@@ -138,17 +111,29 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
 
         struct bpf_perf_event_value buf;
         long err = bpf_perf_event_read_value(get_counter(i), idx, &buf, sizeof(buf));
-        if (err) {
-            s->values[i] = 18000000000000000000 - err;
-            prev_counter_values[idx][i] = 0;
-        } else {
-            s->values[i] = buf.counter - prev_counter_values[idx][i];
-            prev_counter_values[idx][i] = buf.counter;
-        }
+        s->counters[i] = err ? 0 : buf.counter;
         s->events[i] = active_counter_ids[i];
     }
 
     bpf_ringbuf_submit(s, 0);
+}
+
+static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
+    if (cpu_id >= MAX_CPUS || !stopped[cpu_id]) {
+        return false;
+    }
+    set_stopped(cpu_id, false);
+
+    // Emit a RESUME marker so userspace can reset its per-(cpu,slot) baselines.
+    // duration_ns=0 signals this is a baseline reset, not a real sample.
+    record_sample(pid, 0, now, 0, SAMPLE_TYPE_RESUME);
+
+    // Reset start_map timestamp to exclude dead time accumulated while stopped.
+    u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
+    if (tsp) {
+        bpf_map_update_elem(&start_map, &pid, &now, BPF_EXIST);
+    }
+    return true;
 }
 
 // Hook: Context Switch
