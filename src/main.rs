@@ -304,7 +304,7 @@ fn main() -> std::io::Result<()> {
                     Box::new(RandomScheduler::default())
                 }
             };
-            scheduler.init(registry.get_event_ids());
+            scheduler.init(registry.get_event_ids(), 4);
 
             let logger = match output {
                 Some(path) => Some(Logger::new(path, 256_000)?),
