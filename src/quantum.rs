@@ -1,4 +1,4 @@
-use crate::event_registry::EventId;
+use crate::event::EventId;
 use crate::sample::RawSample;
 use std::cell::OnceCell;
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-use crate::event_registry::{EventId, EventRegistry};
+use crate::event::{EventId, EventRegistry};
 use crate::hardware_counters::HardwareCounters;
 use crate::sample::{MAX_COUNTERS, MAX_CPUS, RawSample, SampleType, WireSample};
 use crate::sampler::SamplerSkelBuilder;

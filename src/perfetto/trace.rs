@@ -1,4 +1,4 @@
-use crate::event_registry::EventId;
+use crate::event::EventId;
 use crate::virtual_counter::VirtualCounterState;
 use perfetto_protos::counter_descriptor::CounterDescriptor;
 use perfetto_protos::trace_packet::TracePacket;

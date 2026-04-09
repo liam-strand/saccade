@@ -1,4 +1,4 @@
-use crate::event_registry::EventId;
+use crate::event::EventId;
 
 /// Must match `enum SampleType` in `sampler.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
