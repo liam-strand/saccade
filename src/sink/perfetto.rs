@@ -33,6 +33,7 @@ impl OutputSink for PerfettoSink {
         active_set: &[EventId],
     ) -> std::io::Result<()> {
         // Update thread metadata from this quantum's raw samples.
+        // tid=0 is the kernel idle task; it is never a meaningful profiling target.
         for s in quantum.samples() {
             if s.tid == 0 {
                 continue;

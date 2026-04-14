@@ -1,6 +1,7 @@
 use crate::commands::load_library;
 use crate::event::EventRegistry;
 use crate::perfetto::PerfettoWriter;
+use crate::sample::TASK_COMM_LEN;
 use crate::source::SampleSource;
 use crate::source::hardware::HardwareSampleSource;
 use crate::syscalls;
@@ -89,7 +90,6 @@ pub fn sweep(
         {
             let (raw_samples, _elapsed_ns) = source.collect();
             for s in raw_samples {
-                use crate::sample::TASK_COMM_LEN;
                 assert_ne!(s.duration_ns, 0);
                 let t0 = *batch_t0.get_or_insert(s.timestamp_ns);
                 let rel_ts = s.timestamp_ns.saturating_sub(t0);
