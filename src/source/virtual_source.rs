@@ -65,12 +65,11 @@ impl SampleSource for VirtualSampleSource {
         let ts = self.current_time_ns + self.quantum_ns;
 
         for &event_id in &self.active_set {
-            let tids = match self.tids_by_event.get(&event_id) {
-                Some(t) => t.clone(),
-                None => continue,
+            let Some(tids) = self.tids_by_event.get(&event_id) else {
+                continue;
             };
 
-            for tid in tids {
+            for &tid in tids {
                 let base_rate = self.rates.rate_at(event_id, tid, self.current_time_ns);
                 let lambda = base_rate * self.quantum_ns as f64;
 

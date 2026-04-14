@@ -15,7 +15,7 @@ pub struct RateTimeSeries {
 ///
 /// Handles two track name formats:
 /// - New: counter track named `{event_name}/rate` with `parent_uuid` pointing to a thread track
-///        (thread track has a `ThreadDescriptor` with a `tid` field) → key = (event_name, tid)
+///   (thread track has a `ThreadDescriptor` with a `tid` field) → key = (event_name, tid)
 /// - Old: counter track named `{event_name}/rate` with no thread parent → key = (event_name, 0)
 ///
 /// `{event_name}/uncertainty` tracks are ignored.

@@ -33,7 +33,7 @@ pub struct HardwareSampleSource {
 
 impl HardwareSampleSource {
     pub fn new(
-        target_pid: u32,
+        target_tgid: u32,
         registry: EventRegistry,
         logger_tx: Option<SyncSender<WireSample>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -47,8 +47,8 @@ impl HardwareSampleSource {
             .maps
             .bss_data
             .as_mut()
-            .expect("Failed to set target PID")
-            .target_tgid = target_pid;
+            .expect("Failed to set target TGID")
+            .target_tgid = target_tgid;
         open_skel
             .maps
             .data_data
@@ -59,7 +59,7 @@ impl HardwareSampleSource {
         let mut skel = open_skel.load()?;
         skel.attach()?;
 
-        debug!("HardwareSampleSource attached to PID {}", target_pid);
+        debug!("HardwareSampleSource attached to TGID {}", target_tgid);
 
         let (wire_tx, wire_rx) = mpsc::sync_channel::<WireSample>(256_000);
 

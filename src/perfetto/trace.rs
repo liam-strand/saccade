@@ -130,7 +130,17 @@ impl PerfettoWriter {
         if let Some(&uuid) = self.thread_uuids.get(&tid) {
             return Ok(uuid);
         }
-        let process_uuid = self.ensure_process_track(tgid, task)?;
+        // Use the thread's task name as the process name only when this is the main thread
+        // (tid == tgid). Otherwise fall back to a numeric name so that the process track is
+        // not accidentally labeled with an arbitrary worker thread's comm string.
+        let process_name;
+        let process_name_str: &str = if tid == tgid {
+            task
+        } else {
+            process_name = format!("{}", tgid);
+            &process_name
+        };
+        let process_uuid = self.ensure_process_track(tgid, process_name_str)?;
         let uuid = self.next_thread_uuid;
         self.next_thread_uuid += 1;
         self.thread_uuids.insert(tid, uuid);
@@ -279,10 +289,10 @@ impl PerfettoWriter {
 
         for (ts, event_id, tid, rate) in points {
             let (tgid, task) = match thread_meta.get(&tid) {
-                Some(m) => (m.0, m.1.clone()),
+                Some(m) => (m.0, m.1.as_str()),
                 None => continue,
             };
-            let thread_uuid = self.ensure_thread_track(tgid, tid, &task)?;
+            let thread_uuid = self.ensure_thread_track(tgid, tid, task)?;
             let (r_uuid, u_uuid) = self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
             self.write_counter_packet(ts, r_uuid, rate)?;
             self.write_counter_packet(ts, u_uuid, 0.0)?;
