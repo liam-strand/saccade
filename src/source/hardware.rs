@@ -195,18 +195,23 @@ impl SampleSource for HardwareSampleSource {
         if old_set.is_empty() {
             for (i, &id) in new_set.iter().enumerate() {
                 self.hw_counters.update_slot(&mut self.skel, i, id)?;
+                for cpu_baselines in self.baselines.iter_mut() {
+                    cpu_baselines[i] = 0;
+                }
             }
         } else {
             for (i, &old_id) in old_set.iter().enumerate() {
                 if old_id != new_set[i] {
                     self.hw_counters
                         .update_slot(&mut self.skel, i, new_set[i])?;
+                    // Reset baseline only for this slot; the next RESUME marker
+                    // will re-anchor it from the current absolute counter value.
+                    for cpu_baselines in self.baselines.iter_mut() {
+                        cpu_baselines[i] = 0;
+                    }
                 }
             }
         }
-        // When counters are swapped, baselines are stale — reset them all.
-        // The next sample from each CPU will establish a new baseline via saturating_sub.
-        self.baselines = [[0u64; MAX_COUNTERS]; MAX_CPUS];
         Ok(())
     }
 
