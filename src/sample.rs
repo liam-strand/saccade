@@ -28,7 +28,7 @@ pub struct WireSample {
     pub pid: u32,
     pub cpu_id: u32,
     pub type_: u32,
-    pub pad: u32,
+    pub tid: u32,
     pub counters: [u64; MAX_COUNTERS], // absolute perf counter readings
     pub events: [u64; MAX_COUNTERS],   // active event IDs per slot
     pub task: [u8; TASK_COMM_LEN],
@@ -47,6 +47,7 @@ pub struct RawSample {
     pub duration_ns: u64,
     pub cpu_id: u32,
     pub pid: u32,
+    pub tid: u32,
     /// The hardware event that was counted.
     pub event_id: EventId,
     /// Number of events that occurred during `duration_ns`. This is a delta, not an absolute value.

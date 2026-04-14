@@ -48,7 +48,7 @@ impl HardwareSampleSource {
             .bss_data
             .as_mut()
             .expect("Failed to set target PID")
-            .target_pid = target_pid;
+            .target_tgid = target_pid;
         open_skel
             .maps
             .data_data
@@ -159,6 +159,7 @@ impl HardwareSampleSource {
                 duration_ns: wire.duration_ns,
                 cpu_id: wire.cpu_id,
                 pid: wire.pid,
+                tid: wire.tid,
                 event_id,
                 count,
                 task: wire.task,

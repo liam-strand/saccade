@@ -60,7 +60,7 @@
 //! // In sampler.bpf.c
 //!
 //! volatile __u64 min_sample_interval_ns = 1000000; // Default 1ms
-//! volatile __u32 target_pid = 0;
+//! volatile __u32 target_tgid = 0;
 //! volatile __u32 active_counter_ids[MAX_COUNTERS] = {0, 0, 0, 0};
 //! ```
 //!
