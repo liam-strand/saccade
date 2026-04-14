@@ -18,7 +18,7 @@ impl CsvSink {
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
         writeln!(
             writer,
-            "timestamp_ns,duration_ns,cpu_id,pid,event_id,count,task"
+            "timestamp_ns,duration_ns,cpu_id,pid,tid,event_id,count,task"
         )?;
         Ok(Self { writer })
     }
@@ -36,8 +36,15 @@ impl OutputSink for CsvSink {
             let task_name = String::from_utf8_lossy(&s.task[..task_len]);
             writeln!(
                 self.writer,
-                "{},{},{},{},{},{},{}",
-                s.timestamp_ns, s.duration_ns, s.cpu_id, s.pid, s.event_id, s.count, task_name,
+                "{},{},{},{},{},{},{},{}",
+                s.timestamp_ns,
+                s.duration_ns,
+                s.cpu_id,
+                s.pid,
+                s.tid,
+                s.event_id,
+                s.count,
+                task_name,
             )?;
         }
         Ok(())
