@@ -21,7 +21,7 @@ struct saccade_sample {
     __u32 pid;
     __u32 cpu_id;
     __u32 type;
-    __u32 pad0; // Explicit padding for alignment
+    __u32 tid;                    // Kernel thread ID (task_struct->pid); pid field holds TGID
     __u64 counters[MAX_COUNTERS]; // absolute perf counter readings (not deltas)
     __u64 events[MAX_COUNTERS];
     char task[TASK_COMM_LEN];

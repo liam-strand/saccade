@@ -6,7 +6,7 @@
 
 // Global variables for control (placed in .bss by default which is map-based in libbpf-rs)
 volatile __u64 min_sample_interval_ns = 1000000; // 1ms default
-volatile __u32 target_pid = 0;
+volatile __u32 target_tgid = 0;
 volatile __u32 active_counter_ids[MAX_COUNTERS] = {0};
 volatile bool tracking = false;
 volatile bool stopped[MAX_CPUS] = {[0 ... MAX_CPUS - 1] = true};
@@ -96,7 +96,8 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
 
     s->timestamp_ns = now;
     s->duration_ns = delta;
-    s->pid = pid;
+    s->pid = tgid;
+    s->tid = pid;
     s->cpu_id = bpf_get_smp_processor_id();
     s->type = type;
     bpf_get_current_comm(&s->task, sizeof(s->task));
@@ -159,7 +160,7 @@ int handle__sched_switch(u64 *ctx) {
         // no longer on-CPU so leaving it would produce a bogus sample).
         bpf_map_delete_elem(&start_map, &prev_pid);
         // Still handle switch-in for next.
-        if (target_pid != 0 && next_pid != target_pid)
+        if (target_tgid != 0 && next->tgid != target_tgid)
             return 0;
         bpf_map_update_elem(&start_map, &next_pid, &now, BPF_ANY);
         return 0;
@@ -175,7 +176,7 @@ int handle__sched_switch(u64 *ctx) {
     }
 
     // Handle Switch-IN (next)
-    if (target_pid != 0 && next_pid != target_pid) {
+    if (target_tgid != 0 && next->tgid != target_tgid) {
         return 0;
     }
 
@@ -189,15 +190,16 @@ SEC("perf_event")
 int handle_timer(struct bpf_perf_event_data *ctx) {
     u64 cpu_id = bpf_get_smp_processor_id();
     u64 now = bpf_ktime_get_ns();
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    u32 tgid = bpf_get_current_pid_tgid();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tgid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
 
     if (!tracking) {
         set_stopped(cpu_id, true);
         return 0;
     }
 
-    if (handle_resume(cpu_id, pid, now)) {
+    if (handle_resume(cpu_id, tid, now)) {
         return 0; // Resumed — baseline reset, no sample
     }
     set_stopped(cpu_id, false);
@@ -205,7 +207,7 @@ int handle_timer(struct bpf_perf_event_data *ctx) {
     // This hook fires periodically (e.g. 100Hz) on each CPU.
     // Check if the CURRENT task is being tracked.
 
-    u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
+    u64 *tsp = bpf_map_lookup_elem(&start_map, &tid);
     if (!tsp) {
         // Not tracking this task (or not switched in via hook)
         return 0;
@@ -220,10 +222,10 @@ int handle_timer(struct bpf_perf_event_data *ctx) {
 
     // Record Intermediate Sample based on delta since last time
     // Capture delta since last sample.
-    record_sample(pid, tgid, now, delta, SAMPLE_TYPE_INTERMEDIATE);
+    record_sample(tid, tgid, now, delta, SAMPLE_TYPE_INTERMEDIATE);
 
     // Update timestamp so next delta is relative to now
-    bpf_map_update_elem(&start_map, &pid, &now, BPF_EXIST);
+    bpf_map_update_elem(&start_map, &tid, &now, BPF_EXIST);
 
     return 0;
 }
