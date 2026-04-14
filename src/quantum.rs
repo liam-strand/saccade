@@ -31,6 +31,7 @@ pub struct Quantum {
     timestamp_ns: u64,
     elapsed_ns: u64,
     aggregates: OnceCell<HashMap<EventId, EventAggregate>>,
+    per_thread_aggregates: OnceCell<HashMap<(u32, EventId), EventAggregate>>,
 }
 
 impl Quantum {
@@ -40,6 +41,7 @@ impl Quantum {
             timestamp_ns,
             elapsed_ns,
             aggregates: OnceCell::new(),
+            per_thread_aggregates: OnceCell::new(),
         }
     }
 
@@ -66,6 +68,78 @@ impl Quantum {
     pub fn observed_events(&self) -> Vec<EventId> {
         self.aggregates().keys().copied().collect()
     }
+
+    /// Lazily compute per-(tid, event) rate aggregates. Result is cached.
+    pub fn per_thread_aggregates(&self) -> &HashMap<(u32, EventId), EventAggregate> {
+        self.per_thread_aggregates
+            .get_or_init(|| aggregate_samples_by_thread(&self.samples))
+    }
+}
+
+/// Welford's online algorithm keyed by (tid, event_id).
+fn aggregate_samples_by_thread(samples: &[RawSample]) -> HashMap<(u32, EventId), EventAggregate> {
+    struct Acc {
+        n: u32,
+        mean: f64,
+        m2: f64,
+        min: f64,
+        max: f64,
+        total_count: u64,
+        total_duration_ns: u64,
+    }
+
+    let mut by_thread_event: HashMap<(u32, EventId), Acc> = HashMap::new();
+
+    for s in samples {
+        if s.duration_ns == 0 {
+            continue;
+        }
+        let rate = s.count as f64 / s.duration_ns as f64;
+        let acc = by_thread_event.entry((s.tid, s.event_id)).or_insert(Acc {
+            n: 0,
+            mean: 0.0,
+            m2: 0.0,
+            min: f64::MAX,
+            max: f64::MIN,
+            total_count: 0,
+            total_duration_ns: 0,
+        });
+        acc.n += 1;
+        let delta = rate - acc.mean;
+        acc.mean += delta / acc.n as f64;
+        acc.m2 += delta * (rate - acc.mean);
+        if rate < acc.min {
+            acc.min = rate;
+        }
+        if rate > acc.max {
+            acc.max = rate;
+        }
+        acc.total_count += s.count;
+        acc.total_duration_ns += s.duration_ns;
+    }
+
+    by_thread_event
+        .into_iter()
+        .map(|((tid, event_id), acc)| {
+            (
+                (tid, event_id),
+                EventAggregate {
+                    event_id,
+                    total_count: acc.total_count,
+                    total_duration_ns: acc.total_duration_ns,
+                    mean_rate: acc.mean,
+                    stddev_rate: if acc.n < 2 {
+                        0.0
+                    } else {
+                        (acc.m2 / acc.n as f64).sqrt()
+                    },
+                    min_rate: if acc.n == 0 { 0.0 } else { acc.min },
+                    max_rate: if acc.n == 0 { 0.0 } else { acc.max },
+                    num_samples: acc.n,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Welford's online algorithm over per-sample rates (count / duration_ns).
