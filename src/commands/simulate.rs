@@ -33,11 +33,17 @@ pub fn simulate(
     debug!("Loading rate time-series from {:?}", rates_trace);
     let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
 
-    let mut series_map: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
-    for (name, data) in timeseries.series {
+    let mut series_map: HashMap<(u32, u32), Vec<(u64, f64)>> = HashMap::new();
+    for ((name, tid), data) in timeseries.series {
         if let Some(id) = registry.lookup(&name) {
-            debug!("Rate series: {} (id={}) -> {} points", name, id, data.len());
-            series_map.insert(id, data);
+            debug!(
+                "Rate series: {} tid={} (id={}) -> {} points",
+                name,
+                tid,
+                id,
+                data.len()
+            );
+            series_map.insert((id, tid), data);
         } else {
             tracing::warn!("Unknown event in rates trace: {}", name);
         }
