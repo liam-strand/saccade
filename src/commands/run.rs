@@ -1,7 +1,8 @@
 use crate::commands::{load_library, spawn_child};
 use crate::event::EventRegistry;
 use crate::profiler::ProfilerBuilder;
-use crate::scheduler::fixed::FixedScheduler;
+use crate::scheduler::Scheduler;
+use crate::scheduler::round_robin::RoundRobinScheduler;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::source::SampleSource;
@@ -35,9 +36,8 @@ pub fn run(
     let source =
         HardwareSampleSource::new(pid, registry, None).expect("Failed to create hardware source");
 
-    // TODO: make the initial event set configurable via --events flag
-    let initial_events: Vec<u32> = all_ids[..source.num_slots().min(all_ids.len())].to_vec();
-    let scheduler = FixedScheduler::new(initial_events);
+    let mut scheduler = RoundRobinScheduler::new();
+    scheduler.init(all_ids.clone(), source.num_slots());
 
     let mut builder = ProfilerBuilder::new()
         .num_events(num_events)
