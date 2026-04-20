@@ -119,7 +119,7 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     bpf_ringbuf_submit(s, 0);
 }
 
-static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
+static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u32 tgid, __u64 now) {
     if (cpu_id >= MAX_CPUS || !stopped[cpu_id]) {
         return false;
     }
@@ -127,12 +127,15 @@ static __always_inline bool handle_resume(__u64 cpu_id, __u32 pid, __u64 now) {
 
     // Emit a RESUME marker so userspace can reset its per-(cpu,slot) baselines.
     // duration_ns=0 signals this is a baseline reset, not a real sample.
-    record_sample(pid, 0, now, 0, SAMPLE_TYPE_RESUME);
+    record_sample(pid, tgid, now, 0, SAMPLE_TYPE_RESUME);
 
-    // Reset start_map timestamp to exclude dead time accumulated while stopped.
-    u64 *tsp = bpf_map_lookup_elem(&start_map, &pid);
-    if (tsp) {
-        bpf_map_update_elem(&start_map, &pid, &now, BPF_EXIST);
+    // Register this thread in start_map so timer-based sampling can begin
+    // immediately — even for threads that were already running on-CPU when
+    // tracking was enabled (they never went through a switch-in, so they
+    // wouldn't be in start_map otherwise). Use BPF_ANY so the entry is
+    // created if absent, or updated if already present.
+    if (target_tgid == 0 || tgid == target_tgid) {
+        bpf_map_update_elem(&start_map, &pid, &now, BPF_ANY);
     }
     return true;
 }
@@ -153,7 +156,7 @@ int handle__sched_switch(u64 *ctx) {
         return 0;
     }
 
-    if (handle_resume(cpu_id, prev_pid, now)) {
+    if (handle_resume(cpu_id, prev_pid, prev->tgid, now)) {
         // Resumed from stopped — baselines reset, skip flush.
         // prev is being switched out: remove its start_map entry
         // (handle_resume may have reset its timestamp, but prev is
@@ -199,7 +202,7 @@ int handle_timer(struct bpf_perf_event_data *ctx) {
         return 0;
     }
 
-    if (handle_resume(cpu_id, tid, now)) {
+    if (handle_resume(cpu_id, tid, tgid, now)) {
         return 0; // Resumed — baseline reset, no sample
     }
     set_stopped(cpu_id, false);
