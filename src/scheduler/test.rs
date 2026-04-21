@@ -1,7 +1,7 @@
 use crate::event::{EventId, EventRegistry};
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 use std::time::Duration;
 
 pub struct TestScheduler {
@@ -45,7 +45,11 @@ impl Scheduler for TestScheduler {
         self.num_slots = num_slots;
     }
 
-    fn next_step(&mut self, _quantum: &Quantum, _vcs: &VirtualCounterState) -> ScheduleDecision {
+    fn next_step(
+        &mut self,
+        _quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+    ) -> ScheduleDecision {
         let len = self.events.len();
 
         if len == 0 {

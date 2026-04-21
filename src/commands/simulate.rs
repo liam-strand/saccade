@@ -83,13 +83,13 @@ pub fn simulate(
     }
     profiler.finish_sinks();
 
-    let vcs = profiler.vcs();
+    let estimator = profiler.estimator();
     eprintln!(
         "\n{:<6} {:<14} {:<14} Samples",
         "ID", "Rate (ev/ns)", "Uncertainty"
     );
     eprintln!("{}", "-".repeat(50));
-    for (i, est) in vcs.all_estimates().iter().enumerate() {
+    for (i, est) in estimator.all_estimates().iter().enumerate() {
         if est.sample_count > 0 || est.rate > 0.0 {
             eprintln!(
                 "{:<6} {:<14.6} {:<14.6} {}",

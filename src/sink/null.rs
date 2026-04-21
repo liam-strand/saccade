@@ -1,13 +1,13 @@
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::sink::OutputSink;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 
-/// No-op sink. Used for sweep batches where only VCS state is needed.
+/// No-op sink. Used for sweep batches where only estimator state is needed.
 pub struct NullSink;
 
 impl OutputSink for NullSink {
-    fn emit(&mut self, _: &Quantum, _: &VirtualCounterState, _: &[EventId]) -> std::io::Result<()> {
+    fn emit(&mut self, _: &Quantum, _: &dyn StateEstimator, _: &[EventId]) -> std::io::Result<()> {
         Ok(())
     }
 

@@ -11,8 +11,8 @@ pub mod sample;
 pub mod scheduler;
 pub mod sink;
 pub mod source;
+pub mod state;
 pub mod syscalls;
-pub mod virtual_counter;
 
 #[path = "bpf/sampler.skel.rs"]
 mod sampler;

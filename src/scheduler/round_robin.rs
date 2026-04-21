@@ -2,7 +2,7 @@ use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 
 pub struct RoundRobinScheduler {
     events: Vec<EventId>,
@@ -32,7 +32,11 @@ impl Scheduler for RoundRobinScheduler {
         self.num_slots = num_slots;
     }
 
-    fn next_step(&mut self, _quantum: &Quantum, _vcs: &VirtualCounterState) -> ScheduleDecision {
+    fn next_step(
+        &mut self,
+        _quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+    ) -> ScheduleDecision {
         let mut active_events = Vec::with_capacity(self.num_slots);
         let len = self.events.len();
 

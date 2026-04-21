@@ -3,7 +3,7 @@ use crate::perfetto::PerfettoWriter;
 use crate::quantum::Quantum;
 use crate::sample::TASK_COMM_LEN;
 use crate::sink::OutputSink;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -29,7 +29,7 @@ impl OutputSink for PerfettoSink {
     fn emit(
         &mut self,
         quantum: &Quantum,
-        vcs: &VirtualCounterState,
+        estimator: &dyn StateEstimator,
         active_set: &[EventId],
     ) -> std::io::Result<()> {
         // Update thread metadata from this quantum's raw samples.
@@ -47,7 +47,7 @@ impl OutputSink for PerfettoSink {
 
         // Emit aggregate VCS tracks (unchanged).
         self.writer
-            .emit_step(quantum.timestamp_ns(), vcs, active_set)?;
+            .emit_step(quantum.timestamp_ns(), estimator, active_set)?;
 
         // Emit per-thread counter tracks.
         self.writer.emit_thread_steps(

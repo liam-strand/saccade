@@ -3,23 +3,24 @@ use crate::quantum::Quantum;
 use crate::scheduler::Scheduler;
 use crate::sink::OutputSink;
 use crate::source::SampleSource;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
+use crate::state::ema::VirtualCounterState;
 use std::time::Duration;
 
 /// Main profiling orchestrator.
 ///
-/// Replaces `Oculomotor`. Each `step()`:
+/// Each `step()`:
 /// 1. Collects raw samples from the source
 /// 2. Builds a `Quantum` (raw samples + lazy aggregates)
-/// 3. Updates VCS from the quantum's aggregates (measurement + time updates)
+/// 3. Updates the state estimator from the quantum's aggregates
 /// 4. Asks the scheduler for the next active set
 /// 5. Applies the schedule to the source
-/// 6. Emits the quantum + VCS to all output sinks
+/// 6. Emits the quantum + estimator state to all output sinks
 pub struct Profiler {
     source: Box<dyn SampleSource>,
     scheduler: Box<dyn Scheduler>,
     sinks: Vec<Box<dyn OutputSink>>,
-    vcs: VirtualCounterState,
+    estimator: Box<dyn StateEstimator>,
     active_set: Vec<EventId>,
     current_time_ns: u64,
 }
@@ -33,11 +34,11 @@ impl Profiler {
         self.current_time_ns += elapsed_ns;
         let quantum = Quantum::new(raw_samples, self.current_time_ns, elapsed_ns);
 
-        // 3. Update VCS
-        self.update_vcs(&quantum, elapsed_ns);
+        // 3. Update estimator
+        self.update_estimator(&quantum, elapsed_ns);
 
         // 4. Scheduler decision
-        let decision = self.scheduler.next_step(&quantum, &self.vcs);
+        let decision = self.scheduler.next_step(&quantum, self.estimator.as_ref());
 
         // 5. Apply schedule
         self.source
@@ -47,13 +48,13 @@ impl Profiler {
 
         // 6. Emit to all sinks
         for sink in &mut self.sinks {
-            let _ = sink.emit(&quantum, &self.vcs, &self.active_set);
+            let _ = sink.emit(&quantum, self.estimator.as_ref(), &self.active_set);
         }
 
         decision.duration
     }
 
-    fn update_vcs(&mut self, quantum: &Quantum, elapsed_ns: u64) {
+    fn update_estimator(&mut self, quantum: &Quantum, elapsed_ns: u64) {
         let aggregates = quantum.aggregates();
         let observed: Vec<EventId> = aggregates.keys().copied().collect();
 
@@ -63,7 +64,7 @@ impl Profiler {
             } else {
                 agg.stddev_rate
             };
-            self.vcs.measurement_update_with_count(
+            self.estimator.measurement_update(
                 event_id,
                 agg.mean_rate,
                 stddev,
@@ -72,15 +73,15 @@ impl Profiler {
             );
         }
 
-        for id in 0..self.vcs.num_events() as EventId {
+        for id in 0..self.estimator.num_events() as EventId {
             if !observed.contains(&id) {
-                self.vcs.time_update(id, elapsed_ns);
+                self.estimator.time_update(id, elapsed_ns);
             }
         }
     }
 
-    pub fn vcs(&self) -> &VirtualCounterState {
-        &self.vcs
+    pub fn estimator(&self) -> &dyn StateEstimator {
+        self.estimator.as_ref()
     }
 
     pub fn current_time_ns(&self) -> u64 {
@@ -99,6 +100,7 @@ pub struct ProfilerBuilder {
     source: Option<Box<dyn SampleSource>>,
     scheduler: Option<Box<dyn Scheduler>>,
     sinks: Vec<Box<dyn OutputSink>>,
+    estimator: Option<Box<dyn StateEstimator>>,
     num_events: usize,
 }
 
@@ -108,6 +110,7 @@ impl ProfilerBuilder {
             source: None,
             scheduler: None,
             sinks: Vec::new(),
+            estimator: None,
             num_events: 0,
         }
     }
@@ -124,6 +127,11 @@ impl ProfilerBuilder {
         self
     }
 
+    pub fn estimator(mut self, e: impl StateEstimator + 'static) -> Self {
+        self.estimator = Some(Box::new(e));
+        self
+    }
+
     pub fn add_sink(mut self, s: impl OutputSink + 'static) -> Self {
         self.sinks.push(Box::new(s));
         self
@@ -135,13 +143,17 @@ impl ProfilerBuilder {
     }
 
     pub fn build(self) -> Profiler {
+        let mut estimator: Box<dyn StateEstimator> = self
+            .estimator
+            .unwrap_or_else(|| Box::new(VirtualCounterState::new(0)));
+        estimator.init(self.num_events);
         Profiler {
             source: self.source.expect("ProfilerBuilder: source is required"),
             scheduler: self
                 .scheduler
                 .expect("ProfilerBuilder: scheduler is required"),
             sinks: self.sinks,
-            vcs: VirtualCounterState::new(self.num_events),
+            estimator,
             active_set: Vec::new(),
             current_time_ns: 0,
         }

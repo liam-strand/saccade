@@ -1,7 +1,7 @@
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 
 /// Always returns the same fixed set of counters.
 /// Used by the `sweep` command to hold counters constant for an entire run.
@@ -18,7 +18,11 @@ impl FixedScheduler {
 impl Scheduler for FixedScheduler {
     fn init(&mut self, _all_events: Vec<EventId>, _num_slots: usize) {}
 
-    fn next_step(&mut self, _quantum: &Quantum, _vcs: &VirtualCounterState) -> ScheduleDecision {
+    fn next_step(
+        &mut self,
+        _quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+    ) -> ScheduleDecision {
         ScheduleDecision {
             active_events: self.active.clone(),
             duration: None,

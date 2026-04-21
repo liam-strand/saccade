@@ -3,7 +3,7 @@ use rand::prelude::*;
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 
 pub struct RandomScheduler {
     events: Vec<EventId>,
@@ -33,7 +33,11 @@ impl Scheduler for RandomScheduler {
         self.num_slots = num_slots;
     }
 
-    fn next_step(&mut self, _quantum: &Quantum, _vcs: &VirtualCounterState) -> ScheduleDecision {
+    fn next_step(
+        &mut self,
+        _quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+    ) -> ScheduleDecision {
         ScheduleDecision {
             active_events: self
                 .events

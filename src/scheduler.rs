@@ -6,7 +6,7 @@ pub mod test;
 
 use crate::event::EventId;
 use crate::quantum::Quantum;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 use std::time::Duration;
 
 /// Pluggable counter selection policy.
@@ -17,9 +17,9 @@ pub trait Scheduler {
     /// Calculate the next set of events to monitor.
     ///
     /// Receives the full `Quantum` (raw samples + lazy aggregates) and the current
-    /// VCS state (rate estimates + uncertainty). The active set returned must not
-    /// exceed `num_slots` (as passed to `init`).
-    fn next_step(&mut self, quantum: &Quantum, vcs: &VirtualCounterState) -> ScheduleDecision;
+    /// estimator state (rate estimates + uncertainty). The active set returned must
+    /// not exceed `num_slots` (as passed to `init`).
+    fn next_step(&mut self, quantum: &Quantum, estimator: &dyn StateEstimator) -> ScheduleDecision;
 }
 
 /// Output from the scheduler: what should we do next?

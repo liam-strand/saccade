@@ -21,8 +21,8 @@ pub fn run(
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
     let registry = EventRegistry::new(lib);
-    let num_events = registry.get_event_ids().len();
     let all_ids = registry.get_event_ids();
+    let num_events = all_ids.len();
     let event_names: Vec<String> = all_ids
         .iter()
         .map(|&id| registry.get_event_name(id).to_string())

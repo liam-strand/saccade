@@ -1,6 +1,6 @@
 use crate::event::EventId;
 use crate::quantum::EventAggregate;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 use perfetto_protos::counter_descriptor::CounterDescriptor;
 use perfetto_protos::process_descriptor::ProcessDescriptor;
 use perfetto_protos::thread_descriptor::ThreadDescriptor;
@@ -87,10 +87,10 @@ impl PerfettoWriter {
     pub fn emit_step(
         &mut self,
         timestamp_ns: u64,
-        vcs: &VirtualCounterState,
+        estimator: &dyn StateEstimator,
         _active_set: &[EventId],
     ) -> std::io::Result<()> {
-        for (i, est) in vcs.all_estimates().iter().enumerate() {
+        for (i, est) in estimator.all_estimates().iter().enumerate() {
             // Skip never-observed counters still at defaults
             if est.rate == 0.0 && est.uncertainty == 1.0 && est.sample_count == 0 {
                 continue;

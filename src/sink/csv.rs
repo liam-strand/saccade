@@ -1,7 +1,7 @@
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::sink::OutputSink;
-use crate::virtual_counter::VirtualCounterState;
+use crate::state::StateEstimator;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -28,7 +28,7 @@ impl OutputSink for CsvSink {
     fn emit(
         &mut self,
         quantum: &Quantum,
-        _vcs: &VirtualCounterState,
+        _estimator: &dyn StateEstimator,
         _active_set: &[EventId],
     ) -> std::io::Result<()> {
         for s in quantum.samples() {
