@@ -1,4 +1,5 @@
 pub mod ema;
+pub mod propagate;
 
 use crate::event::EventId;
 

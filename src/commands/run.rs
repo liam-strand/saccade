@@ -7,6 +7,7 @@ use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::source::SampleSource;
 use crate::source::hardware::HardwareSampleSource;
+use crate::state::propagate::PropagateEstimator;
 use crate::syscalls;
 use std::path::PathBuf;
 use std::thread;
@@ -43,6 +44,7 @@ pub fn run(
         .num_events(num_events)
         .source(source)
         .scheduler(scheduler, all_ids)
+        .estimator(PropagateEstimator::new())
         .add_sink(CsvSink::new("saccade.csv")?);
 
     if let Some(path) = trace {

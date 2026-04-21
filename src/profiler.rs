@@ -4,7 +4,6 @@ use crate::scheduler::Scheduler;
 use crate::sink::OutputSink;
 use crate::source::SampleSource;
 use crate::state::StateEstimator;
-use crate::state::ema::VirtualCounterState;
 use std::time::Duration;
 
 /// Main profiling orchestrator.
@@ -143,17 +142,15 @@ impl ProfilerBuilder {
     }
 
     pub fn build(self) -> Profiler {
-        let mut estimator: Box<dyn StateEstimator> = self
-            .estimator
-            .unwrap_or_else(|| Box::new(VirtualCounterState::new(0)));
-        estimator.init(self.num_events);
         Profiler {
             source: self.source.expect("ProfilerBuilder: source is required"),
             scheduler: self
                 .scheduler
                 .expect("ProfilerBuilder: scheduler is required"),
             sinks: self.sinks,
-            estimator,
+            estimator: self
+                .estimator
+                .expect("ProfilerBuilder: estimator is required"),
             active_set: Vec::new(),
             current_time_ns: 0,
         }
