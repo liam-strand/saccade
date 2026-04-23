@@ -7,20 +7,32 @@ use crate::state::StateEstimator;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Perfetto trace sink. Emits VCS rate/uncertainty aggregate tracks plus per-thread counter tracks.
+/// Perfetto trace sink. Emits per-(thread, event) counter tracks from the
+/// state estimator's current snapshot.
+///
+/// Output cadence is decoupled from the scheduling quantum: the sink only
+/// writes a snapshot when at least `output_period_ns` has elapsed since the
+/// previous write. `output_period_ns = 0` means "emit every quantum".
 pub struct PerfettoSink {
     writer: PerfettoWriter,
     /// tid → (tgid, task_name) — accumulated across quantums for track registration.
     thread_meta: HashMap<u32, (u32, String)>,
+    output_period_ns: u64,
+    last_emit_ns: Option<u64>,
 }
 
 impl PerfettoSink {
-    pub fn new(path: impl AsRef<Path>, event_names: Vec<String>) -> std::io::Result<Self> {
-        let mut writer = PerfettoWriter::new(path, event_names)?;
-        writer.register_tracks()?;
+    pub fn new(
+        path: impl AsRef<Path>,
+        event_names: Vec<String>,
+        output_period_ns: u64,
+    ) -> std::io::Result<Self> {
+        let writer = PerfettoWriter::new(path, event_names)?;
         Ok(Self {
             writer,
             thread_meta: HashMap::new(),
+            output_period_ns,
+            last_emit_ns: None,
         })
     }
 }
@@ -30,7 +42,7 @@ impl OutputSink for PerfettoSink {
         &mut self,
         quantum: &Quantum,
         estimator: &dyn StateEstimator,
-        active_set: &[EventId],
+        _active_set: &[EventId],
     ) -> std::io::Result<()> {
         // Update thread metadata from this quantum's raw samples.
         // tid=0 is the kernel idle task; it is never a meaningful profiling target.
@@ -45,16 +57,18 @@ impl OutputSink for PerfettoSink {
             });
         }
 
-        // Emit aggregate VCS tracks (unchanged).
-        self.writer
-            .emit_step(quantum.timestamp_ns(), estimator, active_set)?;
+        let ts = quantum.timestamp_ns();
+        let should_emit = match self.last_emit_ns {
+            None => true,
+            Some(last) => ts.saturating_sub(last) >= self.output_period_ns,
+        };
+        if !should_emit {
+            return Ok(());
+        }
+        self.last_emit_ns = Some(ts);
 
-        // Emit per-thread counter tracks.
-        self.writer.emit_thread_steps(
-            quantum.timestamp_ns(),
-            quantum.per_thread_aggregates(),
-            &self.thread_meta,
-        )
+        self.writer
+            .emit_estimator_snapshot(ts, estimator, &self.thread_meta)
     }
 
     fn finish(&mut self) -> std::io::Result<()> {

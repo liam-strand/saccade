@@ -2,8 +2,9 @@ pub mod ema;
 pub mod propagate;
 
 use crate::event::EventId;
+use std::collections::HashMap;
 
-/// Per-counter snapshot produced by a `StateEstimator`.
+/// Per-(tid, event) snapshot produced by a `StateEstimator`.
 #[derive(Debug, Clone)]
 pub struct CounterEstimate {
     /// Estimated event rate (events per nanosecond).
@@ -30,18 +31,20 @@ impl Default for CounterEstimate {
     }
 }
 
-/// Pluggable state estimator for per-counter rate and uncertainty.
-///
-/// The profiler calls `init` once at build time, then `measurement_update` /
-/// `time_update` each quantum. Schedulers and sinks query state via the read
-/// accessors and the optional `correlation` hook.
-pub trait StateEstimator {
-    /// Size internal storage for `num_events` counters.
-    fn init(&mut self, num_events: usize);
+/// Key into estimator storage. Per-thread, per-event.
+pub type EstimateKey = (u32, EventId);
 
-    /// Update the estimate for a counter that was observed this quantum.
+/// Pluggable state estimator for per-(thread, counter) rate and uncertainty.
+///
+/// Estimators are keyed by `(tid, event_id)` and grow on demand: a key is
+/// created the first time `measurement_update` is called for it. The profiler
+/// then calls `time_update` on every existing key that was not observed during
+/// a given quantum.
+pub trait StateEstimator {
+    /// Update the estimate for a (tid, event_id) pair that was observed this quantum.
     fn measurement_update(
         &mut self,
+        tid: u32,
         event_id: EventId,
         rate: f64,
         stddev: f64,
@@ -49,23 +52,12 @@ pub trait StateEstimator {
         timestamp_ns: u64,
     );
 
-    /// Grow uncertainty for a counter that was not sampled this quantum.
-    fn time_update(&mut self, event_id: EventId, elapsed_ns: u64);
+    /// Age the estimate for a (tid, event_id) pair that was NOT observed this quantum.
+    fn time_update(&mut self, tid: u32, event_id: EventId, elapsed_ns: u64);
 
-    fn num_events(&self) -> usize;
-    fn rate(&self, event_id: EventId) -> f64;
-    fn rate_stddev(&self, event_id: EventId) -> f64;
-    fn uncertainty(&self, event_id: EventId) -> f64;
-    fn sample_count(&self, event_id: EventId) -> u64;
+    fn rate(&self, tid: u32, event_id: EventId) -> f64;
+    fn uncertainty(&self, tid: u32, event_id: EventId) -> f64;
 
-    /// Snapshot of all per-counter estimates. Implementations that do not
-    /// natively store `CounterEstimate` values should maintain a materialized
-    /// cache updated in `measurement_update` / `time_update`.
-    fn all_estimates(&self) -> &[CounterEstimate];
-
-    /// Pearson correlation between two counters' rates, if tracked.
-    /// Returns `None` for estimators that do not model cross-counter relationships.
-    fn correlation(&self, _a: EventId, _b: EventId) -> Option<f64> {
-        None
-    }
+    /// All (tid, event_id) estimates currently tracked.
+    fn all_estimates(&self) -> &HashMap<EstimateKey, CounterEstimate>;
 }

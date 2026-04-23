@@ -1,5 +1,4 @@
 use crate::event::EventId;
-use crate::quantum::EventAggregate;
 use crate::state::StateEstimator;
 use perfetto_protos::counter_descriptor::CounterDescriptor;
 use perfetto_protos::process_descriptor::ProcessDescriptor;
@@ -13,12 +12,10 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// UUID base offset to avoid UUID 0 (which is the implicit global track).
-const UUID_BASE: u64 = 1000;
 /// UUID base for dynamically-allocated per-thread tracks.
 const THREAD_UUID_BASE: u64 = 1_000_000;
 
-/// Writes Perfetto trace files containing VCS rate and uncertainty counter tracks.
+/// Writes Perfetto trace files containing per-(thread, event) rate counter tracks.
 ///
 /// The output file is a valid `.perfetto-trace` — a sequence of length-prefixed
 /// `TracePacket` messages wrapped in the `Trace` container wire format.
@@ -31,8 +28,8 @@ pub struct PerfettoWriter {
     process_uuids: HashMap<u32, u64>,
     /// tid → thread track uuid
     thread_uuids: HashMap<u32, u64>,
-    /// (tid, event_id) → (rate_uuid, uncertainty_uuid)
-    thread_counter_uuids: HashMap<(u32, u32), (u64, u64)>,
+    /// (tid, event_id) → rate_uuid
+    thread_counter_uuids: HashMap<(u32, u32), u64>,
 }
 
 impl PerfettoWriter {
@@ -49,57 +46,25 @@ impl PerfettoWriter {
         })
     }
 
-    /// Emit TrackDescriptor packets for each event's rate and uncertainty tracks.
-    pub fn register_tracks(&mut self) -> std::io::Result<()> {
-        let event_names = self.event_names.clone();
-        for (i, name) in event_names.iter().enumerate() {
-            // Rate track
-            {
-                let mut counter = CounterDescriptor::new();
-                counter.set_unit_name("events/ns".to_string());
-
-                let mut desc = TrackDescriptor::new();
-                desc.set_uuid(rate_uuid(i as u32));
-                desc.set_name(format!("{}/rate", name));
-                desc.counter = protobuf::MessageField::some(counter);
-
-                self.write_track_descriptor_packet(desc)?;
-            }
-
-            // Uncertainty track
-            {
-                let mut counter = CounterDescriptor::new();
-                counter.set_unit_name("uncertainty".to_string());
-
-                let mut desc = TrackDescriptor::new();
-                desc.set_uuid(uncertainty_uuid(i as u32));
-                desc.set_name(format!("{}/uncertainty", name));
-                desc.counter = protobuf::MessageField::some(counter);
-
-                self.write_track_descriptor_packet(desc)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Emit counter values for all non-default-state events at the given timestamp.
-    pub fn emit_step(
+    /// Emit one counter packet per tracked (tid, event_id) pair using the
+    /// estimator's current rate. `thread_meta` maps tid → (tgid, task_name) and
+    /// is required to register process/thread tracks; (tid, event_id) pairs
+    /// whose tid is not yet in `thread_meta` are skipped.
+    pub fn emit_estimator_snapshot(
         &mut self,
         timestamp_ns: u64,
         estimator: &dyn StateEstimator,
-        _active_set: &[EventId],
+        thread_meta: &HashMap<u32, (u32, String)>,
     ) -> std::io::Result<()> {
-        for (i, est) in estimator.all_estimates().iter().enumerate() {
-            // Skip never-observed counters still at defaults
-            if est.rate == 0.0 && est.uncertainty == 1.0 && est.sample_count == 0 {
-                continue;
-            }
-
-            self.write_counter_packet(timestamp_ns, rate_uuid(i as u32), est.rate)?;
-            self.write_counter_packet(timestamp_ns, uncertainty_uuid(i as u32), est.uncertainty)?;
+        for (&(tid, event_id), est) in estimator.all_estimates() {
+            let (tgid, task) = match thread_meta.get(&tid) {
+                Some(m) => (m.0, m.1.as_str()),
+                None => continue,
+            };
+            let thread_uuid = self.ensure_thread_track(tgid, tid, task)?;
+            let rate_uuid = self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
+            self.write_counter_packet(timestamp_ns, rate_uuid, est.rate)?;
         }
-
         Ok(())
     }
 
@@ -160,22 +125,19 @@ impl PerfettoWriter {
         Ok(uuid)
     }
 
-    /// Lazily allocate UUIDs for per-thread rate/uncertainty counter tracks.
+    /// Lazily allocate a UUID for a per-thread rate counter track.
     fn ensure_thread_counter_tracks(
         &mut self,
         tid: u32,
         event_id: u32,
         thread_uuid: u64,
-    ) -> std::io::Result<(u64, u64)> {
-        if let Some(&uuids) = self.thread_counter_uuids.get(&(tid, event_id)) {
-            return Ok(uuids);
+    ) -> std::io::Result<u64> {
+        if let Some(&uuid) = self.thread_counter_uuids.get(&(tid, event_id)) {
+            return Ok(uuid);
         }
         let rate_uuid = self.next_thread_uuid;
         self.next_thread_uuid += 1;
-        let uncertainty_uuid = self.next_thread_uuid;
-        self.next_thread_uuid += 1;
-        self.thread_counter_uuids
-            .insert((tid, event_id), (rate_uuid, uncertainty_uuid));
+        self.thread_counter_uuids.insert((tid, event_id), rate_uuid);
 
         let event_name = self
             .event_names
@@ -183,45 +145,17 @@ impl PerfettoWriter {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        for (uuid, suffix, unit) in [
-            (rate_uuid, "rate", "events/ns"),
-            (uncertainty_uuid, "uncertainty", "uncertainty"),
-        ] {
-            let mut counter = CounterDescriptor::new();
-            counter.set_unit_name(unit.to_string());
+        let mut counter = CounterDescriptor::new();
+        counter.set_unit_name("events/ns".to_string());
 
-            let mut desc = TrackDescriptor::new();
-            desc.set_uuid(uuid);
-            desc.set_name(format!("{}/{}", event_name, suffix));
-            desc.set_parent_uuid(thread_uuid);
-            desc.counter = protobuf::MessageField::some(counter);
+        let mut desc = TrackDescriptor::new();
+        desc.set_uuid(rate_uuid);
+        desc.set_name(format!("{}/rate", event_name));
+        desc.set_parent_uuid(thread_uuid);
+        desc.counter = protobuf::MessageField::some(counter);
 
-            self.write_track_descriptor_packet(desc)?;
-        }
-        Ok((rate_uuid, uncertainty_uuid))
-    }
-
-    /// Emit per-thread counter values for a single quantum step.
-    ///
-    /// `thread_meta`: tid → (tgid, task_name) — needed to register process/thread tracks.
-    pub fn emit_thread_steps(
-        &mut self,
-        timestamp_ns: u64,
-        per_thread: &HashMap<(u32, EventId), EventAggregate>,
-        thread_meta: &HashMap<u32, (u32, String)>,
-    ) -> std::io::Result<()> {
-        for (&(tid, event_id), agg) in per_thread {
-            let (tgid, task) = match thread_meta.get(&tid) {
-                Some(m) => (m.0, m.1.as_str()),
-                None => continue,
-            };
-            let thread_uuid = self.ensure_thread_track(tgid, tid, task)?;
-            let (rate_uuid, uncert_uuid) =
-                self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
-            self.write_counter_packet(timestamp_ns, rate_uuid, agg.mean_rate)?;
-            self.write_counter_packet(timestamp_ns, uncert_uuid, agg.stddev_rate)?;
-        }
-        Ok(())
+        self.write_track_descriptor_packet(desc)?;
+        Ok(rate_uuid)
     }
 
     fn write_track_descriptor_packet(&mut self, desc: TrackDescriptor) -> std::io::Result<()> {
@@ -272,10 +206,9 @@ impl PerfettoWriter {
     ///
     /// `series`: (event_id, tid) → sorted Vec of (timestamp_ns, rate).
     /// `thread_meta`: tid → (tgid, task_name) — used to register process/thread tracks.
-    /// Emits per-thread rate and uncertainty (0.0 = observed) packets sorted by timestamp.
     pub fn write_raw_series(
         &mut self,
-        series: &HashMap<(u32, u32), Vec<(u64, f64)>>,
+        series: &HashMap<(EventId, u32), Vec<(u64, f64)>>,
         thread_meta: &HashMap<u32, (u32, String)>,
     ) -> std::io::Result<()> {
         // Collect all points with their (event_id, tid) key, sorted by timestamp.
@@ -293,9 +226,8 @@ impl PerfettoWriter {
                 None => continue,
             };
             let thread_uuid = self.ensure_thread_track(tgid, tid, task)?;
-            let (r_uuid, u_uuid) = self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
+            let r_uuid = self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
             self.write_counter_packet(ts, r_uuid, rate)?;
-            self.write_counter_packet(ts, u_uuid, 0.0)?;
         }
         Ok(())
     }
@@ -309,14 +241,6 @@ impl Drop for PerfettoWriter {
     fn drop(&mut self) {
         let _ = self.flush();
     }
-}
-
-fn rate_uuid(event_id: u32) -> u64 {
-    UUID_BASE + (event_id as u64) * 2
-}
-
-fn uncertainty_uuid(event_id: u32) -> u64 {
-    UUID_BASE + (event_id as u64) * 2 + 1
 }
 
 /// Write a u64 as a protobuf varint.

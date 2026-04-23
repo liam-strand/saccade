@@ -4,6 +4,7 @@ use crate::scheduler::Scheduler;
 use crate::sink::OutputSink;
 use crate::source::SampleSource;
 use crate::state::StateEstimator;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Main profiling orchestrator.
@@ -54,16 +55,17 @@ impl Profiler {
     }
 
     fn update_estimator(&mut self, quantum: &Quantum, elapsed_ns: u64) {
-        let aggregates = quantum.aggregates();
-        let observed: Vec<EventId> = aggregates.keys().copied().collect();
+        let per_thread = quantum.per_thread_aggregates();
+        let observed: HashSet<(u32, EventId)> = per_thread.keys().copied().collect();
 
-        for (&event_id, agg) in aggregates {
+        for (&(tid, event_id), agg) in per_thread {
             let stddev = if agg.num_samples < 2 {
                 0.0
             } else {
                 agg.stddev_rate
             };
             self.estimator.measurement_update(
+                tid,
                 event_id,
                 agg.mean_rate,
                 stddev,
@@ -72,10 +74,15 @@ impl Profiler {
             );
         }
 
-        for id in 0..self.estimator.num_events() as EventId {
-            if !observed.contains(&id) {
-                self.estimator.time_update(id, elapsed_ns);
-            }
+        let stale_keys: Vec<(u32, EventId)> = self
+            .estimator
+            .all_estimates()
+            .keys()
+            .filter(|k| !observed.contains(k))
+            .copied()
+            .collect();
+        for (tid, event_id) in stale_keys {
+            self.estimator.time_update(tid, event_id, elapsed_ns);
         }
     }
 
@@ -100,7 +107,6 @@ pub struct ProfilerBuilder {
     scheduler: Option<Box<dyn Scheduler>>,
     sinks: Vec<Box<dyn OutputSink>>,
     estimator: Option<Box<dyn StateEstimator>>,
-    num_events: usize,
 }
 
 impl ProfilerBuilder {
@@ -110,7 +116,6 @@ impl ProfilerBuilder {
             scheduler: None,
             sinks: Vec::new(),
             estimator: None,
-            num_events: 0,
         }
     }
 
@@ -133,11 +138,6 @@ impl ProfilerBuilder {
 
     pub fn add_sink(mut self, s: impl OutputSink + 'static) -> Self {
         self.sinks.push(Box::new(s));
-        self
-    }
-
-    pub fn num_events(mut self, n: usize) -> Self {
-        self.num_events = n;
         self
     }
 
