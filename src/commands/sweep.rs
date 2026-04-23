@@ -14,7 +14,8 @@ use std::time::Duration;
 
 pub fn sweep(
     library: Option<PathBuf>,
-    quantum: u64,
+    q_schedule: u64,
+    q_sample: u64,
     trace: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
@@ -69,7 +70,7 @@ pub fn sweep(
         let pid = child.id();
         syscalls::wait_for_exec(pid)?;
 
-        let mut source = HardwareSampleSource::new(pid, registry, None)
+        let mut source = HardwareSampleSource::new(pid, registry, None, q_sample)
             .expect("Failed to create hardware source");
 
         source
@@ -81,7 +82,7 @@ pub fn sweep(
         let mut batch_real_to_synthetic: HashMap<u32, u32> = HashMap::new();
         let mut batch_name_counters: HashMap<String, u32> = HashMap::new();
 
-        let quantum_dur = Duration::from_nanos(quantum);
+        let quantum_dur = Duration::from_nanos(q_schedule);
         let mut batch_t0: Option<u64> = None;
         while child
             .try_wait()

@@ -36,6 +36,7 @@ impl HardwareSampleSource {
         target_tgid: u32,
         registry: EventRegistry,
         logger_tx: Option<SyncSender<WireSample>>,
+        sample_period_ns: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let skel_builder = SamplerSkelBuilder::default();
 
@@ -54,7 +55,7 @@ impl HardwareSampleSource {
             .data_data
             .as_mut()
             .expect("Failed to set min sample interval")
-            .min_sample_interval_ns = 100_000;
+            .min_sample_interval_ns = sample_period_ns;
 
         let mut skel = open_skel.load()?;
         skel.attach()?;

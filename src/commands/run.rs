@@ -16,39 +16,39 @@ use tracing::debug;
 
 pub fn run(
     library: Option<PathBuf>,
-    quantum: u64,
+    q_schedule: u64,
+    q_sample: u64,
+    q_output: u64,
     trace: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
     let registry = EventRegistry::new(lib);
     let all_ids = registry.get_event_ids();
-    let num_events = all_ids.len();
     let event_names: Vec<String> = all_ids
         .iter()
         .map(|&id| registry.get_event_name(id).to_string())
         .collect();
-    debug!("Loaded {} events.", num_events);
+    debug!("Loaded {} events.", all_ids.len());
 
     let mut child = spawn_child(&target)?;
     let pid = child.id();
     syscalls::wait_for_exec(pid)?;
 
-    let source =
-        HardwareSampleSource::new(pid, registry, None).expect("Failed to create hardware source");
+    let source = HardwareSampleSource::new(pid, registry, None, q_sample)
+        .expect("Failed to create hardware source");
 
     let mut scheduler = RoundRobinScheduler::new();
     scheduler.init(all_ids.clone(), source.num_slots());
 
     let mut builder = ProfilerBuilder::new()
-        .num_events(num_events)
         .source(source)
         .scheduler(scheduler, all_ids)
         .estimator(PropagateEstimator::new())
         .add_sink(CsvSink::new("saccade.csv")?);
 
     if let Some(path) = trace {
-        builder = builder.add_sink(PerfettoSink::new(path, event_names)?);
+        builder = builder.add_sink(PerfettoSink::new(path, event_names, q_output)?);
     }
 
     let mut profiler = builder.build();
@@ -56,7 +56,7 @@ pub fn run(
     debug!("Profiler is ready.");
     syscalls::ptrace_detach(pid)?;
 
-    let mut quantum_dur = Duration::from_nanos(quantum);
+    let mut quantum_dur = Duration::from_nanos(q_schedule);
     let mut loops = 0;
     while child
         .try_wait()

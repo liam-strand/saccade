@@ -26,9 +26,17 @@ pub enum Commands {
         #[arg(short, long)]
         library: Option<PathBuf>,
 
-        /// Default Scheduler Quantum (in nanoseconds)
-        #[arg(short, long, default_value_t = 10_000_000)]
-        quantum: u64,
+        /// q-schedule: scheduler quantum in nanoseconds
+        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
+        q_schedule: u64,
+
+        /// q-sample: minimum interval between eBPF-emitted samples, in nanoseconds
+        #[arg(long = "q-sample", default_value_t = 100_000)]
+        q_sample: u64,
+
+        /// q-output: Perfetto emission cadence in nanoseconds (0 = emit every q-schedule)
+        #[arg(long = "q-output", default_value_t = 0)]
+        q_output: u64,
 
         /// Output Perfetto trace file for VCS state
         #[arg(long)]
@@ -45,9 +53,13 @@ pub enum Commands {
         #[arg(short, long)]
         library: Option<PathBuf>,
 
-        /// Scheduler quantum in nanoseconds
-        #[arg(short, long, default_value_t = 10_000_000)]
-        quantum: u64,
+        /// q-schedule: scheduler quantum in nanoseconds
+        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
+        q_schedule: u64,
+
+        /// q-sample: minimum interval between eBPF-emitted samples, in nanoseconds
+        #[arg(long = "q-sample", default_value_t = 100_000)]
+        q_sample: u64,
 
         /// Output Perfetto trace file with per-event time-varying rates
         #[arg(long)]
@@ -67,13 +79,13 @@ pub enum Commands {
         #[arg(short = 'r', long)]
         rates_trace: PathBuf,
 
-        /// Scheduler quantum in nanoseconds
-        #[arg(short, long, default_value_t = 10_000_000)]
-        quantum: u64,
+        /// q-schedule: scheduler quantum in nanoseconds
+        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
+        q_schedule: u64,
 
-        /// Number of quanta to simulate
-        #[arg(short, long, default_value_t = 1000)]
-        steps: u64,
+        /// q-output: Perfetto emission cadence in nanoseconds (0 = emit every q-schedule)
+        #[arg(long = "q-output", default_value_t = 0)]
+        q_output: u64,
 
         /// Output CSV file (optional)
         #[arg(short, long)]
