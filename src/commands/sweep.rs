@@ -1,4 +1,5 @@
 use crate::commands::load_library;
+use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
 use crate::perfetto::PerfettoWriter;
 use crate::sample::TASK_COMM_LEN;
@@ -14,8 +15,7 @@ use std::time::Duration;
 
 pub fn sweep(
     library: Option<PathBuf>,
-    q_schedule: u64,
-    q_sample: u64,
+    config: ResolvedConfig,
     trace: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
@@ -31,11 +31,9 @@ pub fn sweep(
 
     // (event_id, synthetic_tid) -> Vec<(timestamp_ns, rate)>
     let mut all_series: HashMap<(u32, u32), Vec<(u64, f64)>> = HashMap::new();
-    // synthetic_tid -> (0, task_name)  [tgid=0: single synthetic process for whole sweep]
+    // synthetic_tid -> (tgid, task_name)
     let mut thread_meta: HashMap<u32, (u32, String)> = HashMap::new();
     // Global across batches: (task_name, within_name_idx) -> synthetic_tid
-    // The n-th thread with a given name in a batch maps to the same synthetic TID across
-    // all batches, aligning threads by birth-order for deterministic workloads.
     let mut name_idx_to_synthetic: HashMap<(String, u32), u32> = HashMap::new();
     let mut next_synthetic_tid: u32 = 1;
 
@@ -70,7 +68,7 @@ pub fn sweep(
         let pid = child.id();
         syscalls::wait_for_exec(pid)?;
 
-        let mut source = HardwareSampleSource::new(pid, registry, None, q_sample)
+        let mut source = HardwareSampleSource::new(pid, registry, None, config.q_sample_ns)
             .expect("Failed to create hardware source");
 
         source
@@ -78,11 +76,10 @@ pub fn sweep(
             .expect("Failed to apply schedule");
         syscalls::ptrace_detach(pid)?;
 
-        // Per-batch state: reset each run so TID numbering restarts from 0 per name.
         let mut batch_real_to_synthetic: HashMap<u32, u32> = HashMap::new();
         let mut batch_name_counters: HashMap<String, u32> = HashMap::new();
 
-        let quantum_dur = Duration::from_nanos(q_schedule);
+        let quantum_dur = Duration::from_nanos(config.q_schedule_ns);
         let mut batch_t0: Option<u64> = None;
         while child
             .try_wait()
@@ -95,9 +92,6 @@ pub fn sweep(
                 let t0 = *batch_t0.get_or_insert(s.timestamp_ns);
                 let rel_ts = s.timestamp_ns.saturating_sub(t0);
 
-                // Normalize thread identity by (task_name, birth_order_within_name).
-                // batch_real_to_synthetic caches within a batch; name_idx_to_synthetic
-                // is the stable global mapping that aligns threads across batches.
                 let task_len = s.task.iter().position(|&c| c == 0).unwrap_or(TASK_COMM_LEN);
                 let task_name = String::from_utf8_lossy(&s.task[..task_len]).into_owned();
                 let synthetic_tid = *batch_real_to_synthetic.entry(s.tid).or_insert_with(|| {
@@ -117,7 +111,6 @@ pub fn sweep(
                     .entry((s.event_id, synthetic_tid))
                     .or_default()
                     .push((rel_ts, s.count as f64 / s.duration_ns as f64));
-                // tgid=0: all batches share one synthetic process in the trace
                 thread_meta
                     .entry(synthetic_tid)
                     .or_insert((0u32, task_name));

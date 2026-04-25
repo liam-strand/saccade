@@ -1,3 +1,4 @@
+use crate::config::{EstimatorKind, SchedulerKind};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -8,6 +9,10 @@ pub struct Cli {
     /// Enable verbose debug output
     #[arg(short, long, global = true)]
     pub verbose: bool,
+
+    /// Config file path (default: saccade.toml in current directory, if present)
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -26,17 +31,25 @@ pub enum Commands {
         #[arg(short, long)]
         library: Option<PathBuf>,
 
+        /// Scheduler to use
+        #[arg(long)]
+        scheduler: Option<SchedulerKind>,
+
+        /// State estimator to use
+        #[arg(long)]
+        estimator: Option<EstimatorKind>,
+
         /// q-schedule: scheduler quantum in nanoseconds
-        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
-        q_schedule: u64,
+        #[arg(short = 'q', long = "q-schedule")]
+        q_schedule: Option<u64>,
 
         /// q-sample: minimum interval between eBPF-emitted samples, in nanoseconds
-        #[arg(long = "q-sample", default_value_t = 100_000)]
-        q_sample: u64,
+        #[arg(long = "q-sample")]
+        q_sample: Option<u64>,
 
         /// q-output: Perfetto emission cadence in nanoseconds (0 = emit every q-schedule)
-        #[arg(long = "q-output", default_value_t = 0)]
-        q_output: u64,
+        #[arg(long = "q-output")]
+        q_output: Option<u64>,
 
         /// Output Perfetto trace file for VCS state
         #[arg(long)]
@@ -54,12 +67,12 @@ pub enum Commands {
         library: Option<PathBuf>,
 
         /// q-schedule: scheduler quantum in nanoseconds
-        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
-        q_schedule: u64,
+        #[arg(short = 'q', long = "q-schedule")]
+        q_schedule: Option<u64>,
 
         /// q-sample: minimum interval between eBPF-emitted samples, in nanoseconds
-        #[arg(long = "q-sample", default_value_t = 100_000)]
-        q_sample: u64,
+        #[arg(long = "q-sample")]
+        q_sample: Option<u64>,
 
         /// Output Perfetto trace file with per-event time-varying rates
         #[arg(long)]
@@ -79,21 +92,33 @@ pub enum Commands {
         #[arg(short = 'r', long)]
         rates_trace: PathBuf,
 
+        /// Scheduler to use
+        #[arg(long)]
+        scheduler: Option<SchedulerKind>,
+
+        /// State estimator to use
+        #[arg(long)]
+        estimator: Option<EstimatorKind>,
+
         /// q-schedule: scheduler quantum in nanoseconds
-        #[arg(short = 'q', long = "q-schedule", default_value_t = 10_000_000)]
-        q_schedule: u64,
+        #[arg(short = 'q', long = "q-schedule")]
+        q_schedule: Option<u64>,
 
         /// q-output: Perfetto emission cadence in nanoseconds (0 = emit every q-schedule)
-        #[arg(long = "q-output", default_value_t = 0)]
-        q_output: u64,
+        #[arg(long = "q-output")]
+        q_output: Option<u64>,
+
+        /// Gaussian noise standard deviation on simulated rates (0 = no noise)
+        #[arg(long)]
+        noise_stddev: Option<f64>,
+
+        /// RNG seed for reproducible simulation (omit for OS-random)
+        #[arg(long)]
+        seed: Option<u64>,
 
         /// Output CSV file (optional)
         #[arg(short, long)]
         output: Option<PathBuf>,
-
-        /// Scheduler to use: random, round_robin
-        #[arg(long, default_value = "random")]
-        scheduler: String,
 
         /// Output Perfetto trace file for VCS state
         #[arg(long)]

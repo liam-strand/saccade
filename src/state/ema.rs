@@ -2,24 +2,38 @@ use crate::event::EventId;
 use crate::state::{CounterEstimate, EstimateKey, StateEstimator};
 use std::collections::HashMap;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct EmaConfig {
+    pub alpha: f64,
+    pub uncertainty_growth_rate: f64,
+}
+
+impl Default for EmaConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.3,
+            uncertainty_growth_rate: 1e-8,
+        }
+    }
+}
+
 /// EMA-based state estimator.
-///
-/// Tracks a per-(tid, event) rate estimate (exponential moving average) and a
-/// scalar uncertainty that grows linearly during inactivity.
 pub struct VirtualCounterState {
     estimates: HashMap<EstimateKey, CounterEstimate>,
-    /// EMA smoothing factor (0..1). Higher = more weight on recent observations.
     alpha: f64,
-    /// Rate at which uncertainty grows per nanosecond of inactivity.
     uncertainty_growth_rate: f64,
 }
 
 impl VirtualCounterState {
     pub fn new() -> Self {
+        Self::with_config(EmaConfig::default())
+    }
+
+    pub fn with_config(config: EmaConfig) -> Self {
         Self {
             estimates: HashMap::new(),
-            alpha: 0.3,
-            uncertainty_growth_rate: 1e-8,
+            alpha: config.alpha,
+            uncertainty_growth_rate: config.uncertainty_growth_rate,
         }
     }
 }

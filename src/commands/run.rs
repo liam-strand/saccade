@@ -1,13 +1,10 @@
 use crate::commands::{load_library, spawn_child};
+use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
-use crate::profiler::ProfilerBuilder;
-use crate::scheduler::Scheduler;
-use crate::scheduler::round_robin::RoundRobinScheduler;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
-use crate::source::SampleSource;
 use crate::source::hardware::HardwareSampleSource;
-use crate::state::propagate::PropagateEstimator;
+use crate::profiler::ProfilerBuilder;
 use crate::syscalls;
 use std::path::PathBuf;
 use std::thread;
@@ -16,9 +13,7 @@ use tracing::debug;
 
 pub fn run(
     library: Option<PathBuf>,
-    q_schedule: u64,
-    q_sample: u64,
-    q_output: u64,
+    config: ResolvedConfig,
     trace: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
@@ -35,20 +30,17 @@ pub fn run(
     let pid = child.id();
     syscalls::wait_for_exec(pid)?;
 
-    let source = HardwareSampleSource::new(pid, registry, None, q_sample)
+    let source = HardwareSampleSource::new(pid, registry, None, config.q_sample_ns)
         .expect("Failed to create hardware source");
-
-    let mut scheduler = RoundRobinScheduler::new();
-    scheduler.init(all_ids.clone(), source.num_slots());
 
     let mut builder = ProfilerBuilder::new()
         .source(source)
-        .scheduler(scheduler, all_ids)
-        .estimator(PropagateEstimator::new())
+        .scheduler_boxed(config.build_scheduler(), all_ids)
+        .estimator_boxed(config.build_estimator())
         .add_sink(CsvSink::new("saccade.csv")?);
 
     if let Some(path) = trace {
-        builder = builder.add_sink(PerfettoSink::new(path, event_names, q_output)?);
+        builder = builder.add_sink(PerfettoSink::new(path, event_names, config.q_output_ns)?);
     }
 
     let mut profiler = builder.build();
@@ -56,7 +48,7 @@ pub fn run(
     debug!("Profiler is ready.");
     syscalls::ptrace_detach(pid)?;
 
-    let mut quantum_dur = Duration::from_nanos(q_schedule);
+    let mut quantum_dur = Duration::from_nanos(config.q_schedule_ns);
     let mut loops = 0;
     while child
         .try_wait()

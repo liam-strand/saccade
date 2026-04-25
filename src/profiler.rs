@@ -131,8 +131,20 @@ impl ProfilerBuilder {
         self
     }
 
+    pub fn scheduler_boxed(mut self, mut s: Box<dyn Scheduler>, all_events: Vec<EventId>) -> Self {
+        let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
+        s.init(all_events, num_slots);
+        self.scheduler = Some(s);
+        self
+    }
+
     pub fn estimator(mut self, e: impl StateEstimator + 'static) -> Self {
         self.estimator = Some(Box::new(e));
+        self
+    }
+
+    pub fn estimator_boxed(mut self, e: Box<dyn StateEstimator>) -> Self {
+        self.estimator = Some(e);
         self
     }
 

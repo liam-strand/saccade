@@ -1,6 +1,7 @@
 use clap::Parser;
 use saccade::cli::{Cli, Commands};
 use saccade::commands::{generate, run, simulate, sweep};
+use saccade::config::{CliOverrides, load_config};
 
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
@@ -16,40 +17,85 @@ fn main() -> std::io::Result<()> {
         .without_time()
         .init();
 
+    let explicit = cli.config.is_some();
+    let config_path = cli.config.clone();
+
     match cli.command {
         Commands::Generate { output } => generate(output)?,
         Commands::Run {
             library,
+            scheduler,
+            estimator,
             q_schedule,
             q_sample,
             q_output,
             trace,
             target,
-        } => run(library, q_schedule, q_sample, q_output, trace, target)?,
+        } => {
+            let config = load_config(
+                config_path,
+                explicit,
+                CliOverrides {
+                    scheduler,
+                    estimator,
+                    q_schedule_ns: q_schedule,
+                    q_sample_ns: q_sample,
+                    q_output_ns: q_output,
+                    noise_stddev: None,
+                    seed: None,
+                },
+            )?;
+            run(library, config, trace, target)?;
+        }
         Commands::Sweep {
             library,
             q_schedule,
             q_sample,
             trace,
             target,
-        } => sweep(library, q_schedule, q_sample, trace, target)?,
+        } => {
+            let config = load_config(
+                config_path,
+                explicit,
+                CliOverrides {
+                    scheduler: None,
+                    estimator: None,
+                    q_schedule_ns: q_schedule,
+                    q_sample_ns: q_sample,
+                    q_output_ns: None,
+                    noise_stddev: None,
+                    seed: None,
+                },
+            )?;
+            sweep(library, config, trace, target)?;
+        }
         Commands::Simulate {
             library,
             rates_trace,
+            scheduler,
+            estimator,
             q_schedule,
             q_output,
+            noise_stddev,
+            seed,
             output,
-            scheduler,
             trace,
-        } => simulate(
-            library,
-            rates_trace,
-            q_schedule,
-            q_output,
-            output,
-            scheduler,
-            trace,
-        )?,
+        } => {
+            let config = load_config(
+                config_path,
+                explicit,
+                CliOverrides {
+                    scheduler,
+                    estimator,
+                    q_schedule_ns: q_schedule,
+                    q_sample_ns: None,
+                    q_output_ns: q_output,
+                    noise_stddev,
+                    seed,
+                },
+            )?;
+            simulate(library, rates_trace, config, output, trace)?;
+        }
     }
 
     Ok(())

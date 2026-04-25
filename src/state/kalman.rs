@@ -35,7 +35,7 @@ use crate::event::EventId;
 use crate::state::{CounterEstimate, EstimateKey, StateEstimator};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct KalmanConfig {
     pub process_noise_per_ns: f64,
     pub min_measurement_variance: f64,
