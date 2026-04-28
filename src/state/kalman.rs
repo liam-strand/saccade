@@ -27,9 +27,9 @@
 //! seeded off-diagonal `P`, scalar updates never propagate across events
 //! and the filter reduces to independent scalar filters. The multivariate
 //! matrix structure is in place so that:
-//!   - off-diagonal `Q` terms can be seeded from a calibration run, or
-//!   - an online estimator can populate them from observed rate
-//! correlations as a drop-in extension.
+//! - off-diagonal `Q` terms can be seeded from a calibration run, or
+//! - an online estimator can populate them from observed rate
+//!   correlations as a drop-in extension.
 
 use crate::event::EventId;
 use crate::state::{CounterEstimate, EstimateKey, StateEstimator};
@@ -105,6 +105,7 @@ impl ThreadFilter {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn scalar_update(&mut self, event_idx: usize, z: f64, r: f64) {
         let n = self.x.len();
         let s = self.p[event_idx][event_idx] + r;

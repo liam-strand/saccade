@@ -1,10 +1,10 @@
 use crate::commands::{load_library, spawn_child};
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
+use crate::profiler::ProfilerBuilder;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::source::hardware::HardwareSampleSource;
-use crate::profiler::ProfilerBuilder;
 use crate::syscalls;
 use std::path::PathBuf;
 use std::thread;
