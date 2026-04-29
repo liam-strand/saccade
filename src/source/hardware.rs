@@ -90,10 +90,14 @@ impl HardwareSampleSource {
 
             counter.enable()?;
 
-            let link = skel
+            let mut link = skel
                 .progs
                 .handle_timer
                 .attach_perf_event(counter.as_raw_fd())?;
+            // libbpf takes ownership of the perf event fd in attach_perf_event and
+            // closes it on link destroy. disconnect() prevents that so Counter remains
+            // the sole owner and closes the fd exactly once.
+            link.disconnect();
             timer_links.push(link);
             timer_events.push(counter);
         }
