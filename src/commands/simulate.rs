@@ -5,6 +5,7 @@ use crate::perfetto;
 use crate::profiler::ProfilerBuilder;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
+use crate::sink::{self, OutputSink};
 use crate::source::virtual_source::{TimeVaryingRates, VirtualSampleSource};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -60,17 +61,22 @@ pub fn simulate(
         4,
     );
 
-    let mut builder = ProfilerBuilder::new()
+    let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+    if let Some(path) = csv {
+        sinks.push(Box::new(CsvSink::new(path)?));
+    }
+    sinks.push(Box::new(PerfettoSink::new(
+        trace,
+        event_names,
+        config.q_output_ns,
+    )?));
+
+    let mut profiler = ProfilerBuilder::new()
         .source(source)
         .scheduler_boxed(config.build_scheduler(), all_ids)
-        .estimator_boxed(config.build_estimator());
-
-    if let Some(path) = csv {
-        builder = builder.add_sink(CsvSink::new(path)?);
-    }
-    builder = builder.add_sink(PerfettoSink::new(trace, event_names, config.q_output_ns)?);
-
-    let mut profiler = builder.build();
+        .estimator_boxed(config.build_estimator())
+        .sinks(&mut sinks)
+        .build();
 
     tracing::info!(
         "Simulating {} steps (q_schedule={}ns, q_output={}ns, duration={}ns from input trace)...",
@@ -82,7 +88,6 @@ pub fn simulate(
     for _ in 0..steps {
         profiler.step();
     }
-    profiler.finish_sinks();
 
     let estimator = profiler.estimator();
     eprintln!(
@@ -98,6 +103,9 @@ pub fn simulate(
             );
         }
     }
+
+    drop(profiler);
+    sink::finish_sinks(&mut sinks);
     tracing::info!("Simulation complete.");
 
     Ok(())

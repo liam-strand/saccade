@@ -4,6 +4,7 @@ use crate::event::EventRegistry;
 use crate::profiler::ProfilerBuilder;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
+use crate::sink::{self, OutputSink};
 use crate::source::hardware::HardwareSampleSource;
 use crate::syscalls;
 use std::path::PathBuf;
@@ -34,17 +35,22 @@ pub fn run(
     let source = HardwareSampleSource::new(pid, registry, None, config.q_sample_ns)
         .expect("Failed to create hardware source");
 
-    let mut builder = ProfilerBuilder::new()
+    let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+    sinks.push(Box::new(PerfettoSink::new(
+        trace,
+        event_names,
+        config.q_output_ns,
+    )?));
+    if let Some(path) = csv {
+        sinks.push(Box::new(CsvSink::new(path)?));
+    }
+
+    let mut profiler = ProfilerBuilder::new()
         .source(source)
         .scheduler_boxed(config.build_scheduler(), all_ids)
         .estimator_boxed(config.build_estimator())
-        .add_sink(PerfettoSink::new(trace, event_names, config.q_output_ns)?);
-
-    if let Some(path) = csv {
-        builder = builder.add_sink(CsvSink::new(path)?);
-    }
-
-    let mut profiler = builder.build();
+        .sinks(&mut sinks)
+        .build();
 
     debug!("Profiler is ready.");
     syscalls::ptrace_detach(pid)?;
@@ -63,7 +69,8 @@ pub fn run(
         loops += 1;
     }
     child.wait().unwrap();
-    profiler.finish_sinks();
+    drop(profiler);
+    sink::finish_sinks(&mut sinks);
     debug!("Child process exited after {} loops.", loops);
 
     Ok(())
