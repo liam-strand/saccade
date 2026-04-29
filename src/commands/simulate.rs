@@ -14,8 +14,8 @@ pub fn simulate(
     library: PathBuf,
     rates_trace: PathBuf,
     config: ResolvedConfig,
-    output: Option<PathBuf>,
-    trace: Option<PathBuf>,
+    csv: Option<PathBuf>,
+    trace: PathBuf,
 ) -> std::io::Result<()> {
     let lib = load_library(Some(library))?;
     let registry = EventRegistry::new(lib);
@@ -65,12 +65,10 @@ pub fn simulate(
         .scheduler_boxed(config.build_scheduler(), all_ids)
         .estimator_boxed(config.build_estimator());
 
-    if let Some(path) = output {
+    if let Some(path) = csv {
         builder = builder.add_sink(CsvSink::new(path)?);
     }
-    if let Some(path) = trace {
-        builder = builder.add_sink(PerfettoSink::new(path, event_names, config.q_output_ns)?);
-    }
+    builder = builder.add_sink(PerfettoSink::new(trace, event_names, config.q_output_ns)?);
 
     let mut profiler = builder.build();
 

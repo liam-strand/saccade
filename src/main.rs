@@ -30,6 +30,7 @@ fn main() -> std::io::Result<()> {
             q_sample,
             q_output,
             trace,
+            csv,
             target,
         } => {
             let config = load_config(
@@ -45,7 +46,7 @@ fn main() -> std::io::Result<()> {
                     seed: None,
                 },
             )?;
-            run(library, config, trace, target)?;
+            run(library, config, trace, csv, target)?;
         }
         Commands::Sweep {
             library,
@@ -78,7 +79,7 @@ fn main() -> std::io::Result<()> {
             q_output,
             noise_stddev,
             seed,
-            output,
+            csv,
             trace,
         } => {
             let config = load_config(
@@ -94,7 +95,7 @@ fn main() -> std::io::Result<()> {
                     seed,
                 },
             )?;
-            simulate(library, rates_trace, config, output, trace)?;
+            simulate(library, rates_trace, config, csv, trace)?;
         }
     }
 

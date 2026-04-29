@@ -14,7 +14,8 @@ use tracing::debug;
 pub fn run(
     library: Option<PathBuf>,
     config: ResolvedConfig,
-    trace: Option<PathBuf>,
+    trace: PathBuf,
+    csv: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
@@ -37,10 +38,10 @@ pub fn run(
         .source(source)
         .scheduler_boxed(config.build_scheduler(), all_ids)
         .estimator_boxed(config.build_estimator())
-        .add_sink(CsvSink::new("saccade.csv")?);
+        .add_sink(PerfettoSink::new(trace, event_names, config.q_output_ns)?);
 
-    if let Some(path) = trace {
-        builder = builder.add_sink(PerfettoSink::new(path, event_names, config.q_output_ns)?);
+    if let Some(path) = csv {
+        builder = builder.add_sink(CsvSink::new(path)?);
     }
 
     let mut profiler = builder.build();

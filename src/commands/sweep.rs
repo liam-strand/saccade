@@ -16,7 +16,7 @@ use std::time::Duration;
 pub fn sweep(
     library: Option<PathBuf>,
     config: ResolvedConfig,
-    trace: Option<PathBuf>,
+    trace: PathBuf,
     target: Vec<String>,
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
@@ -122,21 +122,14 @@ pub fn sweep(
     }
     pb.finish_and_clear();
 
-    match trace {
-        Some(path) => {
-            let registry = EventRegistry::new(lib.clone());
-            let event_names: Vec<String> = (0..lib.events.len() as u32)
-                .map(|id| registry.get_event_name(id).to_string())
-                .collect();
-            let mut writer = PerfettoWriter::new(&path, event_names)?;
-            writer.write_raw_series(&all_series, &thread_meta)?;
-            writer.flush()?;
-            tracing::info!("Sweep complete. Trace written to {:?}", path);
-        }
-        None => {
-            tracing::info!("Sweep complete. (No --trace specified; results discarded.)");
-        }
-    }
+    let registry = EventRegistry::new(lib.clone());
+    let event_names: Vec<String> = (0..lib.events.len() as u32)
+        .map(|id| registry.get_event_name(id).to_string())
+        .collect();
+    let mut writer = PerfettoWriter::new(&trace, event_names)?;
+    writer.write_raw_series(&all_series, &thread_meta)?;
+    writer.flush()?;
+    tracing::info!("Sweep complete. Trace written to {:?}", trace);
 
     Ok(())
 }

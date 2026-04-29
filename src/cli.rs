@@ -52,8 +52,12 @@ pub enum Commands {
         q_output: Option<u64>,
 
         /// Output Perfetto trace file for VCS state
+        #[arg(long, default_value = "trace.perfetto")]
+        trace: PathBuf,
+
+        /// Output CSV file
         #[arg(long)]
-        trace: Option<PathBuf>,
+        csv: Option<PathBuf>,
 
         /// Target program and arguments
         #[arg(last = true, required = true)]
@@ -75,8 +79,8 @@ pub enum Commands {
         q_sample: Option<u64>,
 
         /// Output Perfetto trace file with per-event time-varying rates
-        #[arg(long)]
-        trace: Option<PathBuf>,
+        #[arg(long, default_value = "trace.perfetto")]
+        trace: PathBuf,
 
         /// Target program and arguments
         #[arg(last = true, required = true)]
@@ -116,12 +120,12 @@ pub enum Commands {
         #[arg(long)]
         seed: Option<u64>,
 
-        /// Output CSV file (optional)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// Output CSV file
+        #[arg(long)]
+        csv: Option<PathBuf>,
 
         /// Output Perfetto trace file for VCS state
-        #[arg(long)]
-        trace: Option<PathBuf>,
+        #[arg(long, default_value = "trace.perfetto")]
+        trace: PathBuf,
     },
 }
