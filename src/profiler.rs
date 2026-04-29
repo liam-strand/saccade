@@ -16,16 +16,16 @@ use std::time::Duration;
 /// 4. Asks the scheduler for the next active set
 /// 5. Applies the schedule to the source
 /// 6. Emits the quantum + estimator state to all output sinks
-pub struct Profiler {
+pub struct Profiler<'s> {
     source: Box<dyn SampleSource>,
     scheduler: Box<dyn Scheduler>,
-    sinks: Vec<Box<dyn OutputSink>>,
+    sinks: &'s mut [Box<dyn OutputSink>],
     estimator: Box<dyn StateEstimator>,
     active_set: Vec<EventId>,
     current_time_ns: u64,
 }
 
-impl Profiler {
+impl<'s> Profiler<'s> {
     pub fn step(&mut self) -> Option<Duration> {
         // 1. Collect raw samples
         let (raw_samples, elapsed_ns) = self.source.collect();
@@ -47,7 +47,7 @@ impl Profiler {
         self.active_set = decision.active_events;
 
         // 6. Emit to all sinks
-        for sink in &mut self.sinks {
+        for sink in self.sinks.iter_mut() {
             let _ = sink.emit(&quantum, self.estimator.as_ref(), &self.active_set);
         }
 
@@ -93,28 +93,22 @@ impl Profiler {
     pub fn current_time_ns(&self) -> u64 {
         self.current_time_ns
     }
-
-    pub fn finish_sinks(&mut self) {
-        for sink in &mut self.sinks {
-            let _ = sink.finish();
-        }
-    }
 }
 
 /// Builder for `Profiler`.
-pub struct ProfilerBuilder {
+pub struct ProfilerBuilder<'s> {
     source: Option<Box<dyn SampleSource>>,
     scheduler: Option<Box<dyn Scheduler>>,
-    sinks: Vec<Box<dyn OutputSink>>,
+    sinks: Option<&'s mut [Box<dyn OutputSink>]>,
     estimator: Option<Box<dyn StateEstimator>>,
 }
 
-impl ProfilerBuilder {
+impl<'s> ProfilerBuilder<'s> {
     pub fn new() -> Self {
         Self {
             source: None,
             scheduler: None,
-            sinks: Vec::new(),
+            sinks: None,
             estimator: None,
         }
     }
@@ -148,18 +142,18 @@ impl ProfilerBuilder {
         self
     }
 
-    pub fn add_sink(mut self, s: impl OutputSink + 'static) -> Self {
-        self.sinks.push(Box::new(s));
+    pub fn sinks(mut self, sinks: &'s mut [Box<dyn OutputSink>]) -> Self {
+        self.sinks = Some(sinks);
         self
     }
 
-    pub fn build(self) -> Profiler {
+    pub fn build(self) -> Profiler<'s> {
         Profiler {
             source: self.source.expect("ProfilerBuilder: source is required"),
             scheduler: self
                 .scheduler
                 .expect("ProfilerBuilder: scheduler is required"),
-            sinks: self.sinks,
+            sinks: self.sinks.expect("ProfilerBuilder: sinks is required"),
             estimator: self
                 .estimator
                 .expect("ProfilerBuilder: estimator is required"),
@@ -169,7 +163,7 @@ impl ProfilerBuilder {
     }
 }
 
-impl Default for ProfilerBuilder {
+impl<'s> Default for ProfilerBuilder<'s> {
     fn default() -> Self {
         Self::new()
     }
