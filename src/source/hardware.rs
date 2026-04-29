@@ -7,7 +7,7 @@ use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use perf_event::{Builder, events};
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -21,7 +21,6 @@ pub struct HardwareSampleSource {
     ringbuf: libbpf_rs::RingBuffer<'static>,
     hw_counters: HardwareCounters,
     _timer_links: Vec<libbpf_rs::Link>,
-    _timer_events: Vec<perf_event::Counter>,
     wire_rx: Receiver<WireSample>,
     /// Optional forwarding channel for raw wire samples (e.g. to CSV logger).
     logger_tx: Option<SyncSender<WireSample>>,
@@ -79,7 +78,6 @@ impl HardwareSampleSource {
         debug!("HardwareSampleSource has {} CPUs", num_cpus);
 
         let mut timer_links = Vec::new();
-        let mut timer_events = Vec::new();
 
         for cpu in &cpus {
             let mut counter = Builder::new(events::Software::CPU_CLOCK)
@@ -90,21 +88,20 @@ impl HardwareSampleSource {
 
             counter.enable()?;
 
-            let mut link = skel
+            let link = skel
                 .progs
                 .handle_timer
                 .attach_perf_event(counter.as_raw_fd())?;
-            // libbpf takes ownership of the perf event fd in attach_perf_event and
-            // closes it on link destroy. disconnect() prevents that so Counter remains
-            // the sole owner and closes the fd exactly once.
-            link.disconnect();
+            // Transfer the perf event fd to libbpf: it closes it when the link is
+            // destroyed (via bpf_link_perf_detach). Releasing Counter's OwnedFd here
+            // prevents the double-close that would otherwise abort in debug builds.
+            let _ = counter.into_raw_fd();
             timer_links.push(link);
-            timer_events.push(counter);
         }
 
         debug!(
-            "HardwareSampleSource has {} timer events",
-            timer_events.len()
+            "HardwareSampleSource has {} timer links",
+            timer_links.len()
         );
 
         let hw_counters = HardwareCounters::new(cpus.len(), registry, &mut skel);
@@ -116,7 +113,6 @@ impl HardwareSampleSource {
             ringbuf,
             hw_counters,
             _timer_links: timer_links,
-            _timer_events: timer_events,
             wire_rx,
             logger_tx,
             baselines: [[0u64; MAX_COUNTERS]; MAX_CPUS],
