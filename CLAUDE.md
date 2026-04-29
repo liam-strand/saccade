@@ -6,7 +6,7 @@ Saccade is a Linux performance profiler that uses eBPF to intelligently sample h
 
 ## Build & Run
 
-Requires Linux with eBPF support (5.8+ for ringbuf), `clang`/`llvm` for eBPF compilation, and `perf` installed.
+Requires Linux with eBPF support (5.8+ for ringbuf), `clang`/`llvm` for eBPF compilation, `perf` installed, and `libhdf5-dev` for the HDF5 matrix output (e.g. `sudo apt install libhdf5-dev`).
 
 ```bash
 cargo build                    # builds Rust + compiles eBPF via build.rs
