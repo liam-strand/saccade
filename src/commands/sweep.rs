@@ -1,13 +1,15 @@
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
-use crate::perfetto::PerfettoWriter;
-use crate::sample::TASK_COMM_LEN;
-use crate::source::SampleSource;
+use crate::profiler::ProfilerBuilder;
+use crate::scheduler::fixed::FixedScheduler;
+use crate::sink::matrix::MatrixSink;
+use crate::sink::perfetto::PerfettoSink;
+use crate::sink::{self, OutputSink};
 use crate::source::hardware::HardwareSampleSource;
+use crate::state::propagate::PropagateEstimator;
 use crate::syscalls;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::thread;
@@ -17,6 +19,7 @@ pub fn sweep(
     library: Option<PathBuf>,
     config: ResolvedConfig,
     trace: PathBuf,
+    matrix: Option<PathBuf>,
     target: Vec<String>,
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
@@ -29,13 +32,25 @@ pub fn sweep(
         num_batches
     );
 
-    // (event_id, synthetic_tid) -> Vec<(timestamp_ns, rate)>
-    let mut all_series: HashMap<(u32, u32), Vec<(u64, f64)>> = HashMap::new();
-    // synthetic_tid -> (tgid, task_name)
-    let mut thread_meta: HashMap<u32, (u32, String)> = HashMap::new();
-    // Global across batches: (task_name, within_name_idx) -> synthetic_tid
-    let mut name_idx_to_synthetic: HashMap<(String, u32), u32> = HashMap::new();
-    let mut next_synthetic_tid: u32 = 1;
+    let registry = EventRegistry::new(lib.clone());
+    let event_names: Vec<String> = all_ids
+        .iter()
+        .map(|&id| registry.get_event_name(id).to_string())
+        .collect();
+
+    let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+    sinks.push(Box::new(PerfettoSink::new(
+        &trace,
+        event_names.clone(),
+        0, // emit every quantum
+    )?));
+    if let Some(matrix_path) = matrix {
+        sinks.push(Box::new(MatrixSink::new(
+            matrix_path,
+            event_names,
+            config.q_sample_ns,
+        )));
+    }
 
     let pb = ProgressBar::new(num_batches as u64);
     pb.set_style(
@@ -46,7 +61,7 @@ pub fn sweep(
         .progress_chars("=>-"),
     );
 
-    for batch in &batches {
+    for (batch_idx, batch) in batches.iter().enumerate() {
         let registry = EventRegistry::new(lib.clone());
         let counter_names = batch
             .iter()
@@ -54,6 +69,10 @@ pub fn sweep(
             .collect::<Vec<_>>()
             .join(", ");
         pb.set_message(counter_names);
+
+        for s in &mut sinks {
+            s.begin_batch(batch_idx as u32, batch);
+        }
 
         let mut child = unsafe {
             std::process::Command::new(&target[0])
@@ -68,67 +87,35 @@ pub fn sweep(
         let pid = child.id();
         syscalls::wait_for_exec(pid)?;
 
-        let mut source = HardwareSampleSource::new(pid, registry, None, config.q_sample_ns)
+        let source = HardwareSampleSource::new(pid, registry, None, config.q_sample_ns)
             .expect("Failed to create hardware source");
 
-        source
-            .apply_schedule(&[], batch)
-            .expect("Failed to apply schedule");
+        let mut profiler = ProfilerBuilder::new()
+            .source(source)
+            .scheduler(FixedScheduler::new(batch.clone()), batch.clone())
+            .estimator(PropagateEstimator::new())
+            .sinks(&mut sinks)
+            .build();
+
         syscalls::ptrace_detach(pid)?;
 
-        let mut batch_real_to_synthetic: HashMap<u32, u32> = HashMap::new();
-        let mut batch_name_counters: HashMap<String, u32> = HashMap::new();
-
         let quantum_dur = Duration::from_nanos(config.q_schedule_ns);
-        let mut batch_t0: Option<u64> = None;
         while child
             .try_wait()
             .expect("Failed to wait for child")
             .is_none()
         {
-            let (raw_samples, _elapsed_ns) = source.collect();
-            for s in raw_samples {
-                assert_ne!(s.duration_ns, 0);
-                let t0 = *batch_t0.get_or_insert(s.timestamp_ns);
-                let rel_ts = s.timestamp_ns.saturating_sub(t0);
-
-                let task_len = s.task.iter().position(|&c| c == 0).unwrap_or(TASK_COMM_LEN);
-                let task_name = String::from_utf8_lossy(&s.task[..task_len]).into_owned();
-                let synthetic_tid = *batch_real_to_synthetic.entry(s.tid).or_insert_with(|| {
-                    let counter = batch_name_counters.entry(task_name.clone()).or_insert(0);
-                    let within_name_idx = *counter;
-                    *counter += 1;
-                    *name_idx_to_synthetic
-                        .entry((task_name.clone(), within_name_idx))
-                        .or_insert_with(|| {
-                            let id = next_synthetic_tid;
-                            next_synthetic_tid += 1;
-                            id
-                        })
-                });
-
-                all_series
-                    .entry((s.event_id, synthetic_tid))
-                    .or_default()
-                    .push((rel_ts, s.count as f64 / s.duration_ns as f64));
-                thread_meta
-                    .entry(synthetic_tid)
-                    .or_insert((0u32, task_name));
-            }
+            profiler.step();
             thread::sleep(quantum_dur);
         }
         child.wait().unwrap();
+        drop(profiler);
+
         pb.inc(1);
     }
-    pb.finish_and_clear();
 
-    let registry = EventRegistry::new(lib.clone());
-    let event_names: Vec<String> = (0..lib.events.len() as u32)
-        .map(|id| registry.get_event_name(id).to_string())
-        .collect();
-    let mut writer = PerfettoWriter::new(&trace, event_names)?;
-    writer.write_raw_series(&all_series, &thread_meta)?;
-    writer.flush()?;
+    pb.finish_and_clear();
+    sink::finish_sinks(&mut sinks);
     tracing::info!("Sweep complete. Trace written to {:?}", trace);
 
     Ok(())

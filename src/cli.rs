@@ -82,6 +82,10 @@ pub enum Commands {
         #[arg(long, default_value = "trace.perfetto")]
         trace: PathBuf,
 
+        /// Output HDF5 matrix file for ML training data (N_events × T per thread)
+        #[arg(long)]
+        matrix: Option<PathBuf>,
+
         /// Target program and arguments
         #[arg(last = true, required = true)]
         target: Vec<String>,
