@@ -1,3 +1,6 @@
+/python/sweep_data_traces
+*.h5
+
 /target
 .cache
 saccade.csv
