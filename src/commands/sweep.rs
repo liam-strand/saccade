@@ -20,6 +20,7 @@ pub fn sweep(
     config: ResolvedConfig,
     trace: PathBuf,
     matrix: Option<PathBuf>,
+    quiet: bool,
     target: Vec<String>,
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
@@ -52,14 +53,19 @@ pub fn sweep(
         )));
     }
 
-    let pb = ProgressBar::new(num_batches as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta_precise})",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
+    let pb = if quiet {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(num_batches as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta_precise})",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb
+    };
 
     for (batch_idx, batch) in batches.iter().enumerate() {
         let registry = EventRegistry::new(lib.clone());

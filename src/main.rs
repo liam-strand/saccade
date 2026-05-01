@@ -54,6 +54,7 @@ fn main() -> std::io::Result<()> {
             q_sample,
             trace,
             matrix,
+            quiet,
             target,
         } => {
             let config = load_config(
@@ -69,7 +70,7 @@ fn main() -> std::io::Result<()> {
                     seed: None,
                 },
             )?;
-            sweep(library, config, trace, matrix, target)?;
+            sweep(library, config, trace, matrix, quiet, target)?;
         }
         Commands::Simulate {
             library,

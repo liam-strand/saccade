@@ -86,6 +86,10 @@ pub enum Commands {
         #[arg(long)]
         matrix: Option<PathBuf>,
 
+        /// Suppress the batch progress bar (for use from scripts)
+        #[arg(long)]
+        quiet: bool,
+
         /// Target program and arguments
         #[arg(last = true, required = true)]
         target: Vec<String>,
