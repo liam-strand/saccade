@@ -28,6 +28,8 @@ pub fn run(
         .collect();
     debug!("Loaded {} events.", all_ids.len());
 
+    let scheduler = config.build_scheduler(&registry);
+
     let mut child = spawn_child(&target)?;
     let pid = child.id();
     syscalls::wait_for_exec(pid)?;
@@ -47,7 +49,7 @@ pub fn run(
 
     let mut profiler = ProfilerBuilder::new()
         .source(source)
-        .scheduler_boxed(config.build_scheduler(), all_ids)
+        .scheduler_boxed(scheduler, all_ids)
         .estimator_boxed(config.build_estimator())
         .sinks(&mut sinks)
         .build();

@@ -2,6 +2,7 @@ pub mod distribution;
 pub mod fixed;
 pub mod random;
 pub mod round_robin;
+pub mod static_llm;
 pub mod test;
 
 use crate::event::EventId;

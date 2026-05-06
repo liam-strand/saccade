@@ -1,7 +1,10 @@
+use crate::event::EventRegistry;
+use crate::llm::LlmClient;
 use crate::scheduler::Scheduler;
 use crate::scheduler::distribution::DistributionScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
+use crate::scheduler::static_llm::StaticLlmScheduler;
 use crate::state::StateEstimator;
 use crate::state::ema::{EmaConfig, VirtualCounterState};
 use crate::state::kalman::{KalmanConfig, KalmanFilterEstimator};
@@ -17,6 +20,7 @@ pub enum SchedulerKind {
     Random,
     RoundRobin,
     Distribution,
+    StaticLlm,
 }
 
 impl fmt::Display for SchedulerKind {
@@ -25,6 +29,39 @@ impl fmt::Display for SchedulerKind {
             SchedulerKind::Random => write!(f, "random"),
             SchedulerKind::RoundRobin => write!(f, "round_robin"),
             SchedulerKind::Distribution => write!(f, "distribution"),
+            SchedulerKind::StaticLlm => write!(f, "static_llm"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LlmConfig {
+    #[serde(default = "LlmConfig::default_base_url")]
+    pub base_url: String,
+    #[serde(default = "LlmConfig::default_model")]
+    pub model: String,
+    #[serde(default = "LlmConfig::default_update_interval")]
+    pub update_interval: u32,
+}
+
+impl LlmConfig {
+    fn default_base_url() -> String {
+        "http://dubliner.cs.northwestern.edu:11434".into()
+    }
+    fn default_model() -> String {
+        "gemma4-agent".into()
+    }
+    fn default_update_interval() -> u32 {
+        10
+    }
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            base_url: Self::default_base_url(),
+            model: Self::default_model(),
+            update_interval: Self::default_update_interval(),
         }
     }
 }
@@ -59,14 +96,21 @@ pub struct ResolvedConfig {
     pub noise_stddev: f64,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub llm: LlmConfig,
 }
 
 impl ResolvedConfig {
-    pub fn build_scheduler(&self) -> Box<dyn Scheduler> {
+    pub fn build_scheduler(&self, registry: &EventRegistry) -> Box<dyn Scheduler> {
         match self.scheduler {
             SchedulerKind::Random => Box::new(RandomScheduler::default()),
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
             SchedulerKind::Distribution => Box::new(DistributionScheduler::default()),
+            SchedulerKind::StaticLlm => {
+                let event_info = registry.dump();
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                Box::new(StaticLlmScheduler::new(event_info, client))
+            }
         }
     }
 
@@ -102,6 +146,7 @@ struct Defaults {
     noise_stddev: f64,
     kalman: KalmanConfig,
     ema: EmaConfig,
+    llm: LlmConfig,
 }
 
 impl Default for Defaults {
@@ -115,6 +160,7 @@ impl Default for Defaults {
             noise_stddev: 0.0,
             kalman: KalmanConfig::default(),
             ema: EmaConfig::default(),
+            llm: LlmConfig::default(),
         }
     }
 }

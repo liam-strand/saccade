@@ -27,6 +27,8 @@ pub fn simulate(
         .collect();
     debug!("Loaded {} events.", all_ids.len());
 
+    let scheduler = config.build_scheduler(&registry);
+
     debug!("Loading rate time-series from {:?}", rates_trace);
     let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
 
@@ -73,7 +75,7 @@ pub fn simulate(
 
     let mut profiler = ProfilerBuilder::new()
         .source(source)
-        .scheduler_boxed(config.build_scheduler(), all_ids)
+        .scheduler_boxed(scheduler, all_ids)
         .estimator_boxed(config.build_estimator())
         .sinks(&mut sinks)
         .build();

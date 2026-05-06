@@ -46,6 +46,9 @@ impl EventRegistry {
     pub fn get_event_name(&self, id: EventId) -> &str {
         &self.events[id as usize].name
     }
+    pub fn dump(&self) -> Vec<Event> {
+        self.events.clone()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

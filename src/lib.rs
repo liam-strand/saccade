@@ -4,6 +4,7 @@ pub mod config;
 pub mod docs;
 pub mod event;
 pub mod hardware_counters;
+pub mod llm;
 pub mod perf;
 pub mod perfetto;
 pub mod profiler;

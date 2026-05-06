@@ -25,6 +25,7 @@ perfetto_protos = "0.51"
 protobuf = "3.7"
 ndarray = "0.16"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
+ureq = "3"
 
 [build-dependencies]
 libbpf-cargo = "0.26.0"
