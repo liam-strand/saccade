@@ -99,10 +99,7 @@ impl HardwareSampleSource {
             timer_links.push(link);
         }
 
-        debug!(
-            "HardwareSampleSource has {} timer links",
-            timer_links.len()
-        );
+        debug!("HardwareSampleSource has {} timer links", timer_links.len());
 
         let hw_counters = HardwareCounters::new(cpus.len(), registry, &mut skel);
 
