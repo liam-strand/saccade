@@ -4,6 +4,7 @@ use crate::scheduler::Scheduler;
 use crate::scheduler::distribution::DistributionScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
+use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::static_llm::StaticLlmScheduler;
 use crate::state::StateEstimator;
 use crate::state::ema::{EmaConfig, VirtualCounterState};
@@ -21,6 +22,7 @@ pub enum SchedulerKind {
     RoundRobin,
     Distribution,
     StaticLlm,
+    DynamicLlm,
 }
 
 impl fmt::Display for SchedulerKind {
@@ -30,6 +32,7 @@ impl fmt::Display for SchedulerKind {
             SchedulerKind::RoundRobin => write!(f, "round_robin"),
             SchedulerKind::Distribution => write!(f, "distribution"),
             SchedulerKind::StaticLlm => write!(f, "static_llm"),
+            SchedulerKind::DynamicLlm => write!(f, "dynamic_llm"),
         }
     }
 }
@@ -117,6 +120,18 @@ impl ResolvedConfig {
                     .collect();
                 let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
                 Box::new(StaticLlmScheduler::new(event_info, client))
+            }
+            SchedulerKind::DynamicLlm => {
+                let event_info = registry
+                    .get_event_ids()
+                    .into_iter()
+                    .map(|id| {
+                        let ev = registry.get_event(id);
+                        (id, ev.name.clone(), ev.desc.clone())
+                    })
+                    .collect();
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                Box::new(DynamicLlmScheduler::new(event_info, client, self.llm.update_interval))
             }
         }
     }
