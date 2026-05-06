@@ -36,7 +36,7 @@ impl PromptBuilder {
         self
     }
 
-    pub fn build<'a>(&'a self) -> &'a [ChatMessage] {
+    pub fn build(&self) -> &[ChatMessage] {
         &self.messages
     }
 }

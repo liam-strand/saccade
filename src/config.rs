@@ -107,7 +107,14 @@ impl ResolvedConfig {
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
             SchedulerKind::Distribution => Box::new(DistributionScheduler::default()),
             SchedulerKind::StaticLlm => {
-                let event_info = registry.dump();
+                let event_info = registry
+                    .get_event_ids()
+                    .into_iter()
+                    .map(|id| {
+                        let ev = registry.get_event(id);
+                        (id, ev.name.clone(), ev.desc.clone())
+                    })
+                    .collect();
                 let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
                 Box::new(StaticLlmScheduler::new(event_info, client))
             }
