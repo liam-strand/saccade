@@ -1,12 +1,18 @@
 use crate::event::EventId;
 use crate::llm::PromptBuilder;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct ScheduleStep {
     pub(super) duration_ms: u64,
     pub(super) events: Vec<EventId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct EventWeight {
+    pub(super) event_id: EventId,
+    pub(super) weight: u32,
 }
 
 pub(super) fn system_message(num_slots: usize, guidance: Option<&str>) -> String {
@@ -113,6 +119,73 @@ pub(super) fn parse_schedule_response(
     Ok(steps)
 }
 
+pub(super) fn build_weights_prompt(
+    event_info: &[(EventId, String, String)],
+    num_slots: usize,
+    guidance: Option<&str>,
+) -> PromptBuilder {
+    let mut event_list = String::new();
+    for (id, name, desc) in event_info {
+        event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
+    }
+    let system = system_message(num_slots, guidance);
+    let user = format!(
+        "Available performance counters (format — ID: name: description):
+{event_list}
+Assign a priority weight (integer 1–10) to each counter. \
+A higher weight means the counter should be sampled more often. \
+Prioritize counters that reveal common bottlenecks — cache misses, \
+TLB pressure, branch mispredictions, memory stalls. \
+Every counter must appear exactly once in your response.
+
+Your entire response must be a single JSON array of objects with \
+\"event_id\" (integer) and \"weight\" (integer 1–10) fields. \
+No explanation, no prose, no markdown fences."
+    );
+    PromptBuilder::new().system(system).user(user)
+}
+
+pub(super) fn parse_weights_response(
+    response: &str,
+    all_events: &[EventId],
+) -> Result<Vec<EventWeight>, String> {
+    let start = response
+        .find('[')
+        .ok_or_else(|| format!("no JSON array in response:\n{response}"))?;
+    let end = response
+        .rfind(']')
+        .ok_or_else(|| format!("JSON array not closed:\n{response}"))?;
+    if end < start {
+        return Err(format!("malformed JSON array:\n{response}"));
+    }
+
+    let parsed: Vec<EventWeight> = serde_json::from_str(&response[start..=end])
+        .map_err(|e| format!("failed to parse weights JSON: {e}\nresponse:\n{response}"))?;
+
+    let valid_ids: HashSet<EventId> = all_events.iter().copied().collect();
+    let mut by_id: HashMap<EventId, u32> = HashMap::new();
+    for ew in parsed {
+        if valid_ids.contains(&ew.event_id) {
+            let w = ew.weight.clamp(1, 10);
+            by_id
+                .entry(ew.event_id)
+                .and_modify(|v| *v = (*v).max(w))
+                .or_insert(w);
+        }
+    }
+
+    for &id in all_events {
+        by_id.entry(id).or_insert(1);
+    }
+
+    if by_id.is_empty() {
+        return Err("no valid event weights in response".to_string());
+    }
+    Ok(by_id
+        .into_iter()
+        .map(|(event_id, weight)| EventWeight { event_id, weight })
+        .collect())
+}
 
 #[cfg(test)]
 mod tests {
@@ -198,4 +271,60 @@ mod tests {
         assert_eq!(steps[0].events.len(), 2);
     }
 
+    #[test]
+    fn parse_valid_weights() {
+        let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 1, "weight": 2}]"#;
+        let weights = parse_weights_response(json, &[0, 1]).unwrap();
+        let map: HashMap<EventId, u32> =
+            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        assert_eq!(map[&0], 5);
+        assert_eq!(map[&1], 2);
+    }
+
+    #[test]
+    fn parse_weights_fills_missing_events() {
+        let json = r#"[{"event_id": 0, "weight": 5}]"#;
+        let weights = parse_weights_response(json, &[0, 1, 2]).unwrap();
+        let map: HashMap<EventId, u32> =
+            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        assert_eq!(map[&0], 5);
+        assert_eq!(map[&1], 1);
+        assert_eq!(map[&2], 1);
+    }
+
+    #[test]
+    fn parse_weights_clamps_out_of_range() {
+        let json = r#"[{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]"#;
+        let weights = parse_weights_response(json, &[0, 1]).unwrap();
+        let map: HashMap<EventId, u32> =
+            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        assert_eq!(map[&0], 1);
+        assert_eq!(map[&1], 10);
+    }
+
+    #[test]
+    fn parse_weights_filters_unknown_ids() {
+        let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]"#;
+        let weights = parse_weights_response(json, &[0, 1]).unwrap();
+        let map: HashMap<EventId, u32> =
+            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        assert!(!map.contains_key(&99));
+        assert_eq!(map[&0], 5);
+        assert_eq!(map[&1], 1);
+    }
+
+    #[test]
+    fn parse_weights_deduplicates_keeps_max() {
+        let json = r#"[{"event_id": 0, "weight": 3}, {"event_id": 0, "weight": 7}]"#;
+        let weights = parse_weights_response(json, &[0]).unwrap();
+        let map: HashMap<EventId, u32> =
+            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        assert_eq!(map[&0], 7);
+    }
+
+    #[test]
+    fn parse_weights_no_array() {
+        let err = parse_weights_response("hello world", &[0]).unwrap_err();
+        assert!(err.contains("no JSON array"));
+    }
 }

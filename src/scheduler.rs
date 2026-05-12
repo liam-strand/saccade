@@ -6,6 +6,7 @@ pub mod random;
 pub mod round_robin;
 pub mod static_llm;
 pub mod test;
+pub mod weighted_round_robin_llm;
 
 use crate::event::EventId;
 use crate::quantum::Quantum;

@@ -6,6 +6,7 @@ use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
 use crate::scheduler::static_llm::StaticLlmScheduler;
+use crate::scheduler::weighted_round_robin_llm::WeightedRoundRobinLlmScheduler;
 use crate::state::StateEstimator;
 use crate::state::ema::{EmaConfig, VirtualCounterState};
 use crate::state::kalman::{KalmanConfig, KalmanFilterEstimator};
@@ -23,6 +24,7 @@ pub enum SchedulerKind {
     Distribution,
     StaticLlm,
     DynamicLlm,
+    WeightedRoundRobinLlm,
 }
 
 impl fmt::Display for SchedulerKind {
@@ -33,6 +35,7 @@ impl fmt::Display for SchedulerKind {
             SchedulerKind::Distribution => write!(f, "distribution"),
             SchedulerKind::StaticLlm => write!(f, "static_llm"),
             SchedulerKind::DynamicLlm => write!(f, "dynamic_llm"),
+            SchedulerKind::WeightedRoundRobinLlm => write!(f, "weighted_round_robin_llm"),
         }
     }
 }
@@ -142,6 +145,22 @@ impl ResolvedConfig {
                     event_info,
                     client,
                     self.llm.update_interval,
+                    self.llm.guidance.clone(),
+                ))
+            }
+            SchedulerKind::WeightedRoundRobinLlm => {
+                let event_info = registry
+                    .get_event_ids()
+                    .into_iter()
+                    .map(|id| {
+                        let ev = registry.get_event(id);
+                        (id, ev.name.clone(), ev.desc.clone())
+                    })
+                    .collect();
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                Box::new(WeightedRoundRobinLlmScheduler::new(
+                    event_info,
+                    client,
                     self.llm.guidance.clone(),
                 ))
             }
