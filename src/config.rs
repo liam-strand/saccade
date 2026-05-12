@@ -45,6 +45,8 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "LlmConfig::default_update_interval")]
     pub update_interval: u32,
+    #[serde(default)]
+    pub guidance: Option<String>,
 }
 
 impl LlmConfig {
@@ -65,6 +67,7 @@ impl Default for LlmConfig {
             base_url: Self::default_base_url(),
             model: Self::default_model(),
             update_interval: Self::default_update_interval(),
+            guidance: None,
         }
     }
 }
@@ -119,7 +122,11 @@ impl ResolvedConfig {
                     })
                     .collect();
                 let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
-                Box::new(StaticLlmScheduler::new(event_info, client))
+                Box::new(StaticLlmScheduler::new(
+                    event_info,
+                    client,
+                    self.llm.guidance.clone(),
+                ))
             }
             SchedulerKind::DynamicLlm => {
                 let event_info = registry
@@ -135,6 +142,7 @@ impl ResolvedConfig {
                     event_info,
                     client,
                     self.llm.update_interval,
+                    self.llm.guidance.clone(),
                 ))
             }
         }
@@ -159,6 +167,7 @@ pub struct CliOverrides {
     pub q_output_ns: Option<u64>,
     pub noise_stddev: Option<f64>,
     pub seed: Option<u64>,
+    pub guidance: Option<String>,
 }
 
 /// Single source of truth for default values, fed into the config builder via Serialize.
@@ -211,6 +220,7 @@ fn build_config(
         .set_override_option("q_output_ns", ov.q_output_ns.map(|v| v as i64))?
         .set_override_option("noise_stddev", ov.noise_stddev)?
         .set_override_option("seed", ov.seed.map(|v| v as i64))?
+        .set_override_option("llm.guidance", ov.guidance)?
         .build()?
         .try_deserialize::<ResolvedConfig>()
 }
@@ -236,4 +246,64 @@ pub fn load_config(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn no_overrides() -> CliOverrides {
+        CliOverrides {
+            scheduler: None,
+            estimator: None,
+            q_schedule_ns: None,
+            q_sample_ns: None,
+            q_output_ns: None,
+            noise_stddev: None,
+            seed: None,
+            guidance: None,
+        }
+    }
+
+    fn write_toml(content: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "saccade_test_{}.toml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn guidance_from_toml() {
+        let path = write_toml("[llm]\nguidance = \"from-toml\"\n");
+        let cfg = load_config(Some(path.clone()), true, no_overrides()).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.llm.guidance.as_deref(), Some("from-toml"));
+    }
+
+    #[test]
+    fn guidance_cli_overrides_toml() {
+        let path = write_toml("[llm]\nguidance = \"from-toml\"\n");
+        let mut ov = no_overrides();
+        ov.guidance = Some("from-cli".to_string());
+        let cfg = load_config(Some(path.clone()), true, ov).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.llm.guidance.as_deref(), Some("from-cli"));
+    }
+
+    #[test]
+    fn guidance_defaults_to_none() {
+        let path = write_toml("");
+        let cfg = load_config(Some(path.clone()), true, no_overrides()).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.llm.guidance, None);
+    }
 }

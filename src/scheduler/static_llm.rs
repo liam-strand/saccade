@@ -13,10 +13,15 @@ pub struct StaticLlmScheduler {
     step_idx: usize,
     all_events: Vec<EventId>,
     num_slots: usize,
+    guidance: Option<String>,
 }
 
 impl StaticLlmScheduler {
-    pub fn new(event_info: Vec<(EventId, String, String)>, client: LlmClient) -> Self {
+    pub fn new(
+        event_info: Vec<(EventId, String, String)>,
+        client: LlmClient,
+        guidance: Option<String>,
+    ) -> Self {
         Self {
             client,
             event_info,
@@ -24,6 +29,7 @@ impl StaticLlmScheduler {
             step_idx: 0,
             all_events: Vec::new(),
             num_slots: 0,
+            guidance,
         }
     }
 }
@@ -38,7 +44,12 @@ impl Scheduler for StaticLlmScheduler {
         self.num_slots = num_slots;
 
         let response = {
-            let pb = llm_common::build_init_prompt(&self.event_info, num_slots);
+            let pb = llm_common::build_init_prompt(
+                &self.event_info,
+                num_slots,
+                self.guidance.as_deref(),
+            );
+            tracing::debug!("StaticLlm system message:\n{}", pb.build()[0].content);
             self.client.chat(pb.build())
         }?;
 
@@ -105,8 +116,11 @@ mod tests {
 
     #[test]
     fn next_step_cycles() {
-        let mut s =
-            StaticLlmScheduler::new(vec![], LlmClient::new("http://localhost:0", "test-model"));
+        let mut s = StaticLlmScheduler::new(
+            vec![],
+            LlmClient::new("http://localhost:0", "test-model"),
+            None,
+        );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 4;
         s.schedule = vec![
@@ -185,11 +199,11 @@ mod tests {
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
 
         let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
-        let mut s = StaticLlmScheduler::new(event_info, client);
+        let mut s = StaticLlmScheduler::new(event_info, client, None);
         s.all_events = all_events.clone();
         s.num_slots = 4;
 
-        let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots);
+        let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots, None);
         let response = s.client.chat(pb.build()).expect("LLM call should succeed");
         eprintln!("LLM response:\n{response}");
 

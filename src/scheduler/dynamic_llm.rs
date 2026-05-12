@@ -19,6 +19,7 @@ pub struct DynamicLlmScheduler {
     steps_since_update: u32,
     request_tx: Option<mpsc::SyncSender<Vec<ChatMessage>>>,
     result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
+    guidance: Option<String>,
 }
 
 impl DynamicLlmScheduler {
@@ -26,6 +27,7 @@ impl DynamicLlmScheduler {
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
         update_interval: u32,
+        guidance: Option<String>,
     ) -> Self {
         Self {
             client,
@@ -38,6 +40,7 @@ impl DynamicLlmScheduler {
             steps_since_update: 0,
             request_tx: None,
             result_rx: None,
+            guidance,
         }
     }
 
@@ -84,13 +87,7 @@ impl DynamicLlmScheduler {
             serde_json::to_string_pretty(&self.schedule).expect("should serialize");
         let num_slots = self.num_slots;
 
-        let system = format!(
-            "You are an expert Linux performance profiling assistant. \
-             You generate hardware performance counter observation schedules \
-             for a sampling profiler that activates {num_slots} \
-             counters simultaneously. The profiler cycles through the schedule \
-             indefinitely, rotating which counters are active."
-        );
+        let system = llm_common::system_message(num_slots, self.guidance.as_deref());
         let user = format!(
             "Available performance counters (format — ID: name: description):
 {event_list}
@@ -120,7 +117,12 @@ impl Scheduler for DynamicLlmScheduler {
         self.num_slots = num_slots;
 
         let response = {
-            let pb = llm_common::build_init_prompt(&self.event_info, num_slots);
+            let pb = llm_common::build_init_prompt(
+                &self.event_info,
+                num_slots,
+                self.guidance.as_deref(),
+            );
+            tracing::debug!("DynamicLlm init system message:\n{}", pb.build()[0].content);
             self.client.chat(pb.build())
         }?;
 
@@ -264,6 +266,7 @@ mod tests {
             ],
             LlmClient::new("http://localhost:0", "test-model"),
             update_interval,
+            None,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -326,6 +329,7 @@ mod tests {
             ],
             LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4"),
             1,
+            None,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;

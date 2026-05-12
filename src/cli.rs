@@ -39,6 +39,10 @@ pub enum Commands {
         #[arg(long)]
         estimator: Option<EstimatorKind>,
 
+        /// Guidance hint for LLM-guided schedulers (e.g. "focus on memory behavior")
+        #[arg(long)]
+        guidance: Option<String>,
+
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]
         q_schedule: Option<u64>,
@@ -111,6 +115,10 @@ pub enum Commands {
         /// State estimator to use
         #[arg(long)]
         estimator: Option<EstimatorKind>,
+
+        /// Guidance hint for LLM-guided schedulers (e.g. "focus on memory behavior")
+        #[arg(long)]
+        guidance: Option<String>,
 
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]

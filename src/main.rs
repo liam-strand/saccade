@@ -26,6 +26,7 @@ fn main() -> std::io::Result<()> {
             library,
             scheduler,
             estimator,
+            guidance,
             q_schedule,
             q_sample,
             q_output,
@@ -44,6 +45,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: q_output,
                     noise_stddev: None,
                     seed: None,
+                    guidance,
                 },
             )?;
             run(library, config, trace, csv, target)?;
@@ -68,6 +70,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: None,
                     noise_stddev: None,
                     seed: None,
+                    guidance: None,
                 },
             )?;
             sweep(library, config, trace, matrix, quiet, target)?;
@@ -77,6 +80,7 @@ fn main() -> std::io::Result<()> {
             rates_trace,
             scheduler,
             estimator,
+            guidance,
             q_schedule,
             q_output,
             noise_stddev,
@@ -95,6 +99,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: q_output,
                     noise_stddev,
                     seed,
+                    guidance,
                 },
             )?;
             simulate(library, rates_trace, config, csv, trace)?;

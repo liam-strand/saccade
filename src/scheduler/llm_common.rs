@@ -9,9 +9,24 @@ pub(super) struct ScheduleStep {
     pub(super) events: Vec<EventId>,
 }
 
+pub(super) fn system_message(num_slots: usize, guidance: Option<&str>) -> String {
+    let guidance_suffix = guidance
+        .map(|g| format!("\n\nUser guidance: {g}"))
+        .unwrap_or_default();
+    format!(
+        "You are an expert Linux performance profiling assistant. \
+         You generate hardware performance counter observation schedules \
+         for a sampling profiler that activates {num_slots} \
+         counters simultaneously. The profiler cycles through the schedule \
+         indefinitely, rotating which counters are active to build a \
+         complete picture of program behavior over time.{guidance_suffix}"
+    )
+}
+
 pub(super) fn build_init_prompt(
     event_info: &[(EventId, String, String)],
     num_slots: usize,
+    guidance: Option<&str>,
 ) -> PromptBuilder {
     let mut event_list = String::new();
     for (id, name, desc) in event_info {
@@ -30,14 +45,7 @@ pub(super) fn build_init_prompt(
         .collect();
     let example = serde_json::to_string_pretty(&example_steps).expect("should serialize");
 
-    let system = format!(
-        "You are an expert Linux performance profiling assistant. \
-         You generate hardware performance counter observation schedules \
-         for a sampling profiler that activates {num_slots} \
-         counters simultaneously. The profiler cycles through the schedule \
-         indefinitely, rotating which counters are active to build a \
-         complete picture of program behavior over time."
-    );
+    let system = system_message(num_slots, guidance);
     let user = format!(
         "\
 Available performance counters (format — ID: name: description):
@@ -105,12 +113,25 @@ pub(super) fn parse_schedule_response(
     Ok(steps)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn events() -> Vec<EventId> {
         vec![0, 1, 2, 3, 4]
+    }
+
+    #[test]
+    fn system_message_includes_guidance() {
+        let msg = system_message(4, Some("focus on memory bandwidth"));
+        assert!(msg.contains("focus on memory bandwidth"));
+    }
+
+    #[test]
+    fn system_message_no_guidance() {
+        let msg = system_message(4, None);
+        assert!(!msg.contains("User guidance"));
     }
 
     #[test]
@@ -176,4 +197,5 @@ mod tests {
         let steps = parse_schedule_response(json, &events(), 2).unwrap();
         assert_eq!(steps[0].events.len(), 2);
     }
+
 }
