@@ -28,7 +28,12 @@ pub fn run(
         .collect();
     debug!("Loaded {} events.", all_ids.len());
 
-    let scheduler = config.build_scheduler(&registry);
+    // Initialize the scheduler before spawning the child so any blocking work
+    // (e.g. LLM calls) completes before the child is held in ptrace-stop.
+    let mut scheduler = config.build_scheduler(&registry);
+    scheduler
+        .init(all_ids.clone(), 4)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let mut child = spawn_child(&target)?;
     let pid = child.id();
@@ -49,7 +54,7 @@ pub fn run(
 
     let mut profiler = ProfilerBuilder::new()
         .source(source)
-        .scheduler_boxed(scheduler, all_ids)
+        .scheduler_boxed_pre_init(scheduler)
         .estimator_boxed(config.build_estimator())
         .sinks(&mut sinks)
         .build();

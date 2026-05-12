@@ -16,7 +16,13 @@ impl FixedScheduler {
 }
 
 impl Scheduler for FixedScheduler {
-    fn init(&mut self, _all_events: Vec<EventId>, _num_slots: usize) {}
+    fn init(
+        &mut self,
+        _all_events: Vec<EventId>,
+        _num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
 
     fn next_step(
         &mut self,

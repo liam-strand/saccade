@@ -76,6 +76,7 @@ pub fn simulate(
     let mut profiler = ProfilerBuilder::new()
         .source(source)
         .scheduler_boxed(scheduler, all_ids)
+        .map_err(|e| std::io::Error::other(e.to_string()))?
         .estimator_boxed(config.build_estimator())
         .sinks(&mut sinks)
         .build();

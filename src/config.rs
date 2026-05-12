@@ -2,9 +2,9 @@ use crate::event::EventRegistry;
 use crate::llm::LlmClient;
 use crate::scheduler::Scheduler;
 use crate::scheduler::distribution::DistributionScheduler;
+use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
-use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::static_llm::StaticLlmScheduler;
 use crate::state::StateEstimator;
 use crate::state::ema::{EmaConfig, VirtualCounterState};
@@ -131,7 +131,11 @@ impl ResolvedConfig {
                     })
                     .collect();
                 let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
-                Box::new(DynamicLlmScheduler::new(event_info, client, self.llm.update_interval))
+                Box::new(DynamicLlmScheduler::new(
+                    event_info,
+                    client,
+                    self.llm.update_interval,
+                ))
             }
         }
     }

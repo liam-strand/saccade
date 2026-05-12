@@ -27,9 +27,14 @@ impl RoundRobinScheduler {
 }
 
 impl Scheduler for RoundRobinScheduler {
-    fn init(&mut self, events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.events = events;
         self.num_slots = num_slots;
+        Ok(())
     }
 
     fn next_step(

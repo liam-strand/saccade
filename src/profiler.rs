@@ -118,16 +118,30 @@ impl<'s> ProfilerBuilder<'s> {
         self
     }
 
-    pub fn scheduler(mut self, mut s: impl Scheduler + 'static, all_events: Vec<EventId>) -> Self {
+    pub fn scheduler(
+        mut self,
+        mut s: impl Scheduler + 'static,
+        all_events: Vec<EventId>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
-        s.init(all_events, num_slots);
+        s.init(all_events, num_slots)?;
         self.scheduler = Some(Box::new(s));
-        self
+        Ok(self)
     }
 
-    pub fn scheduler_boxed(mut self, mut s: Box<dyn Scheduler>, all_events: Vec<EventId>) -> Self {
+    pub fn scheduler_boxed(
+        mut self,
+        mut s: Box<dyn Scheduler>,
+        all_events: Vec<EventId>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
-        s.init(all_events, num_slots);
+        s.init(all_events, num_slots)?;
+        self.scheduler = Some(s);
+        Ok(self)
+    }
+
+    /// Store a scheduler that has already been initialized. Skips the `init` call.
+    pub fn scheduler_boxed_pre_init(mut self, s: Box<dyn Scheduler>) -> Self {
         self.scheduler = Some(s);
         self
     }

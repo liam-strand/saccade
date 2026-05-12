@@ -29,21 +29,25 @@ impl StaticLlmScheduler {
 }
 
 impl Scheduler for StaticLlmScheduler {
-    fn init(&mut self, all_events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
         let response = {
             let pb = llm_common::build_init_prompt(&self.event_info, num_slots);
             self.client.chat(pb.build())
-        }
-        .unwrap_or_else(|e| panic!("StaticLlmScheduler: LLM call failed: {e}"));
+        }?;
 
         self.schedule =
             llm_common::parse_schedule_response(&response, &self.all_events, self.num_slots)
-                .unwrap_or_else(|e| panic!("StaticLlmScheduler: bad schedule from LLM: {e}"));
+                .map_err(std::io::Error::other)?;
 
         tracing::info!("StaticLlmScheduler: {} steps in cycle", self.schedule.len());
+        Ok(())
     }
 
     fn next_step(
@@ -75,18 +79,21 @@ mod tests {
 
     impl NullEstimator {
         fn new() -> Self {
-            Self { estimates: HashMap::new() }
+            Self {
+                estimates: HashMap::new(),
+            }
         }
     }
 
     impl crate::state::StateEstimator for NullEstimator {
-        fn measurement_update(
-            &mut self, _: u32, _: EventId, _: f64, _: f64, _: u32, _: u64,
-        ) {
-        }
+        fn measurement_update(&mut self, _: u32, _: EventId, _: f64, _: f64, _: u32, _: u64) {}
         fn time_update(&mut self, _: u32, _: EventId, _: u64) {}
-        fn rate(&self, _: u32, _: EventId) -> f64 { 0.0 }
-        fn uncertainty(&self, _: u32, _: EventId) -> f64 { 0.0 }
+        fn rate(&self, _: u32, _: EventId) -> f64 {
+            0.0
+        }
+        fn uncertainty(&self, _: u32, _: EventId) -> f64 {
+            0.0
+        }
         fn all_estimates(&self) -> &HashMap<EstimateKey, CounterEstimate> {
             &self.estimates
         }
@@ -98,16 +105,23 @@ mod tests {
 
     #[test]
     fn next_step_cycles() {
-        let mut s = StaticLlmScheduler::new(
-            vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
-        );
+        let mut s =
+            StaticLlmScheduler::new(vec![], LlmClient::new("http://localhost:0", "test-model"));
         s.all_events = vec![0, 1, 2];
         s.num_slots = 4;
         s.schedule = vec![
-            ScheduleStep { duration_ms: 10, events: vec![0] },
-            ScheduleStep { duration_ms: 20, events: vec![1] },
-            ScheduleStep { duration_ms: 30, events: vec![2] },
+            ScheduleStep {
+                duration_ms: 10,
+                events: vec![0],
+            },
+            ScheduleStep {
+                duration_ms: 20,
+                events: vec![1],
+            },
+            ScheduleStep {
+                duration_ms: 30,
+                events: vec![2],
+            },
         ];
 
         let q = empty_quantum();
@@ -132,13 +146,41 @@ mod tests {
     fn llm_generates_parseable_schedule() {
         let event_info = vec![
             (0u32, "cache-misses".to_string(), "Cache misses".to_string()),
-            (1u32, "cache-references".to_string(), "Cache accesses, including hits".to_string()),
-            (2u32, "branch-misses".to_string(), "Mispredicted branches".to_string()),
-            (3u32, "branch-instructions".to_string(), "Branch instructions retired".to_string()),
-            (4u32, "instructions".to_string(), "Instructions retired".to_string()),
-            (5u32, "cpu-cycles".to_string(), "Total CPU cycles".to_string()),
-            (6u32, "dTLB-load-misses".to_string(), "Data TLB load misses".to_string()),
-            (7u32, "dTLB-store-misses".to_string(), "Data TLB store misses".to_string()),
+            (
+                1u32,
+                "cache-references".to_string(),
+                "Cache accesses, including hits".to_string(),
+            ),
+            (
+                2u32,
+                "branch-misses".to_string(),
+                "Mispredicted branches".to_string(),
+            ),
+            (
+                3u32,
+                "branch-instructions".to_string(),
+                "Branch instructions retired".to_string(),
+            ),
+            (
+                4u32,
+                "instructions".to_string(),
+                "Instructions retired".to_string(),
+            ),
+            (
+                5u32,
+                "cpu-cycles".to_string(),
+                "Total CPU cycles".to_string(),
+            ),
+            (
+                6u32,
+                "dTLB-load-misses".to_string(),
+                "Data TLB load misses".to_string(),
+            ),
+            (
+                7u32,
+                "dTLB-store-misses".to_string(),
+                "Data TLB store misses".to_string(),
+            ),
         ];
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
 

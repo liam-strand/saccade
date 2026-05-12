@@ -1,10 +1,11 @@
 use crate::event::EventId;
-use crate::llm::{LlmClient, PromptBuilder};
+use crate::llm::{ChatMessage, LlmClient, PromptBuilder};
 use crate::quantum::Quantum;
 use crate::scheduler::llm_common::{self, ScheduleStep};
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::collections::HashMap;
+use std::sync::mpsc;
 use std::time::Duration;
 
 pub struct DynamicLlmScheduler {
@@ -16,6 +17,8 @@ pub struct DynamicLlmScheduler {
     num_slots: usize,
     update_interval: u32,
     steps_since_update: u32,
+    request_tx: Option<mpsc::SyncSender<Vec<ChatMessage>>>,
+    result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
 }
 
 impl DynamicLlmScheduler {
@@ -33,6 +36,8 @@ impl DynamicLlmScheduler {
             num_slots: 0,
             update_interval,
             steps_since_update: 0,
+            request_tx: None,
+            result_rx: None,
         }
     }
 
@@ -88,42 +93,70 @@ impl DynamicLlmScheduler {
         );
         let user = format!(
             "Available performance counters (format — ID: name: description):
-            {event_list}
-            Recent observations (rate in events/ns, uncertainty in [0=confident, 1=unknown]):
-            {obs_list}
-            Current schedule (for reference):
-            {current_schedule}
+{event_list}
+Recent observations (rate in events/ns, uncertainty in [0=confident, 1=unknown]):
+{obs_list}
+Current schedule (for reference):
+{current_schedule}
 
-            Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
-            Prioritize events with high uncertainty or high rate — they are most informative. \
-            Cover all counters at least once across the full cycle.
+Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
+Prioritize events with high uncertainty or high rate — they are most informative. \
+Cover all counters at least once across the full cycle.
 
-            Your entire response must be a single JSON array. \
-            No explanation, no prose, no markdown fences."
+Your entire response must be a single JSON array. \
+No explanation, no prose, no markdown fences."
         );
         PromptBuilder::new().system(system).user(user)
     }
 }
 
 impl Scheduler for DynamicLlmScheduler {
-    fn init(&mut self, all_events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
         let response = {
             let pb = llm_common::build_init_prompt(&self.event_info, num_slots);
             self.client.chat(pb.build())
-        }
-        .unwrap_or_else(|e| panic!("DynamicLlmScheduler: LLM call failed: {e}"));
+        }?;
 
         self.schedule =
             llm_common::parse_schedule_response(&response, &self.all_events, self.num_slots)
-                .unwrap_or_else(|e| panic!("DynamicLlmScheduler: bad schedule from LLM: {e}"));
+                .map_err(std::io::Error::other)?;
 
         tracing::info!(
             "DynamicLlmScheduler: {} steps in initial cycle",
             self.schedule.len()
         );
+
+        // Spawn a persistent worker thread for background schedule updates.
+        let (req_tx, req_rx) = mpsc::sync_channel::<Vec<ChatMessage>>(1);
+        let (res_tx, res_rx) = mpsc::sync_channel(1);
+
+        let client = self.client.clone();
+        let all_events = self.all_events.clone();
+        let num_slots = self.num_slots;
+        std::thread::spawn(move || {
+            for messages in req_rx {
+                let result = client
+                    .chat(&messages)
+                    .map_err(|e| e.to_string())
+                    .and_then(|resp| {
+                        llm_common::parse_schedule_response(&resp, &all_events, num_slots)
+                    });
+                if res_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+
+        self.request_tx = Some(req_tx);
+        self.result_rx = Some(res_rx);
+        Ok(())
     }
 
     fn next_step(
@@ -131,33 +164,38 @@ impl Scheduler for DynamicLlmScheduler {
         _quantum: &Quantum,
         estimator: &dyn StateEstimator,
     ) -> ScheduleDecision {
-        self.steps_since_update += 1;
-        if self.steps_since_update >= self.update_interval {
-            self.steps_since_update = 0;
-            let pb = self.build_update_prompt(estimator);
-            match self.client.chat(pb.build()) {
-                Ok(resp) => {
-                    match llm_common::parse_schedule_response(
-                        &resp,
-                        &self.all_events,
-                        self.num_slots,
-                    ) {
-                        Ok(steps) => {
-                            tracing::info!("DynamicLlmScheduler: updated to {} steps", steps.len());
-                            self.schedule = steps;
-                            self.step_idx = 0;
-                        }
-                        Err(e) => tracing::warn!(
-                            "DynamicLlmScheduler: bad update, keeping current schedule: {e}"
-                        ),
-                    }
+        // 1. Check for a completed background update.
+        if let Some(rx) = &self.result_rx {
+            match rx.try_recv() {
+                Ok(Ok(steps)) => {
+                    tracing::info!("DynamicLlmScheduler: updated to {} steps", steps.len());
+                    self.schedule = steps;
+                    self.step_idx = 0;
                 }
-                Err(e) => tracing::warn!(
-                    "DynamicLlmScheduler: LLM update failed, keeping current schedule: {e}"
-                ),
+                Ok(Err(msg)) => {
+                    tracing::warn!("DynamicLlmScheduler: update failed, keeping schedule: {msg}");
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::warn!("DynamicLlmScheduler: worker thread exited");
+                }
             }
         }
 
+        // 2. Send a new update request if the interval has elapsed.
+        // Reset the counter only on successful send; if the worker is busy,
+        // leave the counter alone so we retry on the next step.
+        self.steps_since_update += 1;
+        if self.steps_since_update >= self.update_interval {
+            let messages = self.build_update_prompt(estimator).build().to_vec();
+            if let Some(tx) = &self.request_tx
+                && tx.try_send(messages).is_ok()
+            {
+                self.steps_since_update = 0;
+            }
+        }
+
+        // 3. Serve the current schedule step.
         let step = &self.schedule[self.step_idx];
         let result = ScheduleDecision {
             active_events: step.events.clone(),

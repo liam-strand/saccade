@@ -17,12 +17,18 @@ pub(super) fn build_init_prompt(
     for (id, name, desc) in event_info {
         event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
     }
-    let example = serde_json::to_string_pretty(&vec![
-        ScheduleStep { duration_ms: 25, events: vec![0, 2, 4, 6] },
-        ScheduleStep { duration_ms: 20, events: vec![1, 3, 24, 35] },
-        ScheduleStep { duration_ms: 30, events: vec![5, 54, 90, 66] },
-    ])
-    .expect("should serialize");
+    let ids: Vec<EventId> = event_info.iter().map(|(id, _, _)| *id).collect();
+    let durations = [25u64, 75, 50];
+    let example_steps: Vec<ScheduleStep> = ids
+        .chunks(num_slots.max(1))
+        .take(3)
+        .enumerate()
+        .map(|(i, chunk)| ScheduleStep {
+            duration_ms: durations[i % durations.len()],
+            events: chunk.to_vec(),
+        })
+        .collect();
+    let example = serde_json::to_string_pretty(&example_steps).expect("should serialize");
 
     let system = format!(
         "You are an expert Linux performance profiling assistant. \
@@ -68,23 +74,32 @@ pub(super) fn parse_schedule_response(
         return Err(format!("malformed JSON array in LLM response:\n{response}"));
     }
 
-    let mut steps: Vec<ScheduleStep> =
-        serde_json::from_str(&response[start..=end]).map_err(|e| {
-            format!("failed to parse LLM schedule JSON: {e}\nresponse:\n{response}")
-        })?;
+    let steps: Vec<ScheduleStep> = serde_json::from_str(&response[start..=end])
+        .map_err(|e| format!("failed to parse LLM schedule JSON: {e}\nresponse:\n{response}"))?;
 
     if steps.is_empty() {
         return Err("LLM returned an empty schedule".to_string());
     }
 
     let valid_ids: HashSet<u32> = all_events.iter().copied().collect();
-    for (i, step) in steps.iter_mut().enumerate() {
-        step.events.retain(|id| valid_ids.contains(id));
-        step.events.truncate(num_slots);
-        step.duration_ms = step.duration_ms.max(1);
-        if step.events.is_empty() {
-            return Err(format!("step {i} contains no valid event IDs"));
-        }
+    let steps: Vec<ScheduleStep> = steps
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, mut step)| {
+            step.events.retain(|id| valid_ids.contains(id));
+            step.events.truncate(num_slots);
+            step.duration_ms = step.duration_ms.max(1);
+            if step.events.is_empty() {
+                tracing::warn!("dropping step {i}: no valid event IDs after filtering");
+                None
+            } else {
+                Some(step)
+            }
+        })
+        .collect();
+
+    if steps.is_empty() {
+        return Err("all steps contained invalid event IDs".to_string());
     }
 
     Ok(steps)
@@ -134,7 +149,18 @@ mod tests {
     fn parse_all_invalid_ids_errors() {
         let json = r#"[{"duration_ms": 20, "events": [99, 100]}]"#;
         let err = parse_schedule_response(json, &[0, 1], 4).unwrap_err();
-        assert!(err.contains("no valid event IDs"));
+        assert!(err.contains("invalid event IDs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_skips_bad_step_keeps_good() {
+        let json = r#"[
+            {"duration_ms": 20, "events": [99, 100]},
+            {"duration_ms": 30, "events": [0, 1]}
+        ]"#;
+        let steps = parse_schedule_response(json, &[0, 1], 4).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].events, vec![0, 1]);
     }
 
     #[test]

@@ -15,7 +15,11 @@ use std::time::Duration;
 /// Pluggable counter selection policy.
 pub trait Scheduler {
     /// Initialize with the universe of possible events and the number of hardware slots.
-    fn init(&mut self, all_events: Vec<EventId>, num_slots: usize);
+    fn init(
+        &mut self,
+        all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>>;
 
     /// Calculate the next set of events to monitor.
     ///

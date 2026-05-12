@@ -28,9 +28,14 @@ impl Default for RandomScheduler {
 }
 
 impl Scheduler for RandomScheduler {
-    fn init(&mut self, all_events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.events = all_events;
         self.num_slots = num_slots;
+        Ok(())
     }
 
     fn next_step(

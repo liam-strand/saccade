@@ -41,8 +41,13 @@ impl TestScheduler {
 }
 
 impl Scheduler for TestScheduler {
-    fn init(&mut self, _all_events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        _all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.num_slots = num_slots;
+        Ok(())
     }
 
     fn next_step(

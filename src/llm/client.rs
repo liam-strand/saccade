@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum LlmError {
@@ -42,16 +43,23 @@ struct ChatResponseMessage {
     content: String,
 }
 
+#[derive(Clone)]
 pub struct LlmClient {
     base_url: String,
     model: String,
+    agent: ureq::Agent,
 }
 
 impl LlmClient {
     pub fn new(base_url: &str, model: &str) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_recv_response(Some(Duration::from_secs(120)))
+            .build();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
+            agent: config.into(),
         }
     }
 
@@ -69,7 +77,9 @@ impl LlmClient {
         })
         .map_err(LlmError::Json)?;
 
-        let mut response = ureq::post(&url)
+        let mut response = self
+            .agent
+            .post(&url)
             .header("Content-Type", "application/json")
             .send(body)
             .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
@@ -79,8 +89,8 @@ impl LlmClient {
             .read_to_string()
             .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
 
-        let parsed: ChatResponse = serde_json::from_str(&text).map_err(LlmError::Json)?;
-
-        Ok(parsed.message.content)
+        serde_json::from_str::<ChatResponse>(&text)
+            .map(|parsed| parsed.message.content)
+            .map_err(|_| LlmError::BadResponse(text))
     }
 }

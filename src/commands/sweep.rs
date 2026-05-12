@@ -99,6 +99,7 @@ pub fn sweep(
         let mut profiler = ProfilerBuilder::new()
             .source(source)
             .scheduler(FixedScheduler::new(batch.clone()), batch.clone())
+            .map_err(|e| std::io::Error::other(e.to_string()))?
             .estimator(PropagateEstimator::new())
             .sinks(&mut sinks)
             .build();

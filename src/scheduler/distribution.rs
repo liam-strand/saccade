@@ -25,9 +25,14 @@ impl Default for DistributionScheduler {
 }
 
 impl Scheduler for DistributionScheduler {
-    fn init(&mut self, all_events: Vec<EventId>, num_slots: usize) {
+    fn init(
+        &mut self,
+        all_events: Vec<EventId>,
+        num_slots: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.events = all_events;
         self.num_slots = num_slots;
+        Ok(())
     }
 
     fn next_step(
@@ -124,7 +129,7 @@ mod tests {
     #[test]
     fn selects_highest_uncertainty_events() {
         let mut sched = DistributionScheduler::default();
-        sched.init(vec![1, 2, 3, 4, 5], 2);
+        sched.init(vec![1, 2, 3, 4, 5], 2).unwrap();
 
         let mut est = MockEstimator::new();
         est.add(1, 1, 0.1);
@@ -143,7 +148,7 @@ mod tests {
     #[test]
     fn averages_uncertainty_across_threads() {
         let mut sched = DistributionScheduler::default();
-        sched.init(vec![1, 2], 1);
+        sched.init(vec![1, 2], 1).unwrap();
 
         let mut est = MockEstimator::new();
         // event 1: avg = (0.2 + 0.4) / 2 = 0.3
@@ -161,7 +166,7 @@ mod tests {
     #[test]
     fn empty_estimator_returns_empty() {
         let mut sched = DistributionScheduler::default();
-        sched.init(vec![1, 2, 3], 4);
+        sched.init(vec![1, 2, 3], 4).unwrap();
 
         let decision = sched.next_step(&empty_quantum(), &MockEstimator::new());
 
@@ -171,7 +176,7 @@ mod tests {
     #[test]
     fn fewer_events_than_slots_returns_all() {
         let mut sched = DistributionScheduler::default();
-        sched.init(vec![1, 2], 4);
+        sched.init(vec![1, 2], 4).unwrap();
 
         let mut est = MockEstimator::new();
         est.add(1, 1, 0.5);
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn duration_is_none() {
         let mut sched = DistributionScheduler::default();
-        sched.init(vec![1], 4);
+        sched.init(vec![1], 4).unwrap();
 
         let mut est = MockEstimator::new();
         est.add(1, 1, 0.5);
