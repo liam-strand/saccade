@@ -48,6 +48,21 @@ pub fn simulate(
         }
     }
 
+    // Re-anchor timestamps to t=0 so VirtualSampleSource's clock (which starts
+    // at 0) correctly traverses the time-varying rate profile from the trace.
+    let min_ts_ns: u64 = series_map
+        .values()
+        .filter_map(|pts| pts.first().map(|&(ts, _)| ts))
+        .min()
+        .unwrap_or(0);
+    if min_ts_ns > 0 {
+        for pts in series_map.values_mut() {
+            for (ts, _) in pts.iter_mut() {
+                *ts -= min_ts_ns;
+            }
+        }
+    }
+
     let max_ts_ns = series_map
         .values()
         .filter_map(|pts| pts.last().map(|&(ts, _)| ts))

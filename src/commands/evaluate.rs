@@ -17,8 +17,15 @@ pub fn evaluate(
     bin_ms: u64,
     json: bool,
 ) -> io::Result<()> {
-    let gt = perfetto::read_rate_timeseries(&ground_truth)?;
-    let est = perfetto::read_rate_timeseries(&estimated)?;
+    let mut gt = perfetto::read_rate_timeseries(&ground_truth)?;
+    let mut est = perfetto::read_rate_timeseries(&estimated)?;
+
+    // Re-anchor each trace to t=0 independently so their bin indices align.
+    // GT traces from real hardware carry absolute monotonic-clock timestamps
+    // (~10^18 ns); simulated traces start near 0. Without this, every GT bin
+    // misses in est_bins and RMSE is computed against imputed zeros throughout.
+    normalize_timestamps(&mut gt.series);
+    normalize_timestamps(&mut est.series);
 
     let bin_width_ns = bin_ms * 1_000_000;
 
@@ -139,6 +146,21 @@ pub fn evaluate(
     }
 
     Ok(())
+}
+
+fn normalize_timestamps<K: Eq + std::hash::Hash>(series: &mut HashMap<K, Vec<(u64, f64)>>) {
+    let min_ts: u64 = series
+        .values()
+        .filter_map(|pts| pts.first().map(|&(ts, _)| ts))
+        .min()
+        .unwrap_or(0);
+    if min_ts > 0 {
+        for pts in series.values_mut() {
+            for (ts, _) in pts.iter_mut() {
+                *ts -= min_ts;
+            }
+        }
+    }
 }
 
 fn bin_avg(points: &[(u64, f64)], bin_width_ns: u64) -> HashMap<u64, f64> {
@@ -343,5 +365,72 @@ mod tests {
         let pooled_rmse = (sq_err / n as f64).sqrt();
         // bin 0: err=0, bin 1: err=1.0^2 → pooled_rmse = sqrt(0.5) ≈ 0.707
         assert!((pooled_rmse - 0.5f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn normalize_timestamps_shifts_to_zero() {
+        let mut series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+        series.insert(0, vec![(1_000_000_000, 1.0), (2_000_000_000, 2.0)]);
+        normalize_timestamps(&mut series);
+        let pts = &series[&0];
+        assert_eq!(pts[0].0, 0);
+        assert_eq!(pts[1].0, 1_000_000_000);
+    }
+
+    #[test]
+    fn normalize_timestamps_noop_when_already_zero() {
+        let mut series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+        series.insert(0, vec![(0, 1.0), (1_000_000_000, 2.0)]);
+        normalize_timestamps(&mut series);
+        let pts = &series[&0];
+        assert_eq!(pts[0].0, 0);
+        assert_eq!(pts[1].0, 1_000_000_000);
+    }
+
+    #[test]
+    fn normalize_timestamps_aligns_multi_series() {
+        let mut series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+        series.insert(0, vec![(500_000_000, 1.0), (1_500_000_000, 2.0)]);
+        series.insert(1, vec![(1_000_000_000, 3.0), (2_000_000_000, 4.0)]);
+        normalize_timestamps(&mut series);
+        // global min is 500_000_000; both series shifted by that amount
+        let pts0 = &series[&0];
+        assert_eq!(pts0[0].0, 0);
+        assert_eq!(pts0[1].0, 1_000_000_000);
+        let pts1 = &series[&1];
+        assert_eq!(pts1[0].0, 500_000_000);
+        assert_eq!(pts1[1].0, 1_500_000_000);
+    }
+
+    #[test]
+    fn misaligned_timestamps_produce_nonzero_coverage() {
+        // Simulate the bug: GT has absolute timestamps at ~10^12 ns offset,
+        // estimated starts near 0. Without normalization coverage would be 0.
+        let bw = 100_000_000u64; // 100 ms bins
+        let offset = 1_000_000_000_000u64; // ~10^12 ns
+
+        // GT: bins 0,1,2 at the offset origin
+        let mut gt_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+        gt_series.insert(0, vec![
+            (offset + bw / 2,       1.0),
+            (offset + bw + bw / 2,  1.0),
+            (offset + 2 * bw + bw / 2, 1.0),
+        ]);
+
+        // Estimated: bins 0,1,2 starting near 0
+        let mut est_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
+        est_series.insert(0, vec![
+            (bw / 2,       1.0),
+            (bw + bw / 2,  1.0),
+            (2 * bw + bw / 2, 1.0),
+        ]);
+
+        normalize_timestamps(&mut gt_series);
+        normalize_timestamps(&mut est_series);
+
+        let gt_bins = bin_avg(&gt_series[&0], bw);
+        let est_bins = bin_avg(&est_series[&0], bw);
+        let covered = gt_bins.keys().filter(|b| est_bins.contains_key(b)).count();
+        assert_eq!(covered, 3, "all GT bins should be covered after normalization");
     }
 }
