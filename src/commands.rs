@@ -1,8 +1,10 @@
+mod evaluate;
 mod generate;
 mod run;
 mod simulate;
 mod sweep;
 
+pub use evaluate::evaluate;
 pub use generate::generate;
 pub use run::run;
 pub use simulate::simulate;

@@ -98,6 +98,24 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         target: Vec<String>,
     },
+    /// Compare a simulate output trace against a sweep ground-truth trace
+    Evaluate {
+        /// Ground-truth Perfetto trace (from saccade sweep --trace)
+        #[arg(long)]
+        ground_truth: PathBuf,
+
+        /// Estimated Perfetto trace (from saccade simulate --trace)
+        #[arg(long)]
+        estimated: PathBuf,
+
+        /// Time bin width in milliseconds (must be > 0)
+        #[arg(long, default_value = "100")]
+        bin_ms: u64,
+
+        /// Output results as JSON instead of a text table
+        #[arg(long)]
+        json: bool,
+    },
     /// Run simulation replaying time-varying rates from a sweep trace
     Simulate {
         /// Event library JSON file (required, no perf fallback)

@@ -1,6 +1,6 @@
 use clap::Parser;
 use saccade::cli::{Cli, Commands};
-use saccade::commands::{generate, run, simulate, sweep};
+use saccade::commands::{evaluate, generate, run, simulate, sweep};
 use saccade::config::{CliOverrides, load_config};
 
 fn main() -> std::io::Result<()> {
@@ -22,6 +22,20 @@ fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Generate { output } => generate(output)?,
+        Commands::Evaluate {
+            ground_truth,
+            estimated,
+            bin_ms,
+            json,
+        } => {
+            if bin_ms == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--bin-ms must be > 0",
+                ));
+            }
+            evaluate(ground_truth, estimated, bin_ms, json)?;
+        }
         Commands::Run {
             library,
             scheduler,
