@@ -68,11 +68,8 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.num_slots = num_slots;
-        let pb = llm_common::build_weights_prompt(
-            &self.event_info,
-            num_slots,
-            self.guidance.as_deref(),
-        );
+        let pb =
+            llm_common::build_weights_prompt(&self.event_info, num_slots, self.guidance.as_deref());
         tracing::debug!(
             "WeightedRoundRobin system message:\n{}",
             pb.build()[0].content
@@ -229,8 +226,16 @@ mod tests {
     fn llm_generates_parseable_weights() {
         let event_info = vec![
             (0u32, "cache-misses".to_string(), "Cache misses".to_string()),
-            (1u32, "branch-misses".to_string(), "Branch mispredictions".to_string()),
-            (2u32, "instructions".to_string(), "Instructions retired".to_string()),
+            (
+                1u32,
+                "branch-misses".to_string(),
+                "Branch mispredictions".to_string(),
+            ),
+            (
+                2u32,
+                "instructions".to_string(),
+                "Instructions retired".to_string(),
+            ),
         ];
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
         let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");

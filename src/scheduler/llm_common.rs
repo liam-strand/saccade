@@ -242,7 +242,10 @@ mod tests {
     }
 
     fn user_msg(content: &str) -> ChatMessage {
-        ChatMessage { role: "user".into(), content: content.into() }
+        ChatMessage {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
 
     #[test]
@@ -275,7 +278,9 @@ mod tests {
                 if calls > 1 {
                     // Second call should include the bad assistant turn and correction prompt.
                     assert!(m.iter().any(|msg| msg.role == "assistant"));
-                    assert!(m.iter().any(|msg| msg.role == "user" && msg.content.contains("could not be parsed")));
+                    assert!(m.iter().any(
+                        |msg| msg.role == "user" && msg.content.contains("could not be parsed")
+                    ));
                 }
                 Ok(responses.borrow_mut().remove(0))
             },
@@ -320,7 +325,10 @@ mod tests {
         assert_eq!(error_reason(err), "no JSON array found in LLM response");
 
         let err2 = "failed to parse LLM schedule JSON: bad syntax\nresponse:\n[garbage]";
-        assert_eq!(error_reason(err2), "failed to parse LLM schedule JSON: bad syntax");
+        assert_eq!(
+            error_reason(err2),
+            "failed to parse LLM schedule JSON: bad syntax"
+        );
 
         let err3 = "LLM returned an empty schedule";
         assert_eq!(error_reason(err3), "LLM returned an empty schedule");
@@ -406,8 +414,10 @@ mod tests {
     fn parse_valid_weights() {
         let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 1, "weight": 2}]"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
-        let map: HashMap<EventId, u32> =
-            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        let map: HashMap<EventId, u32> = weights
+            .into_iter()
+            .map(|ew| (ew.event_id, ew.weight))
+            .collect();
         assert_eq!(map[&0], 5);
         assert_eq!(map[&1], 2);
     }
@@ -416,8 +426,10 @@ mod tests {
     fn parse_weights_fills_missing_events() {
         let json = r#"[{"event_id": 0, "weight": 5}]"#;
         let weights = parse_weights_response(json, &[0, 1, 2]).unwrap();
-        let map: HashMap<EventId, u32> =
-            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        let map: HashMap<EventId, u32> = weights
+            .into_iter()
+            .map(|ew| (ew.event_id, ew.weight))
+            .collect();
         assert_eq!(map[&0], 5);
         assert_eq!(map[&1], 1);
         assert_eq!(map[&2], 1);
@@ -427,8 +439,10 @@ mod tests {
     fn parse_weights_clamps_out_of_range() {
         let json = r#"[{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
-        let map: HashMap<EventId, u32> =
-            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        let map: HashMap<EventId, u32> = weights
+            .into_iter()
+            .map(|ew| (ew.event_id, ew.weight))
+            .collect();
         assert_eq!(map[&0], 1);
         assert_eq!(map[&1], 10);
     }
@@ -437,8 +451,10 @@ mod tests {
     fn parse_weights_filters_unknown_ids() {
         let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
-        let map: HashMap<EventId, u32> =
-            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        let map: HashMap<EventId, u32> = weights
+            .into_iter()
+            .map(|ew| (ew.event_id, ew.weight))
+            .collect();
         assert!(!map.contains_key(&99));
         assert_eq!(map[&0], 5);
         assert_eq!(map[&1], 1);
@@ -448,8 +464,10 @@ mod tests {
     fn parse_weights_deduplicates_keeps_max() {
         let json = r#"[{"event_id": 0, "weight": 3}, {"event_id": 0, "weight": 7}]"#;
         let weights = parse_weights_response(json, &[0]).unwrap();
-        let map: HashMap<EventId, u32> =
-            weights.into_iter().map(|ew| (ew.event_id, ew.weight)).collect();
+        let map: HashMap<EventId, u32> = weights
+            .into_iter()
+            .map(|ew| (ew.event_id, ew.weight))
+            .collect();
         assert_eq!(map[&0], 7);
     }
 

@@ -160,7 +160,9 @@ fn bin_avg(points: &[(u64, f64)], bin_width_ns: u64) -> HashMap<u64, f64> {
         e.0 += rate;
         e.1 += 1;
     }
-    acc.into_iter().map(|(b, (s, n))| (b, s / n as f64)).collect()
+    acc.into_iter()
+        .map(|(b, (s, n))| (b, s / n as f64))
+        .collect()
 }
 
 fn f64_to_json(v: f64) -> String {
@@ -453,11 +455,7 @@ mod tests {
         let mut est_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
         est_series.insert(
             0,
-            vec![
-                (bw / 2, 1.0),
-                (bw + bw / 2, 1.0),
-                (2 * bw + bw / 2, 1.0),
-            ],
+            vec![(bw / 2, 1.0), (bw + bw / 2, 1.0), (2 * bw + bw / 2, 1.0)],
         );
 
         normalize_timestamps(&mut gt_series);
@@ -466,6 +464,9 @@ mod tests {
         let gt_bins = bin_avg(&gt_series[&0], bw);
         let est_bins = bin_avg(&est_series[&0], bw);
         let covered = gt_bins.keys().filter(|b| est_bins.contains_key(b)).count();
-        assert_eq!(covered, 3, "all GT bins should be covered after normalization");
+        assert_eq!(
+            covered, 3,
+            "all GT bins should be covered after normalization"
+        );
     }
 }
