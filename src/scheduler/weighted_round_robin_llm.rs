@@ -68,6 +68,15 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.num_slots = num_slots;
+        if all_events.len() < num_slots {
+            return Err(format!(
+                "WeightedRoundRobinLlmScheduler: only {} distinct events but num_slots={}; \
+                 cannot fill a step without duplicates",
+                all_events.len(),
+                num_slots
+            )
+            .into());
+        }
         let pb =
             llm_common::build_weights_prompt(&self.event_info, num_slots, self.guidance.as_deref());
         tracing::debug!(
@@ -100,9 +109,14 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
         let len = self.cycle.len();
         let mut active_events = Vec::with_capacity(self.num_slots);
         if len > 0 {
-            for _ in 0..self.num_slots {
-                active_events.push(self.cycle[self.step_idx]);
+            let mut scanned = 0usize;
+            while active_events.len() < self.num_slots && scanned < len {
+                let candidate = self.cycle[self.step_idx];
                 self.step_idx = (self.step_idx + 1) % len;
+                scanned += 1;
+                if !active_events.contains(&candidate) {
+                    active_events.push(candidate);
+                }
             }
         }
         ScheduleDecision {
@@ -203,12 +217,103 @@ mod tests {
 
     #[test]
     fn next_step_wraps_on_short_cycle() {
+        // init() now rejects n_events < num_slots; this tests the defense-in-depth path in next_step.
         let mut s = make_scheduler(vec![0, 1], 4);
         let q = empty_quantum();
         let est = NullEstimator::new();
 
         let d = s.next_step(&q, &est);
-        assert_eq!(d.active_events, vec![0, 1, 0, 1]);
+        assert_eq!(d.active_events, vec![0, 1]);
+    }
+
+    #[test]
+    fn next_step_high_weight_no_duplicates() {
+        // weights [(0,5),(1,1),(2,1),(3,1)] → cycle [0,1,2,3,0,0,0,0] (len 8)
+        let cycle =
+            WeightedRoundRobinLlmScheduler::build_cycle(&[(0, 5u32), (1, 1), (2, 1), (3, 1)]);
+        let mut s = make_scheduler(cycle, 4);
+        let q = empty_quantum();
+        let est = NullEstimator::new();
+
+        let d = s.next_step(&q, &est);
+        assert_eq!(d.active_events.len(), 4);
+        let mut seen = d.active_events.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "active_events contains duplicates: {:?}", d.active_events);
+    }
+
+    #[test]
+    fn next_step_equal_weights_no_duplicates() {
+        // weights [(0,1),(1,1),(2,1),(3,1)] → cycle [0,1,2,3] (len 4)
+        let cycle =
+            WeightedRoundRobinLlmScheduler::build_cycle(&[(0, 1u32), (1, 1), (2, 1), (3, 1)]);
+        let mut s = make_scheduler(cycle, 4);
+        let q = empty_quantum();
+        let est = NullEstimator::new();
+
+        for step in 0..2 {
+            let d = s.next_step(&q, &est);
+            let mut seen = d.active_events.clone();
+            seen.sort();
+            seen.dedup();
+            assert_eq!(
+                seen.len(),
+                4,
+                "step {step}: active_events contains duplicates: {:?}",
+                d.active_events
+            );
+        }
+    }
+
+    #[test]
+    fn next_step_multi_step_no_duplicates() {
+        // weights [(0,8),(1,1),(2,1),(3,1)] → cycle [0,1,2,3,0,0,0,0,0,0,0] (len 11)
+        // n_events == num_slots == 4, so every step must include all 4 events
+        let cycle =
+            WeightedRoundRobinLlmScheduler::build_cycle(&[(0, 8u32), (1, 1), (2, 1), (3, 1)]);
+        let mut s = make_scheduler(cycle, 4);
+        let q = empty_quantum();
+        let est = NullEstimator::new();
+
+        for step in 0..15 {
+            let d = s.next_step(&q, &est);
+            let mut seen = d.active_events.clone();
+            seen.sort();
+            seen.dedup();
+            assert_eq!(
+                seen.len(),
+                4,
+                "step {step}: active_events contains duplicates: {:?}",
+                d.active_events
+            );
+            assert!(
+                d.active_events.contains(&0),
+                "step {step}: event 0 missing from {:?}",
+                d.active_events
+            );
+        }
+    }
+
+    #[test]
+    fn init_rejects_too_few_events() {
+        let mut scheduler = WeightedRoundRobinLlmScheduler::new(
+            vec![],
+            LlmClient::new("http://localhost:0", "test-model"),
+            None,
+        );
+        // 2 events, num_slots=4: guard fires before any LLM call
+        let result = scheduler.init(vec![0, 1], 4);
+        assert!(result.is_err(), "expected Err but got Ok");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains('2'),
+            "error message should contain event count (2): {msg}"
+        );
+        assert!(
+            msg.contains('4'),
+            "error message should contain num_slots (4): {msg}"
+        );
     }
 
     #[test]
