@@ -2,6 +2,7 @@ use crate::commands::{load_library, spawn_child};
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
 use crate::profiler::ProfilerBuilder;
+use crate::sample::MAX_COUNTERS;
 use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::sink::{self, OutputSink};
@@ -32,7 +33,7 @@ pub fn run(
     // (e.g. LLM calls) completes before the child is held in ptrace-stop.
     let mut scheduler = config.build_scheduler(&registry);
     scheduler
-        .init(all_ids.clone(), 4)
+        .init(all_ids.clone(), MAX_COUNTERS)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let mut child = spawn_child(&target)?;
