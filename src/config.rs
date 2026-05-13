@@ -57,7 +57,7 @@ impl LlmConfig {
         "http://dubliner.cs.northwestern.edu:11434".into()
     }
     fn default_model() -> String {
-        "gemma4-agent".into()
+        "gemma4".into()
     }
     fn default_update_interval() -> u32 {
         10

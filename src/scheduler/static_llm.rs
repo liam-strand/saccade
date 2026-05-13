@@ -43,19 +43,23 @@ impl Scheduler for StaticLlmScheduler {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
-        let response = {
+        self.schedule = {
             let pb = llm_common::build_init_prompt(
                 &self.event_info,
                 num_slots,
                 self.guidance.as_deref(),
             );
             tracing::debug!("StaticLlm system message:\n{}", pb.build()[0].content);
-            self.client.chat(pb.build())
+            let messages = pb.build().to_vec();
+            let client = &self.client;
+            let all_events = &self.all_events;
+            llm_common::chat_with_retry(
+                |m| client.chat(m),
+                messages,
+                |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
+                2,
+            )
         }?;
-
-        self.schedule =
-            llm_common::parse_schedule_response(&response, &self.all_events, self.num_slots)
-                .map_err(std::io::Error::other)?;
 
         tracing::info!("StaticLlmScheduler: {} steps in cycle", self.schedule.len());
         Ok(())

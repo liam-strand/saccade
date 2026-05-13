@@ -77,9 +77,14 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
             "WeightedRoundRobin system message:\n{}",
             pb.build()[0].content
         );
-        let response = self.client.chat(pb.build())?;
-        let weights = llm_common::parse_weights_response(&response, &all_events)
-            .map_err(std::io::Error::other)?;
+        let messages = pb.build().to_vec();
+        let client = &self.client;
+        let weights = llm_common::chat_with_retry(
+            |m| client.chat(m),
+            messages,
+            |resp| llm_common::parse_weights_response(resp, &all_events),
+            2,
+        )?;
         let pairs: Vec<(EventId, u32)> =
             weights.iter().map(|ew| (ew.event_id, ew.weight)).collect();
         self.cycle = Self::build_cycle(&pairs);
@@ -228,7 +233,7 @@ mod tests {
             (2u32, "instructions".to_string(), "Instructions retired".to_string()),
         ];
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
-        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4-agent");
+        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
 
         let pb = llm_common::build_weights_prompt(&event_info, 2, None);
         let response = client.chat(pb.build()).expect("LLM call should succeed");

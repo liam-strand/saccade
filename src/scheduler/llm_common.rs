@@ -1,5 +1,5 @@
 use crate::event::EventId;
-use crate::llm::PromptBuilder;
+use crate::llm::{ChatMessage, LlmError, PromptBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -187,12 +187,147 @@ pub(super) fn parse_weights_response(
         .collect())
 }
 
+/// Strip appended raw response text from parse error messages before echoing back to the LLM.
+fn error_reason(err: &str) -> &str {
+    if let Some(i) = err.find("\nresponse:\n") {
+        return &err[..i];
+    }
+    if let Some(i) = err.find(":\n") {
+        return &err[..i];
+    }
+    err
+}
+
+/// Send `initial_messages` to `chat_fn`, attempt to parse the response with `parse`, and on
+/// failure feed the bad response back as an assistant turn with a correction prompt, retrying up
+/// to `max_retries` additional times. HTTP/transport errors abort immediately.
+pub(super) fn chat_with_retry<T>(
+    mut chat_fn: impl FnMut(&[ChatMessage]) -> Result<String, LlmError>,
+    initial_messages: Vec<ChatMessage>,
+    parse: impl Fn(&str) -> Result<T, String>,
+    max_retries: usize,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let mut messages = initial_messages;
+    for attempt in 0..=max_retries {
+        let response = chat_fn(&messages)?;
+        match parse(&response) {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                let reason = error_reason(&err);
+                tracing::warn!("LLM parse attempt {}: {reason}", attempt + 1);
+                if attempt == max_retries {
+                    return Err(Box::new(std::io::Error::other(err)));
+                }
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: response,
+                });
+                messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!(
+                        "Your response could not be parsed. Error: {reason}\n\
+                         Respond with only a valid JSON array. \
+                         No explanation, no prose, no markdown fences."
+                    ),
+                });
+            }
+        }
+    }
+    unreachable!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmError;
 
     fn events() -> Vec<EventId> {
         vec![0, 1, 2, 3, 4]
+    }
+
+    fn user_msg(content: &str) -> ChatMessage {
+        ChatMessage { role: "user".into(), content: content.into() }
+    }
+
+    #[test]
+    fn retry_succeeds_on_first_attempt() {
+        let json = r#"[{"duration_ms": 10, "events": [0]}]"#;
+        let mut calls = 0usize;
+        let result = chat_with_retry(
+            |_m| {
+                calls += 1;
+                Ok(json.to_string())
+            },
+            vec![user_msg("go")],
+            |resp| parse_schedule_response(resp, &[0], 4),
+            2,
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_feeds_back_and_succeeds_on_second_attempt() {
+        let responses = std::cell::RefCell::new(vec![
+            "not json at all".to_string(),
+            r#"[{"duration_ms": 10, "events": [0]}]"#.to_string(),
+        ]);
+        let mut calls = 0usize;
+        let result = chat_with_retry(
+            |m| {
+                calls += 1;
+                if calls > 1 {
+                    // Second call should include the bad assistant turn and correction prompt.
+                    assert!(m.iter().any(|msg| msg.role == "assistant"));
+                    assert!(m.iter().any(|msg| msg.role == "user" && msg.content.contains("could not be parsed")));
+                }
+                Ok(responses.borrow_mut().remove(0))
+            },
+            vec![user_msg("go")],
+            |resp| parse_schedule_response(resp, &[0], 4),
+            2,
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn retry_exhausted_returns_err() {
+        let result: Result<Vec<ScheduleStep>, _> = chat_with_retry(
+            |_m| Ok("still not json".to_string()),
+            vec![user_msg("go")],
+            |resp| parse_schedule_response(resp, &[0], 4),
+            2,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn retry_http_error_propagates_immediately() {
+        let mut calls = 0usize;
+        let result: Result<Vec<ScheduleStep>, _> = chat_with_retry(
+            |_m| {
+                calls += 1;
+                Err(LlmError::Http("timeout".into()))
+            },
+            vec![user_msg("go")],
+            |resp| parse_schedule_response(resp, &[0], 4),
+            5,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "should not retry on HTTP error");
+    }
+
+    #[test]
+    fn error_reason_strips_response_body() {
+        let err = "no JSON array found in LLM response:\n[{bad}]";
+        assert_eq!(error_reason(err), "no JSON array found in LLM response");
+
+        let err2 = "failed to parse LLM schedule JSON: bad syntax\nresponse:\n[garbage]";
+        assert_eq!(error_reason(err2), "failed to parse LLM schedule JSON: bad syntax");
+
+        let err3 = "LLM returned an empty schedule";
+        assert_eq!(error_reason(err3), "LLM returned an empty schedule");
     }
 
     #[test]
