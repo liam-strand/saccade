@@ -96,27 +96,23 @@ pub(super) fn parse_schedule_response(
     }
 
     let valid_ids: HashSet<u32> = all_events.iter().copied().collect();
-    let steps: Vec<ScheduleStep> = steps
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, mut step)| {
-            step.events.retain(|id| valid_ids.contains(id));
-            step.events.truncate(num_slots);
-            step.duration_ms = step.duration_ms.max(1);
-            if step.events.is_empty() {
-                tracing::warn!("dropping step {i}: no valid event IDs after filtering");
-                None
-            } else {
-                Some(step)
-            }
-        })
-        .collect();
-
-    if steps.is_empty() {
-        return Err("all steps contained invalid event IDs".to_string());
+    let mut steps_out: Vec<ScheduleStep> = Vec::with_capacity(steps.len());
+    for (i, mut step) in steps.into_iter().enumerate() {
+        step.events.retain(|id| valid_ids.contains(id));
+        step.events.sort_unstable();
+        step.events.dedup();
+        step.events.truncate(num_slots);
+        step.duration_ms = step.duration_ms.max(1);
+        if step.events.len() != num_slots {
+            return Err(format!(
+                "step {i} has {} valid unique event IDs, need exactly {num_slots}",
+                step.events.len()
+            ));
+        }
+        steps_out.push(step);
     }
 
-    Ok(steps)
+    Ok(steps_out)
 }
 
 pub(super) fn build_weights_prompt(
@@ -259,7 +255,7 @@ mod tests {
                 Ok(json.to_string())
             },
             vec![user_msg("go")],
-            |resp| parse_schedule_response(resp, &[0], 4),
+            |resp| parse_schedule_response(resp, &[0], 1),
             2,
         );
         assert!(result.is_ok());
@@ -284,7 +280,7 @@ mod tests {
                 Ok(responses.borrow_mut().remove(0))
             },
             vec![user_msg("go")],
-            |resp| parse_schedule_response(resp, &[0], 4),
+            |resp| parse_schedule_response(resp, &[0], 1),
             2,
         );
         assert!(result.is_ok());
@@ -345,14 +341,14 @@ mod tests {
     #[test]
     fn parse_valid_schedule() {
         let json = r#"[
-            {"duration_ms": 25, "events": [0, 1]},
-            {"duration_ms": 30, "events": [2, 3, 4]}
+            {"duration_ms": 25, "events": [0, 1, 2, 3]},
+            {"duration_ms": 30, "events": [1, 2, 3, 4]}
         ]"#;
         let steps = parse_schedule_response(json, &events(), 4).unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].duration_ms, 25);
-        assert_eq!(steps[0].events, vec![0, 1]);
-        assert_eq!(steps[1].events, vec![2, 3, 4]);
+        assert_eq!(steps[0].events, vec![0, 1, 2, 3]);
+        assert_eq!(steps[1].events, vec![1, 2, 3, 4]);
     }
 
     #[test]
@@ -370,7 +366,7 @@ mod tests {
     #[test]
     fn parse_filters_invalid_ids() {
         let json = r#"[{"duration_ms": 20, "events": [0, 99]}]"#;
-        let steps = parse_schedule_response(json, &[0, 1], 4).unwrap();
+        let steps = parse_schedule_response(json, &[0, 1], 1).unwrap();
         assert_eq!(steps[0].events, vec![0]);
     }
 
@@ -378,24 +374,24 @@ mod tests {
     fn parse_all_invalid_ids_errors() {
         let json = r#"[{"duration_ms": 20, "events": [99, 100]}]"#;
         let err = parse_schedule_response(json, &[0, 1], 4).unwrap_err();
-        assert!(err.contains("invalid event IDs"), "got: {err}");
+        assert!(err.contains("0 valid unique event IDs"), "got: {err}");
     }
 
     #[test]
-    fn parse_skips_bad_step_keeps_good() {
+    fn parse_bad_step_causes_err() {
+        // A step with no valid IDs triggers Err immediately; the retry loop handles correction.
         let json = r#"[
             {"duration_ms": 20, "events": [99, 100]},
             {"duration_ms": 30, "events": [0, 1]}
         ]"#;
-        let steps = parse_schedule_response(json, &[0, 1], 4).unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].events, vec![0, 1]);
+        let err = parse_schedule_response(json, &[0, 1], 2).unwrap_err();
+        assert!(err.contains("step 0"), "got: {err}");
     }
 
     #[test]
     fn parse_clamps_zero_duration() {
         let json = r#"[{"duration_ms": 0, "events": [0]}]"#;
-        let steps = parse_schedule_response(json, &[0], 4).unwrap();
+        let steps = parse_schedule_response(json, &[0], 1).unwrap();
         assert_eq!(steps[0].duration_ms, 1);
     }
 
@@ -461,5 +457,31 @@ mod tests {
     fn parse_weights_no_array() {
         let err = parse_weights_response("hello world", &[0]).unwrap_err();
         assert!(err.contains("no JSON array"));
+    }
+
+    #[test]
+    fn parse_step_too_short_returns_err() {
+        // Issue 1: a step with fewer valid IDs than num_slots must return Err (triggers retry).
+        let json = r#"[{"duration_ms": 20, "events": [0, 99]}]"#;
+        let err = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap_err();
+        assert!(err.contains("step 0"), "got: {err}");
+        assert!(err.contains("1 valid unique event IDs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_duplicates_cause_err_when_unique_count_too_low() {
+        // Issue 4: duplicate IDs are deduped; if the unique count < num_slots the step is invalid.
+        let json = r#"[{"duration_ms": 10, "events": [0, 0, 1, 2]}]"#;
+        let err = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap_err();
+        assert!(err.contains("step 0"), "got: {err}");
+        assert!(err.contains("3 valid unique event IDs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_duplicates_removed_when_unique_count_matches() {
+        // Issue 4: duplicates removed and result has exactly num_slots unique events → Ok.
+        let json = r#"[{"duration_ms": 10, "events": [0, 0, 1, 2, 3]}]"#;
+        let steps = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap();
+        assert_eq!(steps[0].events, vec![0, 1, 2, 3]);
     }
 }
