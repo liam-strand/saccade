@@ -113,6 +113,13 @@ impl Scheduler for DynamicLlmScheduler {
         all_events: Vec<EventId>,
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.update_interval == 0 {
+            return Err(format!(
+                "update_interval must be >= 1, got {}",
+                self.update_interval
+            )
+            .into());
+        }
         self.all_events = all_events;
         self.num_slots = num_slots;
 
@@ -321,6 +328,19 @@ mod tests {
         );
         assert!(user_content.contains("1.500e-6") || user_content.contains("1.5e-6"));
         assert!(user_content.contains("Current schedule"));
+    }
+
+    #[test]
+    fn init_rejects_zero_update_interval() {
+        let mut s = DynamicLlmScheduler::new(
+            vec![],
+            LlmClient::new("http://localhost:0", "test-model"),
+            0,
+            None,
+        );
+        let result = s.init(vec![], 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("update_interval"));
     }
 
     #[test]
