@@ -6,7 +6,7 @@ use std::path::PathBuf;
 struct EventMetrics {
     event_name: String,
     tid: u32,
-    rmse_events_per_ns: Option<f64>,
+    nrmse: Option<f64>,
     coverage: f64,
     mean_gt_rate_events_per_ns: f64,
 }
@@ -48,8 +48,6 @@ pub fn evaluate(
     }
 
     let mut results: Vec<EventMetrics> = Vec::new();
-    let mut pooled_sq_err_sum = 0.0f64;
-    let mut pooled_n = 0usize;
 
     let mut keys: Vec<(String, u32)> = gt.series.keys().cloned().collect();
     keys.sort();
@@ -68,53 +66,46 @@ pub fn evaluate(
             continue;
         }
 
-        // Per-event RMSE and coverage.
-        let mut sq_err_sum = 0.0f64;
+        let mean_gt = gt_bins.values().sum::<f64>() / n_gt as f64;
+        let mut nrmse_sq_sum = 0.0f64;
         let mut covered = 0usize;
         for (&bin, &gt_rate) in &gt_bins {
             let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
-            // Pooled RMSE uses est=0 for uncovered bins.
-            pooled_sq_err_sum += (est_rate - gt_rate).powi(2);
-            pooled_n += 1;
-            if let Some(&er) = est_bins.get(&bin) {
-                sq_err_sum += (er - gt_rate).powi(2);
+            if mean_gt > 0.0 {
+                let rel_err = (est_rate - gt_rate) / mean_gt;
+                nrmse_sq_sum += rel_err * rel_err;
+            }
+            if est_bins.contains_key(&bin) {
                 covered += 1;
             }
         }
 
         let coverage = covered as f64 / n_gt as f64;
-        let per_event_rmse = if covered > 0 {
-            Some((sq_err_sum / covered as f64).sqrt())
+        // nrmse is None when mean_gt == 0 (event never fires in GT — comparing
+        // schedulers against it is meaningless, and including a dimensional value
+        // in the macro-average would corrupt the headline score).
+        let nrmse = if mean_gt > 0.0 {
+            Some((nrmse_sq_sum / n_gt as f64).sqrt())
         } else {
             None
         };
-        let mean_gt = gt_bins.values().sum::<f64>() / n_gt as f64;
 
         results.push(EventMetrics {
             event_name: event_name.clone(),
             tid: *tid,
-            rmse_events_per_ns: per_event_rmse,
+            nrmse,
             coverage,
             mean_gt_rate_events_per_ns: mean_gt,
         });
     }
 
-    let pooled_rmse = if pooled_n > 0 {
-        Some((pooled_sq_err_sum / pooled_n as f64).sqrt())
-    } else {
-        None
-    };
-
-    let with_rmse: Vec<f64> = results
-        .iter()
-        .filter_map(|r| r.rmse_events_per_ns)
-        .collect();
-    let macro_avg_rmse = if with_rmse.is_empty() {
+    let nrmse_vals: Vec<f64> = results.iter().filter_map(|r| r.nrmse).collect();
+    let mean_nrmse = if nrmse_vals.is_empty() {
         None
     } else {
-        Some(with_rmse.iter().sum::<f64>() / with_rmse.len() as f64)
+        Some(nrmse_vals.iter().sum::<f64>() / nrmse_vals.len() as f64)
     };
-    let zero_coverage_count = results.iter().filter(|r| r.rmse_events_per_ns.is_none()).count();
+    let zero_coverage_count = results.iter().filter(|r| r.coverage == 0.0).count();
     let mean_coverage = if results.is_empty() {
         None
     } else {
@@ -127,8 +118,7 @@ pub fn evaluate(
             &estimated,
             bin_ms,
             &results,
-            pooled_rmse,
-            macro_avg_rmse,
+            mean_nrmse,
             zero_coverage_count,
             mean_coverage,
         );
@@ -138,8 +128,7 @@ pub fn evaluate(
             &estimated,
             bin_ms,
             &results,
-            pooled_rmse,
-            macro_avg_rmse,
+            mean_nrmse,
             zero_coverage_count,
             mean_coverage,
         );
@@ -174,14 +163,21 @@ fn bin_avg(points: &[(u64, f64)], bin_width_ns: u64) -> HashMap<u64, f64> {
     acc.into_iter().map(|(b, (s, n))| (b, s / n as f64)).collect()
 }
 
+fn f64_to_json(v: f64) -> String {
+    if v.is_finite() {
+        v.to_string()
+    } else {
+        "null".to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_text(
     ground_truth: &std::path::Path,
     estimated: &std::path::Path,
     bin_ms: u64,
     results: &[EventMetrics],
-    pooled_rmse: Option<f64>,
-    macro_avg_rmse: Option<f64>,
+    mean_nrmse: Option<f64>,
     zero_coverage_count: usize,
     mean_coverage: Option<f64>,
 ) {
@@ -192,47 +188,48 @@ fn print_text(
     println!("Bin width:    {bin_ms} ms");
     println!();
     println!(
-        "{:<32} {:>5}  {:<16}  Coverage",
-        "Event", "TID", "RMSE (ev/ns)"
+        "{:<32} {:>5}  {:<12}  {:<16}  Coverage",
+        "Event", "TID", "nRMSE", "Mean GT (ev/ns)"
     );
-    println!("{}", "-".repeat(66));
+    println!("{}", "-".repeat(80));
     for r in results {
-        let rmse_str = match r.rmse_events_per_ns {
+        let nrmse_str = match r.nrmse {
             Some(v) => format!("{v:.3e}"),
             None => "—".to_string(),
         };
         println!(
-            "{:<32} {:>5}  {:<16}  {:.1}%",
+            "{:<32} {:>5}  {:<12}  {:<16.3e}  {:.1}%",
             r.event_name,
             r.tid,
-            rmse_str,
+            nrmse_str,
+            r.mean_gt_rate_events_per_ns,
             r.coverage * 100.0
         );
     }
     println!();
     let na = "N/A".to_string();
     println!(
-        "Pooled RMSE (est=0 for gaps):  {}",
-        pooled_rmse.map(|v| format!("{v:.3e} ev/ns")).unwrap_or(na.clone())
+        "Mean nRMSE (headline):         {}",
+        mean_nrmse
+            .map(|v| format!("{v:.3e}  [lower is better; 0=perfect, >=1=null scheduler]"))
+            .unwrap_or(na.clone())
     );
-    let macro_label = if zero_coverage_count > 0 {
+    let cov_label = if zero_coverage_count > 0 {
         format!(
-            "Macro-avg RMSE ({}/{} events): {} ev/ns  [{zero_coverage_count} event(s) excluded: no coverage]",
-            results.len() - zero_coverage_count,
-            results.len(),
-            macro_avg_rmse.map(|v| format!("{v:.3e}")).unwrap_or(na.clone())
+            "Mean coverage:                 {}  [{zero_coverage_count} event(s) with zero coverage]",
+            mean_coverage
+                .map(|v| format!("{:.1}%", v * 100.0))
+                .unwrap_or(na.clone())
         )
     } else {
         format!(
-            "Macro-avg RMSE:                {}",
-            macro_avg_rmse.map(|v| format!("{v:.3e} ev/ns")).unwrap_or(na.clone())
+            "Mean coverage:                 {}",
+            mean_coverage
+                .map(|v| format!("{:.1}%", v * 100.0))
+                .unwrap_or(na)
         )
     };
-    println!("{macro_label}");
-    println!(
-        "Mean coverage:                 {}",
-        mean_coverage.map(|v| format!("{:.1}%", v * 100.0)).unwrap_or(na)
-    );
+    println!("{cov_label}");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,37 +238,38 @@ fn print_json(
     estimated: &std::path::Path,
     bin_ms: u64,
     results: &[EventMetrics],
-    pooled_rmse: Option<f64>,
-    macro_avg_rmse: Option<f64>,
+    mean_nrmse: Option<f64>,
     zero_coverage_count: usize,
     mean_coverage: Option<f64>,
 ) {
     let mut per_event_parts: Vec<String> = Vec::new();
     for r in results {
-        let rmse_str = match r.rmse_events_per_ns {
-            Some(v) => format!("{v}"),
+        let nrmse_str = match r.nrmse {
+            Some(v) => f64_to_json(v),
             None => "null".to_string(),
         };
         per_event_parts.push(format!(
-            "    {{\"event\": {:?}, \"tid\": {}, \"rmse_events_per_ns\": {}, \"coverage\": {}, \"mean_gt_rate_events_per_ns\": {}}}",
+            "    {{\"event\": {:?}, \"tid\": {}, \"nrmse\": {}, \"coverage\": {}, \"mean_gt_rate_events_per_ns\": {}}}",
             r.event_name,
             r.tid,
-            rmse_str,
-            r.coverage,
-            r.mean_gt_rate_events_per_ns
+            nrmse_str,
+            f64_to_json(r.coverage),
+            f64_to_json(r.mean_gt_rate_events_per_ns),
         ));
     }
-    let pooled_str = pooled_rmse.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
-    let macro_str = macro_avg_rmse.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
-    let cov_str = mean_coverage.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
+    let mean_nrmse_str = mean_nrmse
+        .map(f64_to_json)
+        .unwrap_or_else(|| "null".to_string());
+    let cov_str = mean_coverage
+        .map(f64_to_json)
+        .unwrap_or_else(|| "null".to_string());
     println!(
-        "{{\n  \"ground_truth\": {:?},\n  \"estimated\": {:?},\n  \"bin_width_ms\": {},\n  \"per_event\": [\n{}\n  ],\n  \"pooled_rmse_events_per_ns\": {},\n  \"macro_avg_rmse_events_per_ns\": {},\n  \"events_with_zero_coverage\": {},\n  \"mean_coverage\": {}\n}}",
+        "{{\n  \"ground_truth\": {:?},\n  \"estimated\": {:?},\n  \"bin_width_ms\": {},\n  \"per_event\": [\n{}\n  ],\n  \"mean_nrmse\": {},\n  \"events_with_zero_coverage\": {},\n  \"mean_coverage\": {}\n}}",
         ground_truth.display().to_string(),
         estimated.display().to_string(),
         bin_ms,
         per_event_parts.join(",\n"),
-        pooled_str,
-        macro_str,
+        mean_nrmse_str,
         zero_coverage_count,
         cov_str,
     );
@@ -283,7 +281,6 @@ mod tests {
 
     #[test]
     fn bin_avg_averages_within_bin() {
-        // Two points at t=0 and t=50ms both fall in bin 0 (bin_width=100ms).
         let points = vec![(0u64, 1.0f64), (50_000_000, 3.0)];
         let bins = bin_avg(&points, 100_000_000);
         assert_eq!(bins.len(), 1);
@@ -292,7 +289,6 @@ mod tests {
 
     #[test]
     fn bin_avg_separates_bins() {
-        // t=50ms → bin 0, t=150ms → bin 1 (bin_width=100ms).
         let points = vec![(50_000_000u64, 1.0f64), (150_000_000, 5.0)];
         let bins = bin_avg(&points, 100_000_000);
         assert_eq!(bins.len(), 2);
@@ -301,7 +297,9 @@ mod tests {
     }
 
     fn single_series(rate: f64, bins: &[u64], bin_width_ns: u64) -> Vec<(u64, f64)> {
-        bins.iter().map(|&b| (b * bin_width_ns + bin_width_ns / 2, rate)).collect()
+        bins.iter()
+            .map(|&b| (b * bin_width_ns + bin_width_ns / 2, rate))
+            .collect()
     }
 
     #[test]
@@ -317,54 +315,90 @@ mod tests {
     }
 
     #[test]
-    fn coverage_zero_when_no_estimates() {
+    fn coverage_zero_nrmse_is_one_for_flat_gt() {
+        // With no coverage (est=0 imputed everywhere) and flat GT rate of 1.0,
+        // rel_err = (0 - 1.0) / 1.0 = -1.0 for every bin → nrmse = 1.0.
         let bw = 100_000_000u64;
         let gt_pts = single_series(1.0, &[0, 1, 2], bw);
         let gt_bins = bin_avg(&gt_pts, bw);
         let est_bins: HashMap<u64, f64> = HashMap::new();
-        let covered = gt_bins.keys().filter(|b| est_bins.contains_key(b)).count();
-        assert_eq!(covered, 0);
-        // With no covered bins, RMSE should be None.
-        let per_event_rmse: Option<f64> = if covered > 0 { Some(0.0) } else { None };
-        assert!(per_event_rmse.is_none());
+        let mean_gt = 1.0f64;
+        let n_gt = gt_bins.len();
+        let nrmse_sq_sum: f64 = gt_bins
+            .values()
+            .map(|&r| ((est_bins.get(&0).copied().unwrap_or(0.0) - r) / mean_gt).powi(2))
+            .sum();
+        let nrmse = (nrmse_sq_sum / n_gt as f64).sqrt();
+        assert!((nrmse - 1.0).abs() < 1e-12);
     }
 
     #[test]
-    fn rmse_zero_when_exact_match() {
+    fn nrmse_zero_when_exact_match() {
         let bw = 100_000_000u64;
         let pts = single_series(2.5e-6, &[0, 1, 2], bw);
         let gt_bins = bin_avg(&pts, bw);
         let est_bins = bin_avg(&pts, bw);
-        let mut sq_err = 0.0f64;
-        let mut n = 0usize;
-        for (b, gt_rate) in &gt_bins {
-            if let Some(&er) = est_bins.get(b) {
-                sq_err += (er - gt_rate).powi(2);
-                n += 1;
-            }
-        }
-        let rmse = (sq_err / n as f64).sqrt();
-        assert!(rmse < 1e-20);
+        let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
+        let nrmse_sq_sum: f64 = gt_bins
+            .iter()
+            .map(|(b, &gt_rate)| {
+                let est_rate = est_bins.get(b).copied().unwrap_or(0.0);
+                let rel_err = (est_rate - gt_rate) / mean_gt;
+                rel_err * rel_err
+            })
+            .sum();
+        let nrmse = (nrmse_sq_sum / gt_bins.len() as f64).sqrt();
+        assert!(nrmse < 1e-20);
     }
 
     #[test]
-    fn pooled_rmse_penalizes_uncovered_bins() {
+    fn nrmse_penalizes_uncovered_bins() {
+        // GT: 2 bins at rate 1.0, estimated covers only bin 0.
+        // Bin 0: rel_err = (1-1)/1 = 0. Bin 1: rel_err = (0-1)/1 = -1.
+        // nRMSE = sqrt((0 + 1) / 2) = sqrt(0.5).
         let bw = 100_000_000u64;
-        // GT has 2 bins with rate 1.0; estimated has only bin 0.
         let gt_pts = single_series(1.0, &[0, 1], bw);
         let est_pts = single_series(1.0, &[0], bw);
         let gt_bins = bin_avg(&gt_pts, bw);
         let est_bins = bin_avg(&est_pts, bw);
-        let mut sq_err = 0.0f64;
-        let mut n = 0usize;
-        for (b, &gt_rate) in &gt_bins {
-            let er = est_bins.get(b).copied().unwrap_or(0.0);
-            sq_err += (er - gt_rate).powi(2);
-            n += 1;
+        let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
+        let nrmse_sq_sum: f64 = gt_bins
+            .iter()
+            .map(|(b, &gt_rate)| {
+                let est_rate = est_bins.get(b).copied().unwrap_or(0.0);
+                let rel_err = (est_rate - gt_rate) / mean_gt;
+                rel_err * rel_err
+            })
+            .sum();
+        let nrmse = (nrmse_sq_sum / gt_bins.len() as f64).sqrt();
+        assert!((nrmse - 0.5f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nrmse_dimensionless_across_magnitudes() {
+        // Events at very different rates but same 2x overestimate → same nRMSE.
+        let bw = 100_000_000u64;
+        let mut nrmses = Vec::new();
+        for &rate in &[1.0f64, 1e-4] {
+            let gt_pts = single_series(rate, &[0, 1, 2], bw);
+            let est_pts = single_series(rate * 2.0, &[0, 1, 2], bw);
+            let gt_bins = bin_avg(&gt_pts, bw);
+            let est_bins = bin_avg(&est_pts, bw);
+            let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
+            let sq_sum: f64 = gt_bins
+                .iter()
+                .map(|(b, &gt_rate)| {
+                    let est_rate = est_bins.get(b).copied().unwrap_or(0.0);
+                    let rel_err = (est_rate - gt_rate) / mean_gt;
+                    rel_err * rel_err
+                })
+                .sum();
+            nrmses.push((sq_sum / gt_bins.len() as f64).sqrt());
         }
-        let pooled_rmse = (sq_err / n as f64).sqrt();
-        // bin 0: err=0, bin 1: err=1.0^2 → pooled_rmse = sqrt(0.5) ≈ 0.707
-        assert!((pooled_rmse - 0.5f64.sqrt()).abs() < 1e-10);
+        // Both should be 1.0 (2x overestimate = rel_err of 1.0 per bin).
+        for nrmse in &nrmses {
+            assert!((nrmse - 1.0).abs() < 1e-12, "nrmse={nrmse}");
+        }
     }
 
     #[test]
@@ -393,7 +427,6 @@ mod tests {
         series.insert(0, vec![(500_000_000, 1.0), (1_500_000_000, 2.0)]);
         series.insert(1, vec![(1_000_000_000, 3.0), (2_000_000_000, 4.0)]);
         normalize_timestamps(&mut series);
-        // global min is 500_000_000; both series shifted by that amount
         let pts0 = &series[&0];
         assert_eq!(pts0[0].0, 0);
         assert_eq!(pts0[1].0, 1_000_000_000);
@@ -404,26 +437,28 @@ mod tests {
 
     #[test]
     fn misaligned_timestamps_produce_nonzero_coverage() {
-        // Simulate the bug: GT has absolute timestamps at ~10^12 ns offset,
-        // estimated starts near 0. Without normalization coverage would be 0.
-        let bw = 100_000_000u64; // 100 ms bins
-        let offset = 1_000_000_000_000u64; // ~10^12 ns
+        let bw = 100_000_000u64;
+        let offset = 1_000_000_000_000u64;
 
-        // GT: bins 0,1,2 at the offset origin
         let mut gt_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
-        gt_series.insert(0, vec![
-            (offset + bw / 2,       1.0),
-            (offset + bw + bw / 2,  1.0),
-            (offset + 2 * bw + bw / 2, 1.0),
-        ]);
+        gt_series.insert(
+            0,
+            vec![
+                (offset + bw / 2, 1.0),
+                (offset + bw + bw / 2, 1.0),
+                (offset + 2 * bw + bw / 2, 1.0),
+            ],
+        );
 
-        // Estimated: bins 0,1,2 starting near 0
         let mut est_series: HashMap<u32, Vec<(u64, f64)>> = HashMap::new();
-        est_series.insert(0, vec![
-            (bw / 2,       1.0),
-            (bw + bw / 2,  1.0),
-            (2 * bw + bw / 2, 1.0),
-        ]);
+        est_series.insert(
+            0,
+            vec![
+                (bw / 2, 1.0),
+                (bw + bw / 2, 1.0),
+                (2 * bw + bw / 2, 1.0),
+            ],
+        );
 
         normalize_timestamps(&mut gt_series);
         normalize_timestamps(&mut est_series);
