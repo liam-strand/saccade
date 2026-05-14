@@ -56,6 +56,15 @@ pub trait StateEstimator {
     /// Age the estimate for a (tid, event_id) pair that was NOT observed this quantum.
     fn time_update(&mut self, tid: u32, event_id: EventId, elapsed_ns: u64);
 
+    /// Apply global (cross-event) process noise for one completed quantum.
+    ///
+    /// Called once per quantum per active thread, after all per-event
+    /// `time_update` and `measurement_update` calls.  The default no-op
+    /// is correct for estimators that model each event independently.
+    /// `KalmanFilterEstimator` overrides this to add correlated process
+    /// noise to off-diagonal covariance entries.
+    fn quantum_step(&mut self, _tid: u32, _elapsed_ns: u64) {}
+
     fn rate(&self, tid: u32, event_id: EventId) -> f64;
     fn uncertainty(&self, tid: u32, event_id: EventId) -> f64;
 

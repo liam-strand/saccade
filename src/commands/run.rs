@@ -36,6 +36,8 @@ pub fn run(
         .init(all_ids.clone(), MAX_COUNTERS)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+    let estimator = config.build_estimator(&registry);
+
     let mut child = spawn_child(&target)?;
     let pid = child.id();
     syscalls::wait_for_exec(pid)?;
@@ -56,7 +58,7 @@ pub fn run(
     let mut profiler = ProfilerBuilder::new()
         .source(source)
         .scheduler_boxed_pre_init(scheduler)
-        .estimator_boxed(config.build_estimator())
+        .estimator_boxed(estimator)
         .sinks(&mut sinks)
         .build();
 

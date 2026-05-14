@@ -1,4 +1,4 @@
-use crate::event::EventRegistry;
+use crate::event::{EventId, EventRegistry};
 use crate::llm::LlmClient;
 use crate::scheduler::Scheduler;
 use crate::scheduler::distribution::DistributionScheduler;
@@ -167,12 +167,21 @@ impl ResolvedConfig {
         }
     }
 
-    pub fn build_estimator(&self) -> Box<dyn StateEstimator> {
+    pub fn build_estimator(&self, registry: &EventRegistry) -> Box<dyn StateEstimator> {
         match self.estimator {
             EstimatorKind::Propagate => Box::new(PropagateEstimator::new()),
             EstimatorKind::Ema => Box::new(VirtualCounterState::with_config(self.ema.clone())),
             EstimatorKind::Kalman => {
-                Box::new(KalmanFilterEstimator::with_config(self.kalman.clone()))
+                let mut est = KalmanFilterEstimator::with_config(self.kalman.clone());
+                if self.kalman.correlation_path.is_some() {
+                    let name_to_id: std::collections::HashMap<String, EventId> = registry
+                        .get_event_ids()
+                        .into_iter()
+                        .map(|id| (registry.get_event_name(id).to_string(), id))
+                        .collect();
+                    est.load_correlation(&name_to_id);
+                }
+                Box::new(est)
             }
         }
     }

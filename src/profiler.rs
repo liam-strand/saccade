@@ -84,6 +84,20 @@ impl<'s> Profiler<'s> {
         for (tid, event_id) in stale_keys {
             self.estimator.time_update(tid, event_id, elapsed_ns);
         }
+
+        // Apply cross-event (correlated) process noise once per quantum.
+        // For estimators without correlation data this is a no-op.
+        let active_tids: Vec<u32> = self
+            .estimator
+            .all_estimates()
+            .keys()
+            .map(|&(tid, _)| tid)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        for tid in active_tids {
+            self.estimator.quantum_step(tid, elapsed_ns);
+        }
     }
 
     pub fn estimator(&self) -> &dyn StateEstimator {

@@ -92,7 +92,7 @@ pub fn simulate(
         .source(source)
         .scheduler_boxed(scheduler, all_ids)
         .map_err(|e| std::io::Error::other(e.to_string()))?
-        .estimator_boxed(config.build_estimator())
+        .estimator_boxed(config.build_estimator(&registry))
         .sinks(&mut sinks)
         .build();
 
