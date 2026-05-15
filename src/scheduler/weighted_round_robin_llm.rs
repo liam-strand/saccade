@@ -240,7 +240,12 @@ mod tests {
         let mut seen = d.active_events.clone();
         seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), 4, "active_events contains duplicates: {:?}", d.active_events);
+        assert_eq!(
+            seen.len(),
+            4,
+            "active_events contains duplicates: {:?}",
+            d.active_events
+        );
     }
 
     #[test]

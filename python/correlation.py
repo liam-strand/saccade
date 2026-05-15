@@ -47,18 +47,17 @@ def compute_correlations(
             s.decode() if isinstance(s, bytes) else s
             for s in first["event_names"][:]
         ]
-        batch_ids = first["batch_id"][:].tolist()
         n_events = len(event_names)
 
-        # Accumulators for Pearson r via online two-pass equivalent:
-        # accumulate sum_x, sum_y, sum_xy, sum_x2, sum_y2, count per pair.
+        # Accumulators for pooled within-group Pearson r.
+        # Subtract per-group means before accumulating so the result reflects
+        # within-run temporal correlation, not between-benchmark mean differences.
         # Only upper triangle (i < j); diagonal handled separately.
-        sum_x = np.zeros((n_events, n_events), dtype=np.float64)
-        sum_y = np.zeros((n_events, n_events), dtype=np.float64)
         sum_xy = np.zeros((n_events, n_events), dtype=np.float64)
         sum_x2 = np.zeros((n_events, n_events), dtype=np.float64)
         sum_y2 = np.zeros((n_events, n_events), dtype=np.float64)
         pair_count = np.zeros((n_events, n_events), dtype=np.int64)
+        is_same_batch = np.zeros((n_events, n_events), dtype=bool)
 
         # Per-event variance accumulator (Welford)
         ev_count = np.zeros(n_events, dtype=np.int64)
@@ -68,6 +67,10 @@ def compute_correlations(
         for bench_name in bench_names:
             bg = f[bench_name]
             b_batch_ids = bg["batch_id"][:].tolist()
+            b_arr = np.asarray(b_batch_ids, dtype=np.int64)
+            same = b_arr[:, None] == b_arr[None, :]
+            np.fill_diagonal(same, False)  # diagonal stays False, consistent with current behavior
+            is_same_batch |= same
             thread_keys = [k for k in bg.keys() if k.startswith("thread_")]
 
             for tk in thread_keys:
@@ -109,9 +112,11 @@ def compute_correlations(
                                 continue
                             xi = rates[i, both].astype(np.float64)
                             xj = rates[j, both].astype(np.float64)
+                            # Subtract per-group means so accumulated sums reflect within-group
+                            # (temporal) correlation only.
+                            xi -= xi.mean()
+                            xj -= xj.mean()
                             lo, hi = min(i, j), max(i, j)
-                            sum_x[lo, hi] += xi.sum()
-                            sum_y[lo, hi] += xj.sum()
                             sum_xy[lo, hi] += np.dot(xi, xj)
                             sum_x2[lo, hi] += np.dot(xi, xi)
                             sum_y2[lo, hi] += np.dot(xj, xj)
@@ -124,15 +129,10 @@ def compute_correlations(
             n = pair_count[i, j]
             if n < min_samples:
                 continue
-            inv_n = 1.0 / n
-            mx = sum_x[i, j] * inv_n
-            my = sum_y[i, j] * inv_n
-            cov = sum_xy[i, j] * inv_n - mx * my
-            var_x = sum_x2[i, j] * inv_n - mx * mx
-            var_y = sum_y2[i, j] * inv_n - my * my
-            if var_x <= 0.0 or var_y <= 0.0:
+            denom_sq = sum_x2[i, j] * sum_y2[i, j]
+            if denom_sq <= 0.0:
                 continue
-            r = float(np.clip(cov / np.sqrt(var_x * var_y), -1.0, 1.0))
+            r = float(np.clip(sum_xy[i, j] / np.sqrt(denom_sq), -1.0, 1.0))
             corr[i, j] = r
             corr[j, i] = r
 
@@ -158,14 +158,6 @@ def compute_correlations(
         ev_M2 / (ev_count - 1),
         0.0,
     ).tolist()
-
-    # same_batch flag: True if the pair shares a batch_id in any benchmark.
-    is_same_batch = np.zeros((n_events, n_events), dtype=bool)
-    for i in range(n_events):
-        for j in range(i + 1, n_events):
-            if batch_ids[i] == batch_ids[j]:
-                is_same_batch[i, j] = True
-                is_same_batch[j, i] = True
 
     return {
         "event_names": event_names,

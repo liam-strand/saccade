@@ -59,13 +59,6 @@ impl CorrelationData {
     fn idx(&self, event_id: EventId) -> Option<usize> {
         self.event_index.get(&event_id).copied()
     }
-
-    fn variance_for(&self, event_id: EventId) -> f64 {
-        self.idx(event_id)
-            .and_then(|i| self.variances.get(i))
-            .copied()
-            .unwrap_or(0.0)
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -139,26 +132,31 @@ impl ThreadFilter {
         self.sample_counts.push(0);
         self.last_stddev.push(0.0);
 
-        // Seed off-diagonal P[new, existing] = r * sqrt(var_new * var_existing).
-        // This is the correct initial cross-covariance from the learned correlation.
-        // Once P has non-zero off-diagonals, scalar_update propagates measurements
-        // of one event into updates of correlated events via K[j] = P[j,i] / (P[i,i]+R).
-        let var_new = correlation
-            .map(|c| c.variance_for(event_id).max(0.0))
-            .unwrap_or(0.0);
+        // Seed off-diagonal P[new, existing] = r * sqrt(P[existing,existing] * initial_variance).
+        // Uses the actual current diagonal (not calibration variance) so the seed satisfies
+        // |P[i,j]| <= sqrt(P[i,i] * P[j,j]) for any post-measurement P[i,i]. quantum_step
+        // is the primary mechanism that maintains cross-covariance each quantum.
         let new_p_col: Vec<f64> = self
             .index_event
             .iter()
             .take(idx) // exclude the newly appended entry
             .map(|&existing_id| {
-                if let (Some(c), Some(ci), Some(cj)) =
-                    (correlation, correlation.and_then(|c| c.idx(existing_id)), correlation.and_then(|c| c.idx(event_id)))
-                {
+                if let (Some(c), Some(ci), Some(cj)) = (
+                    correlation,
+                    correlation.and_then(|c| c.idx(existing_id)),
+                    correlation.and_then(|c| c.idx(event_id)),
+                ) {
                     let r = c.get(ci, cj);
-                    let var_existing = c.variances.get(ci).copied().unwrap_or(0.0);
-                    if r != 0.0 && var_existing > 0.0 && var_new > 0.0 {
-                        return r * (var_existing * var_new).sqrt();
+                    if r == 0.0 {
+                        return 0.0;
                     }
+                    // Seed using the actual current P diagonal for the existing event.
+                    // Using calibration variances instead can violate |P[i,j]| <= sqrt(P[i,i]*P[j,j])
+                    // when calibration variances exceed the post-measurement diagonal. quantum_step
+                    // is the primary mechanism that maintains cross-covariance each quantum.
+                    let existing_filter_idx = *self.event_index.get(&existing_id).unwrap();
+                    let p_existing = self.p[existing_filter_idx][existing_filter_idx];
+                    return r * (p_existing * config.initial_variance).sqrt();
                 }
                 0.0
             })
@@ -230,25 +228,17 @@ impl KalmanFilterEstimator {
         Self::with_config(KalmanConfig::default())
     }
 
-    /// Build from config, loading correlation data from `config.correlation_path`
-    /// if set.  Loading errors are logged to stderr and silently ignored so that
-    /// missing or malformed files degrade gracefully to zero off-diagonal terms.
+    /// Build from config. Does **not** load correlation data. If
+    /// `config.correlation_path` is set, call [`Self::load_correlation`] after
+    /// construction (once the event registry is available) to initialize
+    /// cross-event correlation. Until `load_correlation` is called the
+    /// estimator uses zero off-diagonal terms.
     pub fn with_config(config: KalmanConfig) -> Self {
-        let correlation = config.correlation_path.as_ref().and_then(|path| {
-            // Correlation JSON indexes events by their position in the event_names
-            // array.  At construction time we do not yet have the event registry,
-            // so we defer mapping EventId → JSON index until the first call to
-            // `ensure_event` (see `CorrelationData::from_json_raw`).
-            // For now, just store a marker that we want to load the file.
-            // The actual load happens via `load_correlation`.
-            let _ = path; // will be loaded lazily
-            None::<CorrelationData>
-        });
         Self {
             threads: HashMap::new(),
             snapshots: HashMap::new(),
             config,
-            correlation,
+            correlation: None,
         }
     }
 
@@ -258,11 +248,10 @@ impl KalmanFilterEstimator {
     /// Call this once after construction, before the first profiling step, when
     /// the event registry is available.  If `correlation_path` is `None` or
     /// loading fails, the estimator continues with zero off-diagonal terms.
-    pub fn load_correlation(
-        &mut self,
-        name_to_id: &HashMap<String, EventId>,
-    ) {
-        let Some(path) = &self.config.correlation_path else { return };
+    pub fn load_correlation(&mut self, name_to_id: &HashMap<String, EventId>) {
+        let Some(path) = &self.config.correlation_path else {
+            return;
+        };
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -290,23 +279,29 @@ impl KalmanFilterEstimator {
         // Build index: JSON position → EventId (skip unknown events).
         let json_to_event: Vec<Option<EventId>> = names
             .iter()
-            .map(|n| {
-                n.as_str()
-                    .and_then(|s| name_to_id.get(s))
-                    .copied()
-            })
+            .map(|n| n.as_str().and_then(|s| name_to_id.get(s)).copied())
             .collect();
 
         let mut correlations = HashMap::new();
         for (i, row) in corr_rows.iter().enumerate() {
-            let Some(eid_i) = json_to_event.get(i).and_then(|x| *x) else { continue };
+            let Some(eid_i) = json_to_event.get(i).and_then(|x| *x) else {
+                continue;
+            };
             let Some(cols) = row.as_array() else { continue };
             for (j, val) in cols.iter().enumerate() {
-                if j <= i { continue; }
-                let Some(eid_j) = json_to_event.get(j).and_then(|x| *x) else { continue };
+                if j <= i {
+                    continue;
+                }
+                let Some(eid_j) = json_to_event.get(j).and_then(|x| *x) else {
+                    continue;
+                };
                 let r = val.as_f64().unwrap_or(0.0);
                 if r.abs() > 1e-9 {
-                    let (lo, hi) = if eid_i < eid_j { (eid_i, eid_j) } else { (eid_j, eid_i) };
+                    let (lo, hi) = if eid_i < eid_j {
+                        (eid_i, eid_j)
+                    } else {
+                        (eid_j, eid_i)
+                    };
                     // Store keyed by EventId pair so ThreadFilter can look up by event.
                     correlations.insert((lo as usize, hi as usize), r);
                 }
@@ -439,13 +434,21 @@ impl StateEstimator for KalmanFilterEstimator {
     }
 
     fn quantum_step(&mut self, tid: u32, elapsed_ns: u64) {
-        let Some(corr) = &self.correlation else { return };
-        let Some(filter) = self.threads.get_mut(&tid) else { return };
+        let Some(corr) = &self.correlation else {
+            return;
+        };
+        let Some(filter) = self.threads.get_mut(&tid) else {
+            return;
+        };
         let dq_diag = self.config.process_noise_per_ns * elapsed_ns as f64;
         let scale = self.config.correlation_process_noise_scale;
         for (&(ci, cj), &r) in &corr.correlations {
-            let Some(&fi) = filter.event_index.get(&(ci as EventId)) else { continue };
-            let Some(&fj) = filter.event_index.get(&(cj as EventId)) else { continue };
+            let Some(&fi) = filter.event_index.get(&(ci as EventId)) else {
+                continue;
+            };
+            let Some(&fj) = filter.event_index.get(&(cj as EventId)) else {
+                continue;
+            };
             let delta = scale * dq_diag * r;
             filter.p[fi][fj] += delta;
             filter.p[fj][fi] += delta;
@@ -558,15 +561,26 @@ mod tests {
         kf.measurement_update(1, 1, 1e-6, 1e-12, 100, 1_000);
         let rate_b_before = kf.rate(1, 1);
 
-        // Now observe event 0 at a much higher rate.  Event 1 should shift up.
+        // Now observe event 0 at a much higher rate.  Event 1 should shift up via
+        // cross-covariance maintained by quantum_step (the production code path in
+        // Profiler::update_estimator calls quantum_step each quantum).
+        let elapsed_ns: u64 = 1_000;
         for t in 2..20 {
-            kf.measurement_update(1, 0, 3e-6, 1e-12, 100, t * 1_000);
-            kf.time_update(1, 1, 1_000);
+            kf.quantum_step(1, elapsed_ns);
+            kf.measurement_update(1, 0, 3e-6, 1e-12, 100, t * elapsed_ns);
+            kf.time_update(1, 1, elapsed_ns);
         }
         let rate_b_after = kf.rate(1, 1);
+        // Require a shift of at least 1% of r * z_innovation as a conservative floor.
+        // A test that only checks > rate_b_before passes on IEEE 754 noise; this
+        // threshold requires genuine signal from the cross-covariance mechanism.
+        let z_innovation = 3e-6 - 1e-6_f64;
+        let min_shift = 0.01 * 0.8 * z_innovation;
         assert!(
-            rate_b_after > rate_b_before,
-            "correlated partner rate should increase: before={rate_b_before:.3e} after={rate_b_after:.3e}"
+            rate_b_after > rate_b_before + min_shift,
+            "correlated partner rate should increase by at least {min_shift:.1e}: \
+             before={rate_b_before:.3e} after={rate_b_after:.3e} (shift={:.3e})",
+            rate_b_after - rate_b_before
         );
     }
 
@@ -660,14 +674,14 @@ mod tests {
         let _ = std::fs::remove_file(path);
 
         // Both events should be registered in CorrelationData, with r=0.75 between them.
-        let corr = kf.correlation.as_ref().expect("correlation should be loaded");
+        let corr = kf
+            .correlation
+            .as_ref()
+            .expect("correlation should be loaded");
         let ci = corr.idx(10).expect("ev_a should have an index");
         let cj = corr.idx(20).expect("ev_b should have an index");
         let r = corr.get(ci, cj);
-        assert!(
-            (r - 0.75).abs() < 1e-9,
-            "expected r=0.75, got {r}"
-        );
+        assert!((r - 0.75).abs() < 1e-9, "expected r=0.75, got {r}");
 
         // Introduce event 10 via measurement_update, then introduce event 20 via
         // time_update (which calls ensure_event but not scalar_update). Checking P
@@ -678,11 +692,55 @@ mod tests {
         let f = &kf.threads[&1];
         let fa = f.event_index[&10];
         let fb = f.event_index[&20];
-        // Seed = r * sqrt(var_a * var_b) = 0.75 * sqrt(1e-12 * 1e-12) = 7.5e-13.
+        // After the fix: Seed = r * sqrt(P[10,10]_current * initial_variance).
+        // Event 10 was just measured so P[10,10] ~ R = 1e-18; initial_variance = 1e-6.
+        // Seed = 0.75 * sqrt(1e-18 * 1e-6) = 7.5e-13.
         assert!(
             f.p[fa][fb].abs() > 1e-20,
             "P off-diagonal should be seeded from calibration data, got {}",
             f.p[fa][fb]
+        );
+    }
+
+    #[test]
+    fn seed_does_not_violate_psd_when_var_cal_large() {
+        // When calibration variance > sqrt(R * initial_variance), the old formula
+        // r * sqrt(var_cal_i * var_cal_j) would produce a seed violating PSD.
+        // The fix uses r * sqrt(P[i,i]_current * initial_variance) instead.
+        let mut corr_map = HashMap::new();
+        corr_map.insert((0usize, 1usize), 0.8_f64);
+        let variances = vec![1e-10_f64; 2]; // large cal variance >> sqrt(R * init_var)
+        let mut event_index = HashMap::new();
+        event_index.insert(0u32, 0usize);
+        event_index.insert(1u32, 1usize);
+        let correlation = Some(CorrelationData {
+            correlations: corr_map,
+            variances,
+            event_index,
+        });
+        let config = KalmanConfig::default();
+        let mut kf = KalmanFilterEstimator {
+            threads: HashMap::new(),
+            snapshots: HashMap::new(),
+            config,
+            correlation,
+        };
+
+        // After event 0 is measured, P[0,0] ~ R = 1e-18.
+        kf.measurement_update(1, 0, 1e-6, 1e-12, 100, 1_000);
+        // Introduce event 1 via time_update (calls ensure_event).
+        kf.time_update(1, 1, 1_000);
+
+        let f = &kf.threads[&1];
+        let i0 = f.event_index[&0];
+        let i1 = f.event_index[&1];
+        let p00 = f.p[i0][i0];
+        let p11 = f.p[i1][i1];
+        let p01 = f.p[i0][i1].abs();
+        let psd_limit = (p00 * p11).sqrt();
+        assert!(
+            p01 <= psd_limit * (1.0 + 1e-10),
+            "seed violates PSD: |P[0,1]|={p01:.3e} > sqrt(P[0,0]*P[1,1])={psd_limit:.3e}"
         );
     }
 }

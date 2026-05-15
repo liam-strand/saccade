@@ -114,11 +114,9 @@ impl Scheduler for DynamicLlmScheduler {
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.update_interval == 0 {
-            return Err(format!(
-                "update_interval must be >= 1, got {}",
-                self.update_interval
-            )
-            .into());
+            return Err(
+                format!("update_interval must be >= 1, got {}", self.update_interval).into(),
+            );
         }
         self.all_events = all_events;
         self.num_slots = num_slots;
