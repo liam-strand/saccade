@@ -1,0 +1,41 @@
+# Saccade configuration file.
+# All fields are optional; uncomment and edit to override the built-in defaults.
+
+# Scheduler policy: "round_robin" | "random" | "distribution"
+# scheduler = "round_robin"
+
+# State estimator: "propagate" | "ema" | "kalman"
+# estimator = "round_robin"
+
+# Scheduling quantum: how often the scheduler rotates active counters (nanoseconds).
+# q_schedule_ns = 10_000_000   # 10 ms
+
+# Sampling quantum: how often the eBPF sampler fires within a scheduling window (nanoseconds).
+# q_sample_ns = 100_000        # 100 µs
+
+# Output quantum: minimum interval between output flushes (nanoseconds, 0 = every sample).
+# q_output_ns = 0
+
+# Standard deviation of simulated measurement noise (0.0 = no noise).
+# noise_stddev = 0.0
+
+# Seed for deterministic random behavior (omit for a random seed).
+# seed = 42
+
+# --- LLM scheduler parameters ---
+# [llm]
+# guidance = "I'm most interested in the memory behavior of this program"
+
+# --- EMA estimator parameters ---
+# [ema]
+# alpha = 0.3              # smoothing factor (0 < alpha <= 1; higher = more reactive)
+# uncertainty_growth_rate = 1e-8  # variance added per nanosecond when counter is unobserved
+
+# --- Kalman filter estimator parameters ---
+# [kalman]
+# process_noise_per_ns           = 1e-18
+# min_measurement_variance       = 1e-18
+# initial_variance               = 1e-6
+# uncertainty_reference_variance = 1e-12
+# correlation_path               = "python/correlation.json"
+# correlation_process_noise_scale = 0.1
