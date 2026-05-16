@@ -7,7 +7,9 @@
 //!
 //! `SampleSource` decouples `Profiler` from any specific data origin.
 //!
-//! ```ignore
+//! ```
+//! # use saccade::sample::RawSample;
+//! # use saccade::event::EventId;
 //! pub trait SampleSource {
 //!     fn collect(&mut self) -> (Vec<RawSample>, u64); // (samples, elapsed_ns)
 //!     fn apply_schedule(
@@ -31,7 +33,12 @@
 //! `Profiler` is source-agnostic. It owns the source, scheduler, state estimator,
 //! output sinks, and current active set.
 //!
-//! ```ignore
+//! ```
+//! # use saccade::source::SampleSource;
+//! # use saccade::scheduler::Scheduler;
+//! # use saccade::sink::OutputSink;
+//! # use saccade::state::StateEstimator;
+//! # use saccade::event::EventId;
 //! pub struct Profiler<'s> {
 //!     source: Box<dyn SampleSource>,
 //!     scheduler: Box<dyn Scheduler>,
@@ -70,7 +77,10 @@
 //! Each `OutputSink` receives the completed `Quantum` and current estimator state
 //! once per profiler step.
 //!
-//! ```ignore
+//! ```
+//! # use saccade::quantum::Quantum;
+//! # use saccade::state::StateEstimator;
+//! # use saccade::event::EventId;
 //! pub trait OutputSink {
 //!     fn emit(&mut self, quantum: &Quantum, estimator: &dyn StateEstimator,
 //!             active_set: &[EventId]) -> std::io::Result<()>;

@@ -116,7 +116,11 @@
 //!
 //! #### Trait Definition
 //!
-//! ```ignore
+//! ```
+//! # use saccade::event::EventId;
+//! # use saccade::state::StateEstimator;
+//! # use saccade::scheduler::ScheduleDecision;
+//! # use saccade::quantum::Quantum;
 //! pub trait Scheduler {
 //!     fn init(&mut self, all_events: Vec<EventId>, num_slots: usize)
 //!         -> Result<(), Box<dyn std::error::Error>>;
