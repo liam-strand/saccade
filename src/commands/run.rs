@@ -1,3 +1,5 @@
+//! Implementation of the `run` subcommand: profile a live target process with eBPF hardware counters.
+
 use crate::commands::{load_library, spawn_child};
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
@@ -13,6 +15,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::debug;
 
+/// Profiles `target` by attaching eBPF hardware-counter sampling, driving the scheduler for each quantum, and writing output to a Perfetto trace (and optionally a CSV).
 pub fn run(
     library: Option<PathBuf>,
     config: ResolvedConfig,

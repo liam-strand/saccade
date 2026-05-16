@@ -1,3 +1,6 @@
+//! Scheduler that starts with an LLM-generated counter schedule and periodically refreshes it
+//! in the background using live counter rate and uncertainty observations.
+
 use crate::event::EventId;
 use crate::llm::{ChatMessage, LlmClient, PromptBuilder};
 use crate::quantum::Quantum;
@@ -8,21 +11,34 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// LLM-based scheduler that adapts its counter rotation schedule at runtime using profiler feedback.
 pub struct DynamicLlmScheduler {
+    /// HTTP client used to call the LLM.
     client: LlmClient,
+    /// Metadata for every available hardware event: `(id, name, description)`.
     event_info: Vec<(EventId, String, String)>,
+    /// The currently active cyclic schedule.
     schedule: Vec<ScheduleStep>,
+    /// Index of the next step to serve from `schedule`.
     step_idx: usize,
+    /// All valid event IDs as reported by `init`.
     all_events: Vec<EventId>,
+    /// Number of hardware counter slots the profiler can activate simultaneously.
     num_slots: usize,
+    /// Number of `next_step` calls between background schedule refresh requests.
     update_interval: u32,
+    /// Counter tracking calls since the last refresh request was sent.
     steps_since_update: u32,
+    /// Channel to send a new prompt to the background worker thread.
     request_tx: Option<mpsc::SyncSender<Vec<ChatMessage>>>,
+    /// Channel on which the background worker delivers the updated schedule.
     result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
+    /// Optional natural-language guidance forwarded to the LLM system message.
     guidance: Option<String>,
 }
 
 impl DynamicLlmScheduler {
+    /// Create a new scheduler; `init` must be called before `next_step` to populate the schedule.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
@@ -44,6 +60,8 @@ impl DynamicLlmScheduler {
         }
     }
 
+    /// Build a prompt that includes current per-event rate and uncertainty observations so the LLM
+    /// can reprioritize counters with high uncertainty or high event rate.
     fn build_update_prompt(&self, estimator: &dyn StateEstimator) -> PromptBuilder {
         let mut event_list = String::new();
         for (id, name, desc) in &self.event_info {
@@ -108,6 +126,7 @@ No explanation, no prose, no markdown fences."
 }
 
 impl Scheduler for DynamicLlmScheduler {
+    /// Generate the initial schedule via LLM and spawn the background worker thread for updates.
     fn init(
         &mut self,
         all_events: Vec<EventId>,
@@ -171,6 +190,8 @@ impl Scheduler for DynamicLlmScheduler {
         Ok(())
     }
 
+    /// Serve the next scheduled step, non-blockingly polling for a background schedule update and
+    /// dispatching a refresh request to the worker when the update interval has elapsed.
     fn next_step(
         &mut self,
         _quantum: &Quantum,
@@ -226,17 +247,21 @@ mod tests {
     use crate::state::{CounterEstimate, EstimateKey};
     use std::collections::HashMap;
 
+    /// A `StateEstimator` that holds a fixed set of manually inserted observations.
     struct MockEstimator {
+        /// Observations keyed by `(thread_id, event_id)`.
         estimates: HashMap<EstimateKey, CounterEstimate>,
     }
 
     impl MockEstimator {
+        /// Create an estimator with no observations.
         fn new() -> Self {
             Self {
                 estimates: HashMap::new(),
             }
         }
 
+        /// Insert a synthetic observation for the given thread and event.
         fn add(&mut self, tid: u32, event_id: EventId, rate: f64, uncertainty: f64) {
             self.estimates.insert(
                 (tid, event_id),
@@ -263,10 +288,12 @@ mod tests {
         }
     }
 
+    /// Produce a `Quantum` with no samples, suitable as a placeholder argument in scheduler tests.
     fn empty_quantum() -> Quantum {
         Quantum::new(vec![], 0, 0)
     }
 
+    /// Build a `DynamicLlmScheduler` pre-populated with a two-step schedule and three events.
     fn make_scheduler(update_interval: u32) -> DynamicLlmScheduler {
         let mut s = DynamicLlmScheduler::new(
             vec![

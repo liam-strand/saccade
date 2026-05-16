@@ -1,3 +1,6 @@
+//! Management of Linux perf event file descriptors and the BPF perf-event-array maps that expose
+//! them to the eBPF program.
+
 use crate::event::EventRegistry;
 use crate::sample::MAX_COUNTERS;
 use crate::sampler::SamplerSkel;
@@ -5,14 +8,21 @@ use libbpf_rs::{MapCore, MapFlags, MapHandle};
 use perf_event::{Builder, Counter, events};
 use std::os::fd::AsRawFd;
 
+/// Owns the `perf_event` file descriptors for all counter slots across all CPUs and keeps the
+/// corresponding BPF `PERF_EVENT_ARRAY` maps in sync.
 pub struct HardwareCounters {
+    /// Number of logical CPUs being monitored.
     num_cpus: usize,
+    /// Owned handles to the four BPF `PERF_EVENT_ARRAY` maps (`counter0`–`counter3`).
     bpf_maps: [MapHandle; MAX_COUNTERS],
+    /// Registry used to look up raw event/umask encodings by event ID.
     event_registry: EventRegistry,
+    /// `active_counters[slot][cpu]` holds the open `Counter` for that (slot, cpu) pair, if any.
     active_counters: Vec<Vec<Option<Counter>>>,
 }
 
 impl HardwareCounters {
+    /// Open BPF map handles from `skel` and allocate empty counter slots for all CPUs.
     pub fn new(
         num_cpus: usize,
         event_registry: EventRegistry,
@@ -37,6 +47,10 @@ impl HardwareCounters {
         }
     }
 
+    /// Replace the hardware event measured in `slot_idx` with `event_id` across all CPUs.
+    ///
+    /// Pauses eBPF tracking, opens fresh `perf_event` FDs for every CPU, updates the BPF map,
+    /// then resumes tracking.
     pub fn update_slot(
         &mut self,
         skel: &mut SamplerSkel<'static>,
@@ -89,6 +103,7 @@ impl HardwareCounters {
         Ok(())
     }
 
+    /// Signal the eBPF program to stop sampling and spin-wait until all CPUs have acknowledged.
     fn stop_counters(&self, skel: &mut SamplerSkel<'static>) {
         skel.maps.bss_data.as_mut().unwrap().tracking = false;
 
@@ -104,6 +119,7 @@ impl HardwareCounters {
         {}
     }
 
+    /// Signal the eBPF program to resume sampling.
     fn start_counters(&self, skel: &mut SamplerSkel<'static>) {
         skel.maps.bss_data.as_mut().unwrap().tracking = true;
     }

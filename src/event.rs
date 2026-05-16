@@ -1,4 +1,4 @@
-//! Merged event module: EventLibrary parser + EventRegistry lookup.
+//! Hardware performance counter event definitions, `perf list` output parsing, and name-to-id lookup.
 
 use nom::{
     IResult, Parser,
@@ -11,14 +11,19 @@ use nom::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str};
 
+/// Stable numeric identifier for an event within an [`EventRegistry`]; corresponds to its index in the backing `Vec`.
 pub type EventId = u32;
 
+/// Runtime index over a loaded [`EventLibrary`], providing O(1) lookup from event name to [`EventId`].
 pub struct EventRegistry {
+    /// Ordered list of all events; an event's position is its [`EventId`].
     events: Vec<Event>,
+    /// Maps each event's canonical name to its index in `events` for fast lookup.
     event_names: HashMap<String, usize>,
 }
 
 impl EventRegistry {
+    /// Builds the registry from an [`EventLibrary`], constructing the name-to-index map.
     pub fn new(events: EventLibrary) -> Self {
         let mut event_names = HashMap::new();
         for (i, event) in events.events.iter().enumerate() {
@@ -31,42 +36,53 @@ impl EventRegistry {
         }
     }
 
+    /// Returns the [`EventId`] for the given event name, or `None` if the name is not in the library.
     pub fn lookup(&self, name: &str) -> Option<EventId> {
         self.event_names.get(name).map(|&e| e as u32)
     }
 
+    /// Returns the [`Event`] corresponding to `id`; panics if `id` is out of range.
     pub fn get_event(&self, id: EventId) -> &Event {
         &self.events[id as usize]
     }
 
+    /// Returns all valid [`EventId`]s in insertion order.
     pub fn get_event_ids(&self) -> Vec<EventId> {
         (0..self.events.len() as u32).collect()
     }
 
+    /// Returns the canonical name of the event with the given `id`; panics if `id` is out of range.
     pub fn get_event_name(&self, id: EventId) -> &str {
         &self.events[id as usize].name
     }
+
+    /// Returns a cloned snapshot of all events, suitable for serialization.
     pub fn dump(&self) -> Vec<Event> {
         self.events.clone()
     }
 }
 
+/// Serializable collection of hardware performance counter events parsed from `perf list --details`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventLibrary {
+    /// All parsed events; order is preserved from the `perf list` output.
     pub events: Vec<Event>,
 }
 
 impl Default for EventLibrary {
+    /// Returns an empty library; prefer [`EventLibrary::from_bytes`] to populate from `perf list` output.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl EventLibrary {
+    /// Creates an empty library with no events.
     pub fn new() -> EventLibrary {
         EventLibrary { events: Vec::new() }
     }
 
+    /// Parses raw `perf list --details` stdout bytes into an `EventLibrary`, silently skipping unrecognized lines.
     pub fn from_bytes(input: &[u8]) -> Result<Self, String> {
         let mut events = Vec::new();
         let mut i = input;
@@ -102,15 +118,21 @@ impl EventLibrary {
     }
 }
 
+/// A single hardware performance counter event, as enumerated by `perf list --details`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
+    /// Canonical event name used as the lookup key (e.g., `"fp_ret_sse_avx_ops.all"`).
     pub name: String,
+    /// Human-readable description from the `perf list` output brackets.
     pub desc: String,
+    /// Event select value written to the hardware performance monitoring MSR.
     pub event: u64,
+    /// Unit mask value written alongside `event` to select a counter sub-type.
     pub umask: u64,
 }
 
 impl Event {
+    /// Parses a single event record from `perf list` bytes, returning an error string on failure.
     pub fn parse(i: &[u8]) -> Result<Self, String> {
         match Self::parse_nom(i) {
             Ok((_, counter)) => Ok(counter),
@@ -118,6 +140,7 @@ impl Event {
         }
     }
 
+    /// nom combinator that matches one `perf list` event stanza (name, bracketed description, `cpu/…/` config line).
     pub fn parse_nom(i: &[u8]) -> IResult<&[u8], Event> {
         let (i, _) = multispace0(i)?;
         let (i, name) = parse_name(i)?;
@@ -146,6 +169,7 @@ impl Event {
     }
 }
 
+/// Parses an optional `0x`-prefixed hexadecimal integer.
 fn parse_hex(i: &[u8]) -> IResult<&[u8], u64> {
     map_res(preceded(opt(tag("0x")), hex_digit1), |out: &[u8]| {
         u64::from_str_radix(str::from_utf8(out).unwrap(), 16)
@@ -153,10 +177,12 @@ fn parse_hex(i: &[u8]) -> IResult<&[u8], u64> {
     .parse(i)
 }
 
+/// Parses one `key=hexvalue` pair from a `cpu/…/` config string.
 fn parse_key_value(i: &[u8]) -> IResult<&[u8], (&[u8], u64)> {
     separated_pair(alpha1, tag("="), parse_hex).parse(i)
 }
 
+/// Parses the `cpu/event=…,umask=…/` config line and returns `(event, umask)`, ignoring unknown keys.
 fn parse_config(i: &[u8]) -> IResult<&[u8], (u64, u64)> {
     let (i, _) = tag("cpu/")(i)?;
     let (i, kvs) = separated_list1(tag(","), parse_key_value).parse(i)?;
@@ -174,10 +200,12 @@ fn parse_config(i: &[u8]) -> IResult<&[u8], (u64, u64)> {
     Ok((i, (event, umask)))
 }
 
+/// Returns `true` for bytes that may appear in a `perf` event name: ASCII alphanumeric, `_`, `.`, or `-`.
 fn is_name_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-'
 }
 
+/// Parses a non-empty event name token using [`is_name_char`] and decodes it as UTF-8.
 fn parse_name(i: &[u8]) -> IResult<&[u8], String> {
     map(take_while1(is_name_char), |s| {
         str::from_utf8(s).unwrap().to_owned()

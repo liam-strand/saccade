@@ -1,3 +1,6 @@
+//! Scheduler that asks an LLM to assign priority weights to hardware events and then replays
+//! a proportionally-expanded round-robin cycle derived from those weights.
+
 use crate::event::EventId;
 use crate::llm::LlmClient;
 use crate::quantum::Quantum;
@@ -5,16 +8,25 @@ use crate::scheduler::llm_common;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 
+/// LLM-based scheduler that converts per-event priority weights into a weighted round-robin cycle,
+/// activating `num_slots` distinct counters per step.
 pub struct WeightedRoundRobinLlmScheduler {
+    /// HTTP client used to call the LLM.
     client: LlmClient,
+    /// Metadata for every available hardware event: `(id, name, description)`.
     event_info: Vec<(EventId, String, String)>,
+    /// The expanded cycle of event IDs produced by `build_cycle`, replayed indefinitely.
     cycle: Vec<EventId>,
+    /// Current position within `cycle`.
     step_idx: usize,
+    /// Number of hardware counter slots to fill per `next_step` call.
     num_slots: usize,
+    /// Optional natural-language guidance forwarded to the LLM system message.
     guidance: Option<String>,
 }
 
 impl WeightedRoundRobinLlmScheduler {
+    /// Create a new scheduler; `init` must be called before `next_step` to fetch weights and build the cycle.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
@@ -30,6 +42,8 @@ impl WeightedRoundRobinLlmScheduler {
         }
     }
 
+    /// Expand `weights` into a flat cycle where each event appears proportionally to its weight,
+    /// with GCD normalization to keep the cycle length manageable.
     fn build_cycle(weights: &[(EventId, u32)]) -> Vec<EventId> {
         let gcd = weights.iter().map(|(_, w)| *w).fold(0u32, gcd_u32);
         let mut remaining: Vec<(EventId, u32)> = weights
@@ -57,11 +71,13 @@ impl WeightedRoundRobinLlmScheduler {
     }
 }
 
+/// Compute the greatest common divisor of two `u32` values using the Euclidean algorithm.
 fn gcd_u32(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd_u32(b, a % b) }
 }
 
 impl Scheduler for WeightedRoundRobinLlmScheduler {
+    /// Fetch LLM-assigned weights and build the weighted round-robin cycle; rejects fewer events than slots.
     fn init(
         &mut self,
         all_events: Vec<EventId>,
@@ -101,6 +117,8 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
         Ok(())
     }
 
+    /// Advance through the weighted cycle, collecting `num_slots` distinct events by skipping
+    /// duplicates, and return them with no fixed duration so the profiler uses its default quantum.
     fn next_step(
         &mut self,
         _quantum: &Quantum,
@@ -133,11 +151,14 @@ mod tests {
     use crate::state::{CounterEstimate, EstimateKey};
     use std::collections::HashMap;
 
+    /// A `StateEstimator` stub that always reports zero rate and uncertainty.
     struct NullEstimator {
+        /// Empty estimate map; never populated by the stub.
         estimates: HashMap<EstimateKey, CounterEstimate>,
     }
 
     impl NullEstimator {
+        /// Create an estimator with no observations.
         fn new() -> Self {
             Self {
                 estimates: HashMap::new(),
@@ -159,10 +180,12 @@ mod tests {
         }
     }
 
+    /// Produce a `Quantum` with no samples, suitable as a placeholder argument in scheduler tests.
     fn empty_quantum() -> Quantum {
         Quantum::new(vec![], 0, 0)
     }
 
+    /// Build a `WeightedRoundRobinLlmScheduler` pre-populated with a given cycle and slot count.
     fn make_scheduler(cycle: Vec<EventId>, num_slots: usize) -> WeightedRoundRobinLlmScheduler {
         let mut s = WeightedRoundRobinLlmScheduler::new(
             vec![],

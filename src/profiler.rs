@@ -1,3 +1,5 @@
+//! Main profiling orchestrator: drives the collect → estimate → schedule → emit loop.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::Scheduler;
@@ -17,15 +19,25 @@ use std::time::Duration;
 /// 5. Applies the schedule to the source
 /// 6. Emits the quantum + estimator state to all output sinks
 pub struct Profiler<'s> {
+    /// Active sample source (hardware eBPF or virtual simulation).
     source: Box<dyn SampleSource>,
+    /// Policy that decides which events to monitor next and for how long.
     scheduler: Box<dyn Scheduler>,
+    /// Output sinks that receive each completed quantum.
     sinks: &'s mut [Box<dyn OutputSink>],
+    /// Maintains per-(thread, event) rate estimates across quanta.
     estimator: Box<dyn StateEstimator>,
+    /// Events currently enabled on the hardware counters.
     active_set: Vec<EventId>,
+    /// Monotonically increasing wall-clock position in nanoseconds since profiling started.
     current_time_ns: u64,
 }
 
 impl<'s> Profiler<'s> {
+    /// Run one profiling quantum: collect, estimate, schedule, and emit.
+    ///
+    /// Returns the scheduler's requested duration for the next quantum, or `None`
+    /// if the scheduler signals that profiling should stop.
     pub fn step(&mut self) -> Option<Duration> {
         // 1. Collect raw samples
         let (raw_samples, elapsed_ns) = self.source.collect();
@@ -54,6 +66,10 @@ impl<'s> Profiler<'s> {
         decision.duration
     }
 
+    /// Update state estimates using per-thread aggregates from the just-completed quantum.
+    ///
+    /// Issues measurement updates for observed (tid, event) pairs and time updates for
+    /// any pair that was not observed this quantum, then applies cross-event process noise.
     fn update_estimator(&mut self, quantum: &Quantum, elapsed_ns: u64) {
         let per_thread = quantum.per_thread_aggregates();
         let observed: HashSet<(u32, EventId)> = per_thread.keys().copied().collect();
@@ -100,24 +116,31 @@ impl<'s> Profiler<'s> {
         }
     }
 
+    /// Borrow the state estimator for inspection (e.g. from a sink or test).
     pub fn estimator(&self) -> &dyn StateEstimator {
         self.estimator.as_ref()
     }
 
+    /// Nanoseconds elapsed since profiling started, updated after each `step()`.
     pub fn current_time_ns(&self) -> u64 {
         self.current_time_ns
     }
 }
 
-/// Builder for `Profiler`.
+/// Builder for `Profiler`; all four components are required before calling `build`.
 pub struct ProfilerBuilder<'s> {
+    /// Sample source, set via `source()`.
     source: Option<Box<dyn SampleSource>>,
+    /// Initialized scheduler, set via `scheduler*()`.
     scheduler: Option<Box<dyn Scheduler>>,
+    /// Output sinks slice, set via `sinks()`.
     sinks: Option<&'s mut [Box<dyn OutputSink>]>,
+    /// State estimator, set via `estimator*()`.
     estimator: Option<Box<dyn StateEstimator>>,
 }
 
 impl<'s> ProfilerBuilder<'s> {
+    /// Create an empty builder; all fields default to `None`.
     pub fn new() -> Self {
         Self {
             source: None,
@@ -127,11 +150,13 @@ impl<'s> ProfilerBuilder<'s> {
         }
     }
 
+    /// Set the sample source.
     pub fn source(mut self, s: impl SampleSource + 'static) -> Self {
         self.source = Some(Box::new(s));
         self
     }
 
+    /// Set and initialize a concrete scheduler, querying slot count from the already-set source.
     pub fn scheduler(
         mut self,
         mut s: impl Scheduler + 'static,
@@ -143,6 +168,7 @@ impl<'s> ProfilerBuilder<'s> {
         Ok(self)
     }
 
+    /// Set and initialize a boxed scheduler, querying slot count from the already-set source.
     pub fn scheduler_boxed(
         mut self,
         mut s: Box<dyn Scheduler>,
@@ -160,21 +186,25 @@ impl<'s> ProfilerBuilder<'s> {
         self
     }
 
+    /// Set the state estimator.
     pub fn estimator(mut self, e: impl StateEstimator + 'static) -> Self {
         self.estimator = Some(Box::new(e));
         self
     }
 
+    /// Set the state estimator from an already-boxed value.
     pub fn estimator_boxed(mut self, e: Box<dyn StateEstimator>) -> Self {
         self.estimator = Some(e);
         self
     }
 
+    /// Set the output sinks slice.
     pub fn sinks(mut self, sinks: &'s mut [Box<dyn OutputSink>]) -> Self {
         self.sinks = Some(sinks);
         self
     }
 
+    /// Consume the builder and construct a `Profiler`. Panics if any required component is missing.
     pub fn build(self) -> Profiler<'s> {
         Profiler {
             source: self.source.expect("ProfilerBuilder: source is required"),

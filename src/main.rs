@@ -3,6 +3,7 @@ use saccade::cli::{Cli, Commands};
 use saccade::commands::{evaluate, generate, run, simulate, sweep};
 use saccade::config::{CliOverrides, load_config};
 
+/// Entry point: parses CLI arguments, initialises the tracing subscriber, and dispatches to the appropriate subcommand handler.
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 

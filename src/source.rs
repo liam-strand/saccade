@@ -1,3 +1,5 @@
+//! Trait definition for sample sources and their hardware/virtual implementations.
+
 use crate::event::EventId;
 use crate::sample::RawSample;
 
@@ -6,9 +8,8 @@ pub mod virtual_source;
 
 /// Abstraction over where performance counter samples come from.
 ///
-/// Replaces `CounterBackend`. Key difference: returns raw `RawSample` values
-/// (count + duration), not pre-aggregated `Observation` values.
-/// Rate computation happens downstream in `Quantum::aggregates()`.
+/// Implementations return raw `RawSample` values (count + duration); rate
+/// computation happens downstream in `Quantum::aggregates()`.
 pub trait SampleSource {
     /// Collect all raw samples since the last call.
     ///

@@ -1,33 +1,67 @@
+//! Standalone synthetic benchmark binary used to exercise distinct hardware performance counter profiles for testing the profiler.
+
 use serde::Deserialize;
 use std::hint::black_box;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
 
+/// Top-level configuration deserialized from the JSON file passed on the command line.
 #[derive(Deserialize)]
 struct WorkloadConfig {
+    /// Ordered list of benchmark phases to execute sequentially.
     phases: Vec<Phase>,
 }
 
+/// Configuration for a single benchmark phase.
 #[derive(Deserialize)]
 struct Phase {
+    /// How long to run this phase, in seconds.
     duration_secs: u64,
+    /// Number of worker threads to spawn concurrently for this phase.
     threads: usize,
+    /// The type of workload to run, along with its parameters.
     #[serde(flatten)]
     kind: PhaseKind,
 }
 
+/// Selects the micro-benchmark kernel to run and carries its configuration.
 #[derive(Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PhaseKind {
-    CacheThrash { array_size_kb: usize },
-    FpHeavy { vector_size: usize },
-    BranchMispredict { array_size: usize },
-    TlbThrash { num_pages: usize },
-    MemStream { buffer_size_mb: usize },
-    IntDiv { divisor_range: usize },
+    /// Random-access reads/writes into an array larger than L1/L2 cache to stress the cache hierarchy.
+    CacheThrash {
+        /// Working-set size in KiB; should exceed the target cache level to be stressed.
+        array_size_kb: usize,
+    },
+    /// Dense FMA-style floating-point work on two vectors to saturate the FP execution units.
+    FpHeavy {
+        /// Number of `f64` elements in each vector.
+        vector_size: usize,
+    },
+    /// Unpredictable conditional branches dispatched through non-inlined call sites to saturate the branch predictor.
+    BranchMispredict {
+        /// Number of random branches issued per inner loop iteration.
+        array_size: usize,
+    },
+    /// Random page-order touches across a large allocation to evict TLB entries.
+    TlbThrash {
+        /// Number of 4 KiB pages to allocate and walk randomly.
+        num_pages: usize,
+    },
+    /// Sequential read-modify-write sweep over a buffer to saturate memory bandwidth.
+    MemStream {
+        /// Buffer size in MiB; should exceed the last-level cache to measure DRAM bandwidth.
+        buffer_size_mb: usize,
+    },
+    /// Integer division with a randomised divisor pool to stress the integer division unit.
+    IntDiv {
+        /// Upper bound (exclusive) on the randomly generated divisors; must be > 0.
+        divisor_range: usize,
+    },
 }
 
+/// 64-bit xorshift PRNG; updates `state` in place and returns the next pseudo-random value.
 fn xorshift64(state: &mut u64) -> u64 {
     let mut x = *state;
     x ^= x << 13;
@@ -37,6 +71,7 @@ fn xorshift64(state: &mut u64) -> u64 {
     x
 }
 
+/// Runs the cache-thrash workload for `duration`, doing random reads/writes across an `array_size_kb` KiB buffer.
 #[inline(never)]
 fn run_cache_thrash(array_size_kb: usize, duration: Duration) {
     let len = (array_size_kb * 1024) / 8;
@@ -59,6 +94,7 @@ fn run_cache_thrash(array_size_kb: usize, duration: Duration) {
     black_box(sum);
 }
 
+/// Runs the floating-point workload for `duration`, repeatedly computing dot-product-style FMA operations over two `f64` vectors of length `vector_size`.
 #[inline(never)]
 fn run_fp_heavy(vector_size: usize, duration: Duration) {
     let a: Vec<f64> = (0..vector_size).map(|i| (i as f64 + 1.0).sqrt()).collect();
@@ -85,16 +121,19 @@ fn run_fp_heavy(vector_size: usize, duration: Duration) {
 // Separate non-inlined functions for each branch path.
 // The compiler cannot speculatively call both and then cmov-select the result,
 // so these force a real conditional branch instruction at the call site.
+/// Branch-mispredict helper: wrapping addition path called from `run_branch_mispredict`.
 #[inline(never)]
 fn bp_add(sum: u64, val: u64) -> u64 {
     sum.wrapping_add(val)
 }
 
+/// Branch-mispredict helper: wrapping multiplication path called from `run_branch_mispredict`.
 #[inline(never)]
 fn bp_mul(sum: u64, val: u64) -> u64 {
     sum.wrapping_mul(val | 1)
 }
 
+/// Runs the branch-mispredict workload for `duration`, issuing `batch_size` unpredictable conditional branches per inner loop.
 #[inline(never)]
 fn run_branch_mispredict(batch_size: usize, duration: Duration) {
     let mut rng = 0xdeadbeef_u64;
@@ -122,6 +161,7 @@ fn run_branch_mispredict(batch_size: usize, duration: Duration) {
     black_box(sum);
 }
 
+/// Runs the TLB-thrash workload for `duration`, accessing `num_pages` pages in a shuffled order to evict TLB entries.
 #[inline(never)]
 fn run_tlb_thrash(num_pages: usize, duration: Duration) {
     let total_bytes = num_pages * 4096;
@@ -158,6 +198,7 @@ fn run_tlb_thrash(num_pages: usize, duration: Duration) {
     black_box(sum);
 }
 
+/// Runs the memory-streaming workload for `duration`, sweeping a `buffer_size_mb` MiB buffer sequentially to saturate DRAM bandwidth.
 #[inline(never)]
 fn run_mem_stream(buffer_size_mb: usize, duration: Duration) {
     let len = buffer_size_mb * 1024 * 1024 / 8;
@@ -181,6 +222,7 @@ fn run_mem_stream(buffer_size_mb: usize, duration: Duration) {
     black_box(sum);
 }
 
+/// Runs the integer-division workload for `duration`, repeatedly dividing a LCG-generated dividend by a pre-built pool of random divisors bounded by `divisor_range`.
 #[inline(never)]
 fn run_int_div(divisor_range: usize, duration: Duration) {
     let mut rng = 0xdeadbeef_u64;
@@ -209,6 +251,7 @@ fn run_int_div(divisor_range: usize, duration: Duration) {
     black_box(sum);
 }
 
+/// Spawns `threads` worker threads that each execute the workload described by `kind` for `duration`, then joins all threads.
 fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
     let handles: Vec<_> = (0..threads)
         .map(|_| {
@@ -232,6 +275,7 @@ fn run_phase(kind: &PhaseKind, duration: Duration, threads: usize) {
     }
 }
 
+/// Checks that all phases have non-zero durations, thread counts, and workload-specific parameters.
 fn validate(config: &WorkloadConfig) -> Result<(), String> {
     if config.phases.is_empty() {
         return Err("phases must not be empty".to_string());
@@ -279,6 +323,7 @@ fn validate(config: &WorkloadConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Formats a human-readable one-line description of `phase` for progress output.
 fn phase_label(phase: &Phase) -> String {
     let kind_str = match &phase.kind {
         PhaseKind::CacheThrash { array_size_kb } => {
@@ -300,6 +345,7 @@ fn phase_label(phase: &Phase) -> String {
     )
 }
 
+/// Entry point: reads and validates a JSON config file, then runs each phase in sequence.
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {

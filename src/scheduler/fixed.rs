@@ -1,15 +1,18 @@
+//! Fixed scheduler: holds a constant set of counters for every quantum.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 
-/// Always returns the same fixed set of counters.
-/// Used by the `sweep` command to hold counters constant for an entire run.
+/// Returns the same counter set every step; used by the `sweep` command to hold counters constant for an entire run.
 pub struct FixedScheduler {
+    /// The invariant set of events returned on every call to `next_step`.
     active: Vec<EventId>,
 }
 
 impl FixedScheduler {
+    /// Creates a scheduler that always returns `active`.
     pub fn new(active: Vec<EventId>) -> Self {
         Self { active }
     }

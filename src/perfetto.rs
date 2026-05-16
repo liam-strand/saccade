@@ -1,3 +1,5 @@
+//! Perfetto trace file I/O: writing per-thread hardware counter timeseries and reading them back.
+
 pub mod reader;
 pub mod trace;
 

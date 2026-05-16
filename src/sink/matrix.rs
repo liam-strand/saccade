@@ -1,3 +1,5 @@
+//! HDF5 matrix output sink that bins per-thread event rates over time.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::sample::TASK_COMM_LEN;
@@ -10,36 +12,54 @@ use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// Accumulated time-series data for one synthetic thread.
 struct ThreadData {
+    /// Process name from the kernel task comm string.
     task_name: String,
+    /// Thread group ID (process ID) of the real thread.
     tgid: u32,
-    /// Raw (rel_ts_ns, rate) per event. Outer index = event_id (same as global).
+    /// Per-event list of `(rel_ts_ns, rate)` observations collected across quantums.
     series: HashMap<EventId, Vec<(u64, f64)>>,
 }
 
+/// Writes an HDF5 file with one `thread_<N>/rates` dataset per observed thread,
+/// where `rates` is an `[n_events × n_timesteps]` f32 matrix of mean event rates.
 pub struct MatrixSink {
+    /// Output HDF5 file path.
     path: PathBuf,
+    /// Width of each time bin in nanoseconds.
     dt_ns: u64,
+    /// Total number of hardware events tracked.
     n_events: u32,
+    /// Human-readable names for each event, indexed by `EventId`.
     event_names: Vec<String>,
-    /// Which batch_id produced each event row (-1 = not yet sampled).
+    /// Maps each event index to the batch that produced its samples; -1 if not yet sampled.
     event_to_batch: Vec<i32>,
 
+    /// Accumulated per-synthetic-TID data, keyed by synthetic TID.
     threads: HashMap<u32, ThreadData>,
 
     // Cross-batch synthetic-TID assignment
+    /// Maps `(task_name, within-name ordinal)` to a stable synthetic TID across batches.
     name_idx_to_synthetic: HashMap<(String, u32), u32>,
+    /// Monotonically increasing counter used to allocate the next synthetic TID.
     next_synthetic_tid: u32,
 
     // Per-batch transient state (reset in begin_batch)
+    /// Batch ID currently being accumulated.
     current_batch_id: u32,
+    /// Events active in the current batch.
     current_batch_events: Vec<EventId>,
+    /// Maps real TIDs to synthetic TIDs for the duration of the current batch.
     batch_real_to_synthetic: HashMap<u32, u32>,
+    /// Counts how many distinct real TIDs share each task name within the current batch.
     batch_name_counters: HashMap<String, u32>,
+    /// Timestamp of the first sample seen in the current batch, used to compute relative times.
     batch_t0: Option<u64>,
 }
 
 impl MatrixSink {
+    /// Create a new `MatrixSink` that will write to `path` with `dt_ns`-wide time bins.
     pub fn new(path: PathBuf, event_names: Vec<String>, dt_ns: u64) -> Self {
         let n_events = event_names.len() as u32;
         Self {

@@ -1,3 +1,5 @@
+//! Implementation of the `simulate` subcommand: replay a ground-truth Perfetto rate trace through the profiler pipeline without real hardware.
+
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
@@ -11,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Drives the profiler against a `VirtualSampleSource` seeded from `rates_trace`, running for as many quanta as the trace spans, then writes output to a Perfetto file (and optionally a CSV).
 pub fn simulate(
     library: PathBuf,
     rates_trace: PathBuf,

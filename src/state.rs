@@ -65,7 +65,9 @@ pub trait StateEstimator {
     /// noise to off-diagonal covariance entries.
     fn quantum_step(&mut self, _tid: u32, _elapsed_ns: u64) {}
 
+    /// Current rate estimate (events/ns) for a (tid, event_id) pair; 0.0 if unseen.
     fn rate(&self, tid: u32, event_id: EventId) -> f64;
+    /// Current uncertainty in [0, 1] for a (tid, event_id) pair; 1.0 if unseen.
     fn uncertainty(&self, tid: u32, event_id: EventId) -> f64;
 
     /// All (tid, event_id) estimates currently tracked.

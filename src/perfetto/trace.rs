@@ -1,3 +1,5 @@
+//! Writing Perfetto proto binary trace files from Saccade counter samples.
+
 use crate::event::EventId;
 use crate::state::StateEstimator;
 use perfetto_protos::counter_descriptor::CounterDescriptor;
@@ -12,7 +14,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// UUID base for dynamically-allocated per-thread tracks.
+/// Starting value for sequentially-allocated UUIDs for all dynamically-created tracks (process, thread, and counter).
 const THREAD_UUID_BASE: u64 = 1_000_000;
 
 /// Writes Perfetto trace files containing per-(thread, event) rate counter tracks.
@@ -20,19 +22,22 @@ const THREAD_UUID_BASE: u64 = 1_000_000;
 /// The output file is a valid `.perfetto-trace` — a sequence of length-prefixed
 /// `TracePacket` messages wrapped in the `Trace` container wire format.
 pub struct PerfettoWriter {
+    /// Buffered writer for the output `.perfetto-trace` file.
     writer: BufWriter<File>,
+    /// Ordered list of hardware event names, indexed by `EventId`.
     event_names: Vec<String>,
-    /// Next UUID to allocate for per-thread tracks.
+    /// Monotonically increasing UUID counter for all dynamically-allocated tracks.
     next_thread_uuid: u64,
-    /// tgid → process track uuid
+    /// Maps tgid → UUID of the corresponding process track.
     process_uuids: HashMap<u32, u64>,
-    /// tid → thread track uuid
+    /// Maps tid → UUID of the corresponding thread track.
     thread_uuids: HashMap<u32, u64>,
-    /// (tid, event_id) → rate_uuid
+    /// Maps (tid, event_id) → UUID of the rate counter track for that pair.
     thread_counter_uuids: HashMap<(u32, u32), u64>,
 }
 
 impl PerfettoWriter {
+    /// Create a new writer that will serialize traces to `path`, using `event_names` to label counter tracks.
     pub fn new(path: impl AsRef<Path>, event_names: Vec<String>) -> std::io::Result<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
@@ -158,6 +163,7 @@ impl PerfettoWriter {
         Ok(rate_uuid)
     }
 
+    /// Wrap a `TrackDescriptor` in a `TracePacket` and write it to the output file.
     fn write_track_descriptor_packet(&mut self, desc: TrackDescriptor) -> std::io::Result<()> {
         let mut packet = TracePacket::new();
         packet.set_track_descriptor(desc);
@@ -165,6 +171,7 @@ impl PerfettoWriter {
         self.write_trace_packet(&packet)
     }
 
+    /// Write a `TYPE_COUNTER` track event packet carrying a double counter value at the given timestamp.
     fn write_counter_packet(
         &mut self,
         timestamp_ns: u64,
@@ -185,11 +192,7 @@ impl PerfettoWriter {
         self.write_trace_packet(&packet)
     }
 
-    /// Write a single TracePacket in the Trace container wire format.
-    ///
-    /// A `.perfetto-trace` file is a serialized `Trace` protobuf, which is just
-    /// `repeated TracePacket packet = 1`. Each packet is written as:
-    ///   field tag (0x0A = field 1, wire type LEN) + varint length + packet bytes
+    /// Serialize `packet` into the `Trace` container wire format: tag `0x0A` + varint length + packet bytes.
     fn write_trace_packet(&mut self, packet: &TracePacket) -> std::io::Result<()> {
         let bytes = packet.write_to_bytes().map_err(std::io::Error::other)?;
 
@@ -202,10 +205,7 @@ impl PerfettoWriter {
         Ok(())
     }
 
-    /// Write pre-collected per-thread time-series data as counter packets.
-    ///
-    /// `series`: (event_id, tid) → sorted Vec of (timestamp_ns, rate).
-    /// `thread_meta`: tid → (tgid, task_name) — used to register process/thread tracks.
+    /// Write pre-collected `(event_id, tid)` time-series as counter packets, registering tracks via `thread_meta`.
     pub fn write_raw_series(
         &mut self,
         series: &HashMap<(EventId, u32), Vec<(u64, f64)>>,
@@ -232,6 +232,7 @@ impl PerfettoWriter {
         Ok(())
     }
 
+    /// Flush the internal buffer to disk; also called automatically on drop.
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
@@ -274,11 +275,7 @@ pub(crate) fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-/// Parse a `.perfetto-trace` byte slice into `TracePacket`s.
-///
-/// The wire format is the `Trace` protobuf container:
-///   repeated TracePacket packet = 1;
-/// Each packet is encoded as: tag 0x0A + varint length + packet bytes.
+/// Parse a `.perfetto-trace` byte slice into `TracePacket`s by walking the `Trace` container wire format (tag `0x0A` + varint length + packet bytes per entry).
 pub(crate) fn read_trace_packets(data: &[u8]) -> std::io::Result<Vec<TracePacket>> {
     let mut packets = Vec::new();
     let mut pos = 0;

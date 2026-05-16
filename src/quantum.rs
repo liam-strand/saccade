@@ -3,38 +3,43 @@ use crate::sample::RawSample;
 use std::cell::OnceCell;
 use std::collections::HashMap;
 
-/// Per-event aggregate computed from the raw samples in a `Quantum`.
-/// Rate = `total_count / total_duration_ns` — computed lazily from raw counts.
+/// Per-event statistics aggregated from all `RawSample`s in a `Quantum`.
 #[derive(Debug, Clone)]
 pub struct EventAggregate {
+    /// The hardware event these statistics describe.
     pub event_id: EventId,
+    /// Sum of raw event counts across all samples.
     pub total_count: u64,
+    /// Sum of measurement durations across all samples in nanoseconds.
     pub total_duration_ns: u64,
-    /// Welford mean of per-sample (count / duration_ns) rates.
+    /// Welford online mean of per-sample rates (`count / duration_ns`).
     pub mean_rate: f64,
-    /// Welford population stddev of per-sample rates; 0.0 when num_samples < 2.
+    /// Welford population standard deviation of per-sample rates; `0.0` when `num_samples < 2`.
     pub stddev_rate: f64,
+    /// Minimum per-sample rate observed.
     pub min_rate: f64,
+    /// Maximum per-sample rate observed.
     pub max_rate: f64,
+    /// Number of raw samples that contributed to this aggregate.
     pub num_samples: u32,
 }
 
-/// All raw samples collected during one scheduling step.
-///
-/// Raw counts and durations are the primary data; rate aggregates are computed
-/// lazily on first access and cached. Consumers can choose their level of detail:
-/// - CSV output: iterate `samples()` for per-sample counts + durations
-/// - VCS update: use `aggregates()` for per-event mean rate + stddev
-/// - Schedulers: access both
+/// All raw samples collected during one scheduling step, with lazily computed rate aggregates.
 pub struct Quantum {
+    /// Individual hardware counter observations collected during this scheduling step.
     samples: Vec<RawSample>,
+    /// Kernel monotonic timestamp marking the end of this quantum (nanoseconds).
     timestamp_ns: u64,
+    /// Wall-clock duration of this scheduling step in nanoseconds.
     elapsed_ns: u64,
+    /// Per-event aggregates across all CPUs, computed on first access and cached.
     aggregates: OnceCell<HashMap<EventId, EventAggregate>>,
+    /// Per-(tid, event) aggregates, computed on first access and cached.
     per_thread_aggregates: OnceCell<HashMap<(u32, EventId), EventAggregate>>,
 }
 
 impl Quantum {
+    /// Construct a `Quantum` from a batch of raw samples and the scheduling-step timing metadata.
     pub fn new(samples: Vec<RawSample>, timestamp_ns: u64, elapsed_ns: u64) -> Self {
         Self {
             samples,
@@ -45,14 +50,17 @@ impl Quantum {
         }
     }
 
+    /// Returns the individual raw samples collected during this quantum.
     pub fn samples(&self) -> &[RawSample] {
         &self.samples
     }
 
+    /// Returns the kernel monotonic timestamp at the end of this quantum (nanoseconds).
     pub fn timestamp_ns(&self) -> u64 {
         self.timestamp_ns
     }
 
+    /// Returns the wall-clock duration of this scheduling step in nanoseconds.
     pub fn elapsed_ns(&self) -> u64 {
         self.elapsed_ns
     }
@@ -76,15 +84,23 @@ impl Quantum {
     }
 }
 
-/// Welford's online algorithm keyed by (tid, event_id).
+/// Applies Welford's online algorithm over per-sample rates keyed by `(tid, event_id)`.
 fn aggregate_samples_by_thread(samples: &[RawSample]) -> HashMap<(u32, EventId), EventAggregate> {
+    /// Running accumulator for Welford's online mean/variance algorithm.
     struct Acc {
+        /// Number of samples seen so far.
         n: u32,
+        /// Running Welford mean of per-sample rates.
         mean: f64,
+        /// Running Welford M2 sum of squared deviations (used to derive variance).
         m2: f64,
+        /// Minimum per-sample rate seen so far.
         min: f64,
+        /// Maximum per-sample rate seen so far.
         max: f64,
+        /// Cumulative raw event count.
         total_count: u64,
+        /// Cumulative measurement duration in nanoseconds.
         total_duration_ns: u64,
     }
 
@@ -142,15 +158,23 @@ fn aggregate_samples_by_thread(samples: &[RawSample]) -> HashMap<(u32, EventId),
         .collect()
 }
 
-/// Welford's online algorithm over per-sample rates (count / duration_ns).
+/// Applies Welford's online algorithm over per-sample rates keyed by `event_id`.
 fn aggregate_samples(samples: &[RawSample]) -> HashMap<EventId, EventAggregate> {
+    /// Running accumulator for Welford's online mean/variance algorithm.
     struct Acc {
+        /// Number of samples seen so far.
         n: u32,
+        /// Running Welford mean of per-sample rates.
         mean: f64,
+        /// Running Welford M2 sum of squared deviations (used to derive variance).
         m2: f64,
+        /// Minimum per-sample rate seen so far.
         min: f64,
+        /// Maximum per-sample rate seen so far.
         max: f64,
+        /// Cumulative raw event count.
         total_count: u64,
+        /// Cumulative measurement duration in nanoseconds.
         total_duration_ns: u64,
     }
 

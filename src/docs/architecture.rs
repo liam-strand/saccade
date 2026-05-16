@@ -4,12 +4,12 @@
 //! The system implements a strict separation of concerns between mechanism (eBPF)
 //! and policy (Rust).
 //!
-//! | LAYER                | COMPONENT  | TECHNOLOGY       | //! RESPONSIBILITY                                                                                     |
-//! | :------------------- | :--------- | :--------------- | //! :------------------------------------------------------------------------------------------------- |
-//! | **L4: Intelligence** | Scheduler  | Rust (pluggable trait) | Policy Layer. Determines counter selection based on pluggable policy. ML-steered scheduling is a planned future direction (technology TBD). |
-//! | **L3: Control**      | Oculomotor | Rust + libbpf-rs | User Agent. Backend-agnostic orchestrator: aggregates observations, updates VirtualCounterState, executes scheduler policy. Delegates hardware details to a pluggable `CounterBackend` (`HardwareBackend` for real eBPF/perf, `VirtualBackend` for simulation). |
-//! | **L2: Data**         | Retina     | eBPF (C)         | Sampling Layer. Implements Gated Sampling via sched_switch and //! perf_event.                         |
-//! | **L1: Hardware**     | PMU        | Linux Perf       | Hardware Layer. Physical counters managed via standard //! perf_event_open.                            |
+//! | LAYER                | COMPONENT  | TECHNOLOGY             | RESPONSIBILITY |
+//! | :------------------- | :--------- | :--------------------- | :------------- |
+//! | **L4: Intelligence** | Scheduler  | Rust (pluggable trait) | Policy Layer. Determines counter selection. Implementations range from round-robin baselines to LLM-driven adaptive schedulers. |
+//! | **L3: Control**      | Profiler   | Rust + libbpf-rs       | Orchestrator. Source-agnostic: collects `RawSample`s, builds a `Quantum`, updates the `StateEstimator`, invokes the scheduler, applies the schedule, and emits to `OutputSink`s. Delegates hardware details to a pluggable `SampleSource` (`HardwareSampleSource` for eBPF/perf, `VirtualSampleSource` for simulation). |
+//! | **L2: Data**         | Sampler    | eBPF (C)               | Sampling Layer. Implements Gated Sampling via `sched_switch` and `perf_event`. |
+//! | **L1: Hardware**     | PMU        | Linux Perf             | Hardware Layer. Physical counters managed via `perf_event_open`. |
 //!
 //! ## SAMPLING LOGIC (EBPF)
 //!
@@ -20,28 +20,41 @@
 //! ### State Management
 //!
 //! * Start Map: A BPF Hash Map shared between hooks tracks the target process
-//!   state by recording the timestamp (in nanoseconds) when the task was
-//!   scheduled in. This acts as both a gate and a reference for delta time.
+//!   state by recording the timestamp (in nanoseconds) when the task was last
+//!   sampled or scheduled in. This acts as both a gate and a reference for
+//!   computing `duration_ns`.
+//!
+//! * Global Flags: `tracking` (bool) enables/disables all sampling; `stopped[cpu]`
+//!   (bool array) lets each CPU signal to userspace that it has halted, enabling
+//!   the world-stop barrier used when reconfiguring hardware counters.
 //!
 //! ### Trigger Logic
 //!
 //! 1. Context Switch Hook (`sched_switch`)
 //!    * Switch-IN (Target):
-//!      - Action: Set timestamp in Start Map.
+//!      - Action: Insert timestamp into Start Map for the incoming thread.
 //!      - Effect: Enables timer-based sampling with delta reference.
 //!
 //!    * Switch-OUT (Target):
-//!      - Action: FLUSH (Record final sample) -> Delete entry in Start Map.
-//!      - Effect: Captures execution tail; disables timer overhead.
+//!      - Action: FLUSH (record final sample with `delta = now − start`) →
+//!        delete entry from Start Map.
+//!      - Effect: Captures the execution tail; disables timer overhead for
+//!        this thread while it is off-CPU.
 //!
 //! 2. Timer Hook (`perf_event`)
-//!    * Frequency: High (15,000 Hz software CPU_CLOCK, one timer per CPU).
-//!    * Action: Check Start Map.
-//!      - If not present: Exit immediately.
-//!      - If present: Record Intermediate Sample, update timestamp.
+//!    * Frequency: 15,000 Hz software `CPU_CLOCK`, one perf event per CPU.
+//!    * Action: Check Start Map for the currently running thread.
+//!      - If not present: Exit immediately (thread is not being tracked).
+//!      - If present but `delta < min_sample_interval_ns`: Exit (rate limiting).
+//!      - Otherwise: Record `SAMPLE_TYPE_INTERMEDIATE` and update timestamp.
+//!
+//! 3. Resume Marker (`SAMPLE_TYPE_RESUME`)
+//!    * Emitted when a CPU transitions from `stopped[cpu]=true` back to active.
+//!    * Carries the current absolute counter readings so userspace can reset
+//!      its per-(cpu, slot) baselines before computing deltas.
+//!    * Produces no `RawSample`; consumed only by `HardwareSampleSource::wire_to_raw`.
 //!
 //! ### Sequence Flow
-//!
 //!
 //! ```mermaid
 //! (Target Inactive - Start Map: Empty)
@@ -75,11 +88,12 @@
 //!    * `HardwareCounters` is created with empty slots (no FDs pre-allocated).
 //!    * Counters are opened on demand when `update_slot` is first called.
 //!
-//! 2. Logical Groups:
+//! 2. Slot Management:
 //!    * The Scheduler returns `ScheduleDecision` containing a `Vec<EventId>`.
-//!    * `Oculomotor` passes the old and new active sets to
-//!      `backend.update_counters()`. `HardwareBackend` diffs the sets and calls
-//!      `update_slot` only for slots whose event changed.
+//!    * `Profiler` passes the old and new active sets to
+//!      `source.apply_schedule()`. `HardwareSampleSource` compares the sets
+//!      positionally (slot-by-slot) and calls `HardwareCounters::update_slot`
+//!      only for slots whose event changed.
 //!    * `HardwareCounters` manages all perf event FDs; the Scheduler never
 //!      sees or touches FDs directly.
 //!
@@ -93,34 +107,50 @@
 //!         immediately enable it.
 //!      5. `bpf_map_update_elem` on the slot's `PERF_EVENT_ARRAY` (e.g.,
 //!         `counter0`) keyed by `cpu_id`.
-//!      6. Set `tracking = true` to resume sampling.
+//!      6. Set `tracking = true` to resume sampling. Each CPU then emits a
+//!         `SAMPLE_TYPE_RESUME` marker so userspace can re-anchor baselines.
 //!
 //! ### SCHEDULER INTERFACE
 //!
-//! The scheduling logic is decoupled via a Rust Trait to allow swapping between
-//! baseline and ML strategies.
+//! The scheduling logic is decoupled via a Rust trait.
 //!
 //! #### Trait Definition
 //!
 //! ```ignore
 //! pub trait Scheduler {
-//!     fn init(&mut self, all_events: Vec<EventId>);
-//!     fn next_step(&mut self, state: &VirtualCounterState) -> ScheduleDecision;
+//!     fn init(&mut self, all_events: Vec<EventId>, num_slots: usize)
+//!         -> Result<(), Box<dyn std::error::Error>>;
+//!     fn next_step(&mut self, quantum: &Quantum, estimator: &dyn StateEstimator)
+//!         -> ScheduleDecision;
 //! }
 //! ```
 //!
-//! `next_step` receives the current `VirtualCounterState`, which provides
-//! per-counter rate estimates (EMA) and uncertainty values. This allows
-//! intelligent schedulers to prioritize counters with high uncertainty or
-//! interesting rate changes.
+//! `next_step` receives the current `Quantum` (raw samples + lazy aggregates)
+//! and a `StateEstimator` snapshot, which provides per-(tid, event) rate
+//! estimates and uncertainty values. The returned active set must not exceed
+//! `num_slots`.
 //!
 //! * Round-Robin Scheduler:
-//!   - Logic: Deterministic rotation through defined groups.
-//!   - Use Case: Baseline profiling, data collection for training.
+//!   - Logic: Activates a sliding window of `num_slots` events; the window
+//!     advances by `num_slots` positions each step, wrapping around the full
+//!     event list.
+//!   - Use Case: Baseline profiling, deterministic coverage.
+//!
+//! * Fixed Scheduler:
+//!   - Logic: Returns the same counter set every step; ignores the event universe
+//!     passed to `init`.
+//!   - Use Case: Used by the `sweep` command to hold a constant set of counters
+//!     for an entire run, producing a ground-truth measurement.
 //!
 //! * Random Scheduler:
-//!   - Logic: Picks 4 events at random each step.
+//!   - Logic: Samples `num_slots` events at random (without replacement) each step.
 //!   - Use Case: Comparison baseline.
+//!
+//! * LLM Schedulers (`StaticLlmScheduler`, `DynamicLlmScheduler`,
+//!   `WeightedRoundRobinLlmScheduler`):
+//!   - Logic: Query an external LLM to generate a cyclic schedule, optionally
+//!     refreshing it periodically based on the current estimator state.
+//!   - Use Case: Adaptive, human-readable scheduling driven by model intuition.
 //!
 //! ## DATA HANDLING
 //!
@@ -143,16 +173,19 @@
 //!
 //! ### Rate Calculation (Delta Math)
 //!
-//! Hardware counters are monotonic. Userspace must derive rates based on trigger
-//! type:
+//! Hardware counters hold **absolute** readings. `HardwareSampleSource` maintains
+//! per-(cpu, slot) baselines and computes deltas before producing `RawSample`s.
 //!
-//! * Intermediate Sample:
-//!   $\Delta = V_{t} - V_{t-1}$
+//! * Intermediate and Flush samples:
+//!   $\Delta = V_{\text{abs}} - V_{\text{baseline}}$; baseline is then advanced
+//!   to $V_{\text{abs}}$.
 //!
-//! * Flush Sample:
-//!   $\Delta = V_{t} - V_{t-1}$
+//! * Resume marker (`SAMPLE_TYPE_RESUME`):
+//!   Resets per-(cpu, slot) baselines to the current absolute counter values
+//!   without emitting a `RawSample`. This re-anchors deltas after a world-stop
+//!   reconfiguration.
 //!
 //! * Switch-IN:
-//!   $V_{t} = V_{t-1}$
-//!   (Re-baseline; no data emitted).
+//!   Records the current timestamp into `start_map` for the incoming thread.
+//!   No counter read or delta computation occurs at this point.
 //!

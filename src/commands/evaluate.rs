@@ -1,16 +1,25 @@
+//! Implementation of the `evaluate` subcommand: compare an estimated Perfetto trace against a ground-truth trace using nRMSE and coverage metrics.
+
 use crate::perfetto;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
+/// Per-event evaluation results collected for a single (event, thread) pair.
 struct EventMetrics {
+    /// Name of the hardware event as reported by `perf list`.
     event_name: String,
+    /// Thread ID the metrics apply to.
     tid: u32,
+    /// Normalised RMSE between estimated and ground-truth rate series; `None` when the ground-truth mean rate is zero.
     nrmse: Option<f64>,
+    /// Fraction of ground-truth time bins for which an estimated value exists (0.0–1.0).
     coverage: f64,
+    /// Mean ground-truth event rate in events per nanosecond, used to normalise the RMSE.
     mean_gt_rate_events_per_ns: f64,
 }
 
+/// Computes per-event nRMSE and coverage by binning both traces at `bin_ms` width, then prints results as text or JSON.
 pub fn evaluate(
     ground_truth: PathBuf,
     estimated: PathBuf,
@@ -137,6 +146,7 @@ pub fn evaluate(
     Ok(())
 }
 
+/// Shifts every timestamp in `series` so the earliest point across all tracks lands at t=0.
 fn normalize_timestamps<K: Eq + std::hash::Hash>(series: &mut HashMap<K, Vec<(u64, f64)>>) {
     let min_ts: u64 = series
         .values()
@@ -152,6 +162,7 @@ fn normalize_timestamps<K: Eq + std::hash::Hash>(series: &mut HashMap<K, Vec<(u6
     }
 }
 
+/// Averages `points` into fixed-width time bins of `bin_width_ns` nanoseconds, returning a map from bin index to mean value.
 fn bin_avg(points: &[(u64, f64)], bin_width_ns: u64) -> HashMap<u64, f64> {
     let mut acc: HashMap<u64, (f64, usize)> = HashMap::new();
     for &(ts, rate) in points {
@@ -165,6 +176,7 @@ fn bin_avg(points: &[(u64, f64)], bin_width_ns: u64) -> HashMap<u64, f64> {
         .collect()
 }
 
+/// Serialises `v` to a JSON number string, substituting `"null"` for non-finite values that are invalid in JSON.
 fn f64_to_json(v: f64) -> String {
     if v.is_finite() {
         v.to_string()
@@ -173,6 +185,7 @@ fn f64_to_json(v: f64) -> String {
     }
 }
 
+/// Prints evaluation results as a human-readable table to stdout.
 #[allow(clippy::too_many_arguments)]
 fn print_text(
     ground_truth: &std::path::Path,
@@ -234,6 +247,7 @@ fn print_text(
     println!("{cov_label}");
 }
 
+/// Prints evaluation results as a single JSON object to stdout.
 #[allow(clippy::too_many_arguments)]
 fn print_json(
     ground_truth: &std::path::Path,

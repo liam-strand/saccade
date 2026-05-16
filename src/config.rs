@@ -1,3 +1,10 @@
+//! Configuration loading and resolution for the Saccade profiler.
+//!
+//! Settings are merged from three layers in increasing priority:
+//! hard-coded defaults → TOML file → CLI overrides.
+//! The final merged state is a [`crate::config::ResolvedConfig`] that the rest of the
+//! application consumes.
+
 use crate::event::{EventId, EventRegistry};
 use crate::llm::LlmClient;
 use crate::scheduler::Scheduler;
@@ -16,18 +23,26 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+/// Selects which counter-rotation scheduler algorithm to use.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerKind {
+    /// Selects the next counter set uniformly at random each quantum.
     Random,
+    /// Cycles through all counter sets in a fixed order.
     RoundRobin,
+    /// Samples counters according to a learned probability distribution.
     Distribution,
+    /// Queries an LLM once at startup to produce a static counter schedule.
     StaticLlm,
+    /// Re-queries an LLM periodically to adapt the counter schedule at runtime.
     DynamicLlm,
+    /// Round-robins through LLM-assigned per-counter weights.
     WeightedRoundRobinLlm,
 }
 
 impl fmt::Display for SchedulerKind {
+    /// Formats the variant as the snake_case string used in TOML and CLI flags.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SchedulerKind::Random => write!(f, "random"),
@@ -40,31 +55,42 @@ impl fmt::Display for SchedulerKind {
     }
 }
 
+/// LLM connection and behaviour settings shared by all LLM-backed schedulers.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LlmConfig {
+    /// Base URL of the Ollama-compatible inference server.
     #[serde(default = "LlmConfig::default_base_url")]
     pub base_url: String,
+    /// Name of the model to request from the server.
     #[serde(default = "LlmConfig::default_model")]
     pub model: String,
+    /// How many scheduling quanta elapse between LLM re-queries (used by `DynamicLlm`).
     #[serde(default = "LlmConfig::default_update_interval")]
     pub update_interval: u32,
+    /// Optional free-text hint forwarded to the LLM to steer its counter selection.
     #[serde(default)]
     pub guidance: Option<String>,
 }
 
 impl LlmConfig {
+    /// Returns the default inference server URL.
     fn default_base_url() -> String {
         "http://dubliner.cs.northwestern.edu:11434".into()
     }
+
+    /// Returns the default model name.
     fn default_model() -> String {
         "gemma4".into()
     }
+
+    /// Returns the default number of quanta between LLM re-queries.
     fn default_update_interval() -> u32 {
         10
     }
 }
 
 impl Default for LlmConfig {
+    /// Constructs an `LlmConfig` with all default field values.
     fn default() -> Self {
         Self {
             base_url: Self::default_base_url(),
@@ -75,15 +101,20 @@ impl Default for LlmConfig {
     }
 }
 
+/// Selects which state-estimation algorithm fills in unobserved counter values.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum EstimatorKind {
+    /// Carries the last observed value forward unchanged until the counter is re-sampled.
     Propagate,
+    /// Applies an exponential moving average to smooth counter readings over time.
     Ema,
+    /// Uses a Kalman filter with optional cross-counter correlation to estimate unsampled values.
     Kalman,
 }
 
 impl fmt::Display for EstimatorKind {
+    /// Formats the variant as the snake_case string used in TOML and CLI flags.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EstimatorKind::Propagate => write!(f, "propagate"),
@@ -93,23 +124,35 @@ impl fmt::Display for EstimatorKind {
     }
 }
 
+/// Fully-resolved profiler configuration, ready for use by the rest of the application.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ResolvedConfig {
+    /// Which counter-rotation scheduler to instantiate.
     pub scheduler: SchedulerKind,
+    /// Which state-estimation algorithm to instantiate.
     pub estimator: EstimatorKind,
+    /// Nanoseconds between successive scheduler decisions (counter-rotation quantum).
     pub q_schedule_ns: u64,
+    /// Nanoseconds between hardware counter samples within a scheduling quantum.
     pub q_sample_ns: u64,
+    /// Nanoseconds between output flushes; `0` disables periodic flushing.
     pub q_output_ns: u64,
+    /// Tuning parameters for the Kalman filter estimator.
     pub kalman: KalmanConfig,
+    /// Tuning parameters for the EMA estimator.
     pub ema: EmaConfig,
+    /// Standard deviation of artificial Gaussian noise added to counter readings (0 = disabled).
     pub noise_stddev: f64,
+    /// Optional RNG seed for reproducible runs; `None` uses a random seed.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Settings for LLM-backed schedulers; ignored when no LLM scheduler is selected.
     #[serde(default)]
     pub llm: LlmConfig,
 }
 
 impl ResolvedConfig {
+    /// Constructs and returns the scheduler specified by `self.scheduler`, wired to the given event registry.
     pub fn build_scheduler(&self, registry: &EventRegistry) -> Box<dyn Scheduler> {
         match self.scheduler {
             SchedulerKind::Random => Box::new(RandomScheduler::default()),
@@ -167,6 +210,7 @@ impl ResolvedConfig {
         }
     }
 
+    /// Constructs and returns the state estimator specified by `self.estimator`, loading correlation data when applicable.
     pub fn build_estimator(&self, registry: &EventRegistry) -> Box<dyn StateEstimator> {
         match self.estimator {
             EstimatorKind::Propagate => Box::new(PropagateEstimator::new()),
@@ -187,32 +231,54 @@ impl ResolvedConfig {
     }
 }
 
+/// CLI-supplied overrides that take precedence over file-based configuration.
+///
+/// Each field is `None` when the user did not supply the corresponding flag,
+/// leaving the file or default value in effect.
 pub struct CliOverrides {
+    /// Overrides the scheduler algorithm.
     pub scheduler: Option<SchedulerKind>,
+    /// Overrides the state estimator algorithm.
     pub estimator: Option<EstimatorKind>,
+    /// Overrides the scheduling quantum in nanoseconds.
     pub q_schedule_ns: Option<u64>,
+    /// Overrides the sampling quantum in nanoseconds.
     pub q_sample_ns: Option<u64>,
+    /// Overrides the output flush quantum in nanoseconds.
     pub q_output_ns: Option<u64>,
+    /// Overrides the noise standard deviation.
     pub noise_stddev: Option<f64>,
+    /// Overrides the RNG seed.
     pub seed: Option<u64>,
+    /// Overrides the LLM guidance string.
     pub guidance: Option<String>,
 }
 
-/// Single source of truth for default values, fed into the config builder via Serialize.
+/// Hard-coded baseline values serialized as the lowest-priority config layer.
 #[derive(serde::Serialize)]
 struct Defaults {
+    /// Default scheduler variant name (must be a valid `SchedulerKind` snake_case string).
     scheduler: &'static str,
+    /// Default estimator variant name (must be a valid `EstimatorKind` snake_case string).
     estimator: &'static str,
+    /// Default scheduling quantum in nanoseconds (10 ms).
     q_schedule_ns: u64,
+    /// Default sampling quantum in nanoseconds (100 µs).
     q_sample_ns: u64,
+    /// Default output flush quantum in nanoseconds (0 = disabled).
     q_output_ns: u64,
+    /// Default noise standard deviation (0 = no noise).
     noise_stddev: f64,
+    /// Default Kalman filter configuration.
     kalman: KalmanConfig,
+    /// Default EMA configuration.
     ema: EmaConfig,
+    /// Default LLM configuration.
     llm: LlmConfig,
 }
 
 impl Default for Defaults {
+    /// Constructs a `Defaults` with all baseline values.
     fn default() -> Self {
         Self {
             scheduler: "round_robin",
@@ -228,6 +294,9 @@ impl Default for Defaults {
     }
 }
 
+/// Merges defaults, the TOML file at `config_path`, and CLI overrides into a `ResolvedConfig`.
+///
+/// When `explicit` is `false` the TOML file is optional; when `true` its absence is an error.
 fn build_config(
     config_path: PathBuf,
     explicit: bool,
@@ -253,10 +322,12 @@ fn build_config(
         .try_deserialize::<ResolvedConfig>()
 }
 
-/// Load a `ResolvedConfig` by merging three layers:
-/// - P1: hard-coded defaults (from `Defaults`)
-/// - P2: TOML config file (optional unless `explicit = true`)
-/// - P3: CLI overrides (`ov` fields; `None` = no-op)
+/// Loads a [`ResolvedConfig`] by merging three layers in increasing priority:
+/// hard-coded defaults → TOML file → CLI overrides.
+///
+/// `path` defaults to `saccade.toml` in the current directory when `None`.
+/// When `explicit` is `true` and the file does not exist, an `io::ErrorKind::NotFound`
+/// error is returned; otherwise a missing file is silently skipped.
 pub fn load_config(
     path: Option<PathBuf>,
     explicit: bool,
@@ -281,6 +352,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Returns a `CliOverrides` with every field set to `None` (no overrides applied).
     fn no_overrides() -> CliOverrides {
         CliOverrides {
             scheduler: None,
@@ -294,6 +366,7 @@ mod tests {
         }
     }
 
+    /// Writes `content` to a uniquely-named temp file and returns its path.
     fn write_toml(content: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "saccade_test_{}.toml",

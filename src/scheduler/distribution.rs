@@ -1,15 +1,21 @@
+//! Uncertainty-driven scheduler: prioritizes events with the highest mean estimation uncertainty.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::collections::HashMap;
 
+/// Selects the `num_slots` events whose per-thread uncertainty is highest on average, maximizing information gain.
 pub struct DistributionScheduler {
+    /// Full set of candidate events, set by `init`.
     events: Vec<EventId>,
+    /// Number of counters to activate per step, overridden by `init`.
     num_slots: usize,
 }
 
 impl DistributionScheduler {
+    /// Creates a scheduler with an empty event list and a default slot count of 4.
     fn new() -> Self {
         Self {
             events: Vec::new(),
@@ -77,17 +83,21 @@ mod tests {
     use super::*;
     use crate::state::{CounterEstimate, EstimateKey};
 
+    /// Minimal `StateEstimator` that stores a fixed map of uncertainty values for testing.
     struct MockEstimator {
+        /// Stored estimates keyed by `(tid, event_id)`.
         estimates: HashMap<EstimateKey, CounterEstimate>,
     }
 
     impl MockEstimator {
+        /// Creates an estimator with no entries.
         fn new() -> Self {
             Self {
                 estimates: HashMap::new(),
             }
         }
 
+        /// Inserts a `CounterEstimate` with the given `uncertainty` for `(tid, event_id)`.
         fn add(&mut self, tid: u32, event_id: EventId, uncertainty: f64) {
             self.estimates.insert(
                 (tid, event_id),
@@ -122,6 +132,7 @@ mod tests {
         }
     }
 
+    /// Returns an empty quantum suitable for passing to schedulers under test.
     fn empty_quantum() -> Quantum {
         Quantum::new(vec![], 0, 0)
     }

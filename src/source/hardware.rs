@@ -1,3 +1,5 @@
+//! eBPF-backed `SampleSource` that reads hardware performance counters via the BPF ring buffer.
+
 use crate::event::{EventId, EventRegistry};
 use crate::hardware_counters::HardwareCounters;
 use crate::sample::{MAX_COUNTERS, MAX_CPUS, RawSample, SampleType, WireSample};
@@ -14,23 +16,33 @@ use tracing::debug;
 
 /// eBPF-backed sample source.
 ///
-/// Collects absolute counter readings from the BPF ringbuffer, computes
-/// per-(cpu,slot) deltas in userspace, and returns typed `RawSample` values.
+/// Collects absolute counter readings from the BPF ring buffer, computes
+/// per-(cpu, slot) deltas in userspace, and returns typed `RawSample` values.
 pub struct HardwareSampleSource {
+    /// Loaded and attached BPF skeleton owning all maps and programs.
     skel: crate::sampler::SamplerSkel<'static>,
+    /// Ring buffer that delivers `WireSample` structs from BPF to userspace.
     ringbuf: libbpf_rs::RingBuffer<'static>,
+    /// Manages perf-event fds and their BPF map configuration for each counter slot.
     hw_counters: HardwareCounters,
+    /// Perf-event links driving the per-CPU timer BPF program; kept alive here.
     _timer_links: Vec<libbpf_rs::Link>,
+    /// Receives `WireSample` values forwarded from the ring-buffer callback.
     wire_rx: Receiver<WireSample>,
     /// Optional forwarding channel for raw wire samples (e.g. to CSV logger).
     logger_tx: Option<SyncSender<WireSample>>,
-    /// Per-(cpu, slot) baseline absolute counter values.
-    /// Updated on every sample; reset on RESUME markers.
+    /// Per-(cpu, slot) baseline absolute counter values; updated each sample, reset on RESUME.
     baselines: [[u64; MAX_COUNTERS]; MAX_CPUS],
+    /// Timestamp of the previous `collect()` call, used to compute `elapsed_ns`.
     last_collect: Instant,
 }
 
 impl HardwareSampleSource {
+    /// Attach eBPF programs to `target_tgid`, open hardware counters, and start the timer.
+    ///
+    /// `sample_period_ns` sets the minimum interval the BPF program enforces between
+    /// consecutive samples for the same CPU. `logger_tx`, if provided, receives a copy
+    /// of every raw `WireSample` before delta conversion.
     pub fn new(
         target_tgid: u32,
         registry: EventRegistry,

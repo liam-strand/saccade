@@ -1,3 +1,5 @@
+//! Simulation-backed `SampleSource` that produces synthetic samples from pre-recorded rate profiles.
+
 use std::collections::HashMap;
 
 use crate::event::EventId;
@@ -11,22 +13,29 @@ use rand_distr::{Distribution, Normal};
 ///
 /// Generates synthetic `RawSample` values from time-varying per-thread event rate profiles
 /// (typically loaded from a sweep Perfetto trace). No hardware interaction.
-///
-/// Unlike the old `VirtualBackend`, this does not construct fake `WireSample`
-/// structs — it produces `RawSample` directly.
 pub struct VirtualSampleSource {
+    /// Time-varying per-(event, thread) rate data used to generate samples.
     rates: TimeVaryingRates,
+    /// Fractional standard deviation of Gaussian noise added to each sample's count.
     noise_stddev: f64,
+    /// Events currently enabled; updated by `apply_schedule`.
     active_set: Vec<EventId>,
+    /// Duration of each simulated quantum in nanoseconds.
     quantum_ns: u64,
+    /// RNG used for Gaussian noise sampling.
     rng: StdRng,
+    /// Simulated wall-clock time at the start of the current quantum.
     current_time_ns: u64,
+    /// Number of counter slots exposed to the scheduler.
     num_slots: usize,
-    /// Pre-computed: event_id → sorted list of tids that have data for it.
+    /// Pre-computed map from event_id to sorted list of tids that have rate data for it.
     tids_by_event: HashMap<EventId, Vec<u32>>,
 }
 
 impl VirtualSampleSource {
+    /// Construct a `VirtualSampleSource` from a rate profile.
+    ///
+    /// Pass `seed: Some(n)` for reproducible runs; `None` seeds from the OS.
     pub fn new(
         rates: TimeVaryingRates,
         noise_stddev: f64,
@@ -111,10 +120,12 @@ impl SampleSource for VirtualSampleSource {
     }
 }
 
-/// Per-(event, thread) time-varying rates.
-/// Key: (event_id, tid). For single-threaded data, tid = 0.
-/// Each entry is a sorted Vec of (timestamp_ns, rate_events_per_ns).
+/// Per-(event, thread) time-varying event rates for simulation.
+///
+/// Keys are `(event_id, tid)`; for single-threaded data use `tid = 0`.
+/// Each value is a sorted `Vec` of `(timestamp_ns, rate_events_per_ns)` breakpoints.
 pub struct TimeVaryingRates {
+    /// Sorted breakpoint series keyed by (event_id, tid).
     pub series: HashMap<(EventId, u32), Vec<(u64, f64)>>,
 }
 

@@ -1,3 +1,5 @@
+//! Pluggable counter-rotation policy: trait definition and decision type.
+
 pub mod distribution;
 pub mod dynamic_llm;
 pub mod fixed;
@@ -22,18 +24,16 @@ pub trait Scheduler {
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>>;
 
-    /// Calculate the next set of events to monitor.
+    /// Return the next set of events to monitor, given the completed quantum and estimator state.
     ///
-    /// Receives the full `Quantum` (raw samples + lazy aggregates) and the current
-    /// estimator state (rate estimates + uncertainty). The active set returned must
-    /// not exceed `num_slots` (as passed to `init`).
+    /// The returned `active_events` must not exceed `num_slots` (as passed to `init`).
     fn next_step(&mut self, quantum: &Quantum, estimator: &dyn StateEstimator) -> ScheduleDecision;
 }
 
-/// Output from the scheduler: what should we do next?
+/// Output from a scheduler step: which counters to activate and for how long.
 pub struct ScheduleDecision {
-    /// The set of events to activate for the next window.
+    /// Events to activate for the next quantum; length must not exceed `num_slots`.
     pub active_events: Vec<EventId>,
-    /// Optional override of the default step duration.
+    /// Overrides the default quantum duration when `Some`; uses the profiler default when `None`.
     pub duration: Option<Duration>,
 }

@@ -1,3 +1,5 @@
+//! Perfetto trace sink that writes estimator snapshots as counter tracks.
+
 use crate::event::EventId;
 use crate::perfetto::PerfettoWriter;
 use crate::quantum::Quantum;
@@ -7,21 +9,23 @@ use crate::state::StateEstimator;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Perfetto trace sink. Emits per-(thread, event) counter tracks from the
-/// state estimator's current snapshot.
-///
-/// Output cadence is decoupled from the scheduling quantum: the sink only
-/// writes a snapshot when at least `output_period_ns` has elapsed since the
-/// previous write. `output_period_ns = 0` means "emit every quantum".
+/// Emits per-(thread, event) counter tracks to a Perfetto trace file from the
+/// state estimator's current snapshot. Output cadence is decoupled from the
+/// scheduling quantum: a snapshot is written only when at least `output_period_ns`
+/// has elapsed since the previous write; `output_period_ns = 0` emits every quantum.
 pub struct PerfettoSink {
+    /// Underlying Perfetto protobuf writer.
     writer: PerfettoWriter,
-    /// tid → (tgid, task_name) — accumulated across quantums for track registration.
+    /// Maps tid → `(tgid, task_name)`, accumulated across quantums for track registration.
     thread_meta: HashMap<u32, (u32, String)>,
+    /// Minimum nanoseconds between successive trace snapshots.
     output_period_ns: u64,
+    /// Timestamp of the most recent emitted snapshot, or `None` before the first.
     last_emit_ns: Option<u64>,
 }
 
 impl PerfettoSink {
+    /// Open a Perfetto trace at `path` and configure the output throttle period.
     pub fn new(
         path: impl AsRef<Path>,
         event_names: Vec<String>,

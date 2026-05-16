@@ -1,16 +1,25 @@
+//! Hardcoded test scheduler cycling through a fixed set of AMD performance events.
+
 use crate::event::{EventId, EventRegistry};
 use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::time::Duration;
 
+/// Round-robin scheduler over a hardcoded subset of AMD events, used for manual integration testing.
 pub struct TestScheduler {
+    /// Resolved IDs of the target events looked up from the registry at construction time.
     events: Vec<EventId>,
+    /// Number of counters to activate per step, overridden by `init`.
     num_slots: usize,
+    /// Index of the first event in `events` to activate in the next step.
     current_idx: usize,
 }
 
 impl TestScheduler {
+    /// Resolves a fixed list of AMD event names from `registry` and builds the scheduler.
+    ///
+    /// Events not found in the registry are skipped with a warning printed to stderr.
     pub fn new(registry: &EventRegistry) -> Self {
         let target_names = vec![
             "all_data_cache_accesses",

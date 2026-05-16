@@ -1,16 +1,24 @@
+//! Last-observation-carried-forward state estimator.
+//!
+//! Each (tid, event_id) pair simply holds the most recent raw measurement.
+//! Uncertainty is always 0.0 after the first observation and never grows —
+//! useful as a baseline or for offline replay where every quantum is observed.
+
 use crate::event::EventId;
 use crate::state::{CounterEstimate, EstimateKey, StateEstimator};
 use std::collections::HashMap;
 
-/// Last-observation-carried-forward estimator.
+/// Last-observation-carried-forward estimator; never applies time-decay or smoothing.
 ///
 /// On `measurement_update`, replaces the stored rate with the raw measurement.
 /// On `time_update`, does nothing — uncertainty stays at 0 indefinitely.
 pub struct PropagateEstimator {
+    /// Per-(tid, event_id) snapshot storage; grows on first observation.
     estimates: HashMap<EstimateKey, CounterEstimate>,
 }
 
 impl PropagateEstimator {
+    /// Create a new estimator with no tracked state.
     pub fn new() -> Self {
         Self {
             estimates: HashMap::new(),

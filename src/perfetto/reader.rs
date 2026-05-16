@@ -1,24 +1,21 @@
+//! Reading Perfetto proto binary trace files produced by `PerfettoWriter`.
+
 use super::trace::read_trace_packets;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
-/// Per-(event, thread) time-series of rates.
-/// Key: (event_name, tid). For traces with no thread info, tid = 0.
-/// Each entry is a sorted Vec of (timestamp_ns, rate_events_per_ns).
+/// Per-(event, thread) time-series of rates decoded from a Perfetto trace.
 pub struct RateTimeSeries {
+    /// Maps `(event_name, tid)` to a timestamp-sorted list of `(timestamp_ns, rate_events_per_ns)` samples.
     pub series: HashMap<(String, u32), Vec<(u64, f64)>>,
 }
 
-/// Parse a `.perfetto-trace` written by `PerfettoWriter` and extract
-/// per-thread rate time-series for each event.
+/// Parse a `.perfetto-trace` written by `PerfettoWriter` and extract per-thread rate time-series.
 ///
-/// Handles two track name formats:
-/// - New: counter track named `{event_name}/rate` with `parent_uuid` pointing to a thread track
-///   (thread track has a `ThreadDescriptor` with a `tid` field) → key = (event_name, tid)
-/// - Old: counter track named `{event_name}/rate` with no thread parent → key = (event_name, 0)
-///
-/// `{event_name}/uncertainty` tracks are ignored.
+/// Counter tracks named `{event_name}/rate` are identified; their `parent_uuid` is followed to a
+/// thread track bearing a `ThreadDescriptor` to resolve the `tid`.  If no thread parent is found,
+/// `tid` defaults to `0` as a defensive fallback.  Tracks with other name suffixes are ignored.
 pub fn read_rate_timeseries(path: impl AsRef<Path>) -> io::Result<RateTimeSeries> {
     let data = std::fs::read(path)?;
     let packets = read_trace_packets(&data)?;

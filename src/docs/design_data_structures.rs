@@ -9,12 +9,11 @@
 //!
 //! ## 2. Data Channel: Ring Buffer
 //!
-//! We propose using `BPF_MAP_TYPE_RINGBUF` (available since Linux 5.8) instead of the older `BPF_MAP_TYPE_PERF_EVENT_ARRAY`.
+//! We use `BPF_MAP_TYPE_RINGBUF` (available since Linux 5.8) instead of the older `BPF_MAP_TYPE_PERF_EVENT_ARRAY`.
 //!
 //! *   **Why**:
 //!     *   **Memory Efficiency**: Shared memory region, less copying.
-//!     *   **Ordering**: Strict ordering of events across all CPUs.
-//!     *   **Performance**: continuous polling is more efficient.
+//!     *   **Performance**: Continuous polling is more efficient than per-event wakeups.
 //!
 //! ### BPF Definition
 //!
@@ -27,42 +26,50 @@
 //!
 //! ### Sample Structure
 //!
-//! The `Sample` struct must be ABI-compatible between C and Rust.
+//! The `saccade_sample` struct is ABI-compatible between C (`sampler.h`) and
+//! Rust (`WireSample` in `src/sample.rs`). Counters hold **absolute** perf
+//! counter readings; delta computation happens in userspace.
 //!
 //! ```c
 //! // In sampler.h
 //!
 //! enum SampleType {
-//!     SAMPLE_TYPE_INTERMEDIATE = 0,
-//!     SAMPLE_TYPE_FLUSH = 1,
+//!     SAMPLE_TYPE_INTERMEDIATE = 0, // Periodic in-flight sample
+//!     SAMPLE_TYPE_FLUSH = 1,        // Context-switch-out sample
+//!     SAMPLE_TYPE_RESUME = 2,       // Counter baseline reset; produces no RawSample
 //! };
 //!
 //! struct saccade_sample {
-//!     __u64 timestamp_ns;
-//!     __u64 duration_ns;
-//!     __u32 pid;
-//!     __u32 cpu_id;
-//!     __u32 type;          // enum SampleType
-//!     __u32 pad0;          // Explicit padding for alignment
-//!     __u64 values[MAX_COUNTERS]; // 4 metrics
-//!     __u64 events[MAX_COUNTERS]; // Event IDs corresponding to the values
-//!     char task[TASK_COMM_LEN];   // Task name
+//!     __u64 timestamp_ns;             // Kernel monotonic time at sample emission
+//!     __u64 duration_ns;              // Interval duration (0 for RESUME)
+//!     __u32 pid;                      // TGID (userspace process ID)
+//!     __u32 cpu_id;                   // Logical CPU index
+//!     __u32 type;                     // enum SampleType discriminant
+//!     __u32 tid;                      // Kernel thread ID (task_struct->pid)
+//!     __u64 counters[MAX_COUNTERS];   // Absolute perf counter readings (not deltas)
+//!     __u64 events[MAX_COUNTERS];     // active_counter_ids at sample time
+//!     char task[TASK_COMM_LEN];       // Null-terminated task comm string
 //! };
 //! ```
 //!
-//! ## 3. Control Channel: Configuration Map
+//! ## 3. Control Channel: Global Variables
 //!
-//! To control the "minimum sample rate" and other parameters, we use Global Variables (BSS).
-//!
-//! ### BPF Definition (Global Variables)
+//! Userspace controls sampling behavior by writing to BPF global variables
+//! (exposed via the libbpf-rs `.bss` and `.data` map interfaces).
 //!
 //! ```c
 //! // In sampler.bpf.c
 //!
-//! volatile __u64 min_sample_interval_ns = 1000000; // Default 1ms
-//! volatile __u32 target_tgid = 0;
-//! volatile __u32 active_counter_ids[MAX_COUNTERS] = {0, 0, 0, 0};
+//! volatile __u64 min_sample_interval_ns = 1000000; // Minimum ns between INTERMEDIATE samples (default 1 ms)
+//! volatile __u32 target_tgid = 0;                  // TGID to trace; 0 = trace all
+//! volatile __u32 active_counter_ids[MAX_COUNTERS];  // Logical event IDs for each counter slot
+//! volatile bool  tracking = false;                  // Master enable; BPF hooks are no-ops while false
+//! volatile bool  stopped[MAX_CPUS];                 // Per-CPU stopped flags; set when tracking=false
 //! ```
+//!
+//! `tracking` and `stopped` underpin the world-stop mechanism: userspace sets
+//! `tracking = false`, spins until all `stopped[cpu]` flags are true, reconfigures
+//! the counter slots, then sets `tracking = true` to resume.
 //!
 //! ## 4. Hardware Counters Map
 //!

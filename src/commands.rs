@@ -1,3 +1,5 @@
+//! Entry points for each Saccade subcommand, plus shared helpers used across them.
+
 mod evaluate;
 mod generate;
 mod run;
@@ -20,6 +22,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing::debug;
 
+/// Loads an `EventLibrary` from a JSON file, or generates one on-the-fly by calling `perf list` if no path is given.
 pub(crate) fn load_library(path: Option<PathBuf>) -> std::io::Result<EventLibrary> {
     match path {
         Some(p) => {
@@ -35,6 +38,7 @@ pub(crate) fn load_library(path: Option<PathBuf>) -> std::io::Result<EventLibrar
     }
 }
 
+/// Spawns the target process with `PTRACE_TRACEME` set so the parent can attach before the child runs.
 pub(crate) fn spawn_child(target: &[String]) -> std::io::Result<std::process::Child> {
     unsafe {
         Command::new(&target[0])

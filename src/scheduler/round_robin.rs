@@ -1,12 +1,18 @@
+//! Round-robin scheduler: cycles through all events in fixed-size windows.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
 use crate::state::StateEstimator;
 
+/// Activates successive `num_slots`-wide windows of the event list, wrapping around on each step.
 pub struct RoundRobinScheduler {
+    /// Full ordered list of events to rotate through, set by `init`.
     events: Vec<EventId>,
+    /// Number of counters to activate per step, overridden by `init`.
     num_slots: usize,
+    /// Index into `events` of the first counter to activate in the next step.
     current: usize,
 }
 
@@ -17,6 +23,7 @@ impl Default for RoundRobinScheduler {
 }
 
 impl RoundRobinScheduler {
+    /// Creates a scheduler with an empty event list and a default slot count of 4.
     pub fn new() -> Self {
         Self {
             events: Vec::new(),

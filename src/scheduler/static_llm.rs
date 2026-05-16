@@ -1,3 +1,6 @@
+//! Scheduler that generates one fixed cyclic counter schedule via an LLM at startup and then
+//! replays it indefinitely without further model calls.
+
 use crate::event::EventId;
 use crate::llm::LlmClient;
 use crate::quantum::Quantum;
@@ -6,17 +9,26 @@ use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::time::Duration;
 
+/// LLM-based scheduler whose counter rotation schedule is generated once at `init` and never changed.
 pub struct StaticLlmScheduler {
+    /// HTTP client used to call the LLM.
     client: LlmClient,
+    /// Metadata for every available hardware event: `(id, name, description)`.
     event_info: Vec<(EventId, String, String)>,
+    /// The cyclic schedule returned by the LLM.
     schedule: Vec<ScheduleStep>,
+    /// Index of the next step to serve from `schedule`.
     step_idx: usize,
+    /// All valid event IDs as reported by `init`.
     all_events: Vec<EventId>,
+    /// Number of hardware counter slots the profiler can activate simultaneously.
     num_slots: usize,
+    /// Optional natural-language guidance forwarded to the LLM system message.
     guidance: Option<String>,
 }
 
 impl StaticLlmScheduler {
+    /// Create a new scheduler; `init` must be called before `next_step` to populate the schedule.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
@@ -35,6 +47,7 @@ impl StaticLlmScheduler {
 }
 
 impl Scheduler for StaticLlmScheduler {
+    /// Call the LLM to generate the cyclic schedule; must complete before `next_step` is called.
     fn init(
         &mut self,
         all_events: Vec<EventId>,
@@ -65,6 +78,7 @@ impl Scheduler for StaticLlmScheduler {
         Ok(())
     }
 
+    /// Return the next step from the fixed schedule, wrapping around to the beginning when exhausted.
     fn next_step(
         &mut self,
         _quantum: &Quantum,
@@ -88,11 +102,14 @@ mod tests {
     use crate::state::{CounterEstimate, EstimateKey};
     use std::collections::HashMap;
 
+    /// A `StateEstimator` stub that always reports zero rate and uncertainty.
     struct NullEstimator {
+        /// Empty estimate map; never populated by the stub.
         estimates: HashMap<EstimateKey, CounterEstimate>,
     }
 
     impl NullEstimator {
+        /// Create an estimator with no observations.
         fn new() -> Self {
             Self {
                 estimates: HashMap::new(),
@@ -114,6 +131,7 @@ mod tests {
         }
     }
 
+    /// Produce a `Quantum` with no samples, suitable as a placeholder argument in scheduler tests.
     fn empty_quantum() -> Quantum {
         Quantum::new(vec![], 0, 0)
     }

@@ -2,6 +2,7 @@ use crate::config::{EstimatorKind, SchedulerKind};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Top-level CLI entry point holding global flags and the active subcommand.
 #[derive(Parser)]
 #[command(name = "saccade")]
 #[command(about = "Saccade Performance Tool", long_about = None)]
@@ -14,10 +15,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
+    /// Subcommand to execute.
     #[command(subcommand)]
     pub command: Commands,
 }
 
+/// Available saccade subcommands.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Generate performance library and save to file
@@ -25,7 +28,7 @@ pub enum Commands {
         /// Output file path
         output: PathBuf,
     },
-    /// Run saccade
+    /// Profile a target process with dynamic counter rotation
     Run {
         /// Use library from specified file
         #[arg(short, long)]

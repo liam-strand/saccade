@@ -1,3 +1,5 @@
+//! Implementation of the `sweep` subcommand: exhaustively measure every hardware event by cycling the target through fixed 4-counter batches.
+
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;

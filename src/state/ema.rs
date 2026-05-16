@@ -1,10 +1,21 @@
+//! Exponential-moving-average state estimator.
+//!
+//! Each (tid, event_id) pair maintains a rate EMA and a linearly-growing
+//! uncertainty score. Uncertainty resets to 0 on each observed quantum and
+//! grows at `uncertainty_growth_rate` events/ns² during unobserved quanta.
+
 use crate::event::EventId;
 use crate::state::{CounterEstimate, EstimateKey, StateEstimator};
 use std::collections::HashMap;
 
+/// Configuration for the EMA-based state estimator.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmaConfig {
+    /// Smoothing factor applied to new rate observations; higher values track
+    /// changes faster at the cost of more variance.
     pub alpha: f64,
+    /// Rate at which uncertainty grows per nanosecond of no observation
+    /// (units: uncertainty/ns, in [0, 1]).
     pub uncertainty_growth_rate: f64,
 }
 
@@ -17,18 +28,23 @@ impl Default for EmaConfig {
     }
 }
 
-/// EMA-based state estimator.
+/// EMA-based state estimator; implements [`StateEstimator`] for all tracked (tid, event) pairs.
 pub struct VirtualCounterState {
+    /// Per-(tid, event_id) snapshot storage; grows on first observation.
     estimates: HashMap<EstimateKey, CounterEstimate>,
+    /// EMA smoothing factor (mirrors `EmaConfig::alpha`).
     alpha: f64,
+    /// Uncertainty growth rate per nanosecond (mirrors `EmaConfig::uncertainty_growth_rate`).
     uncertainty_growth_rate: f64,
 }
 
 impl VirtualCounterState {
+    /// Create a new estimator with default EMA parameters.
     pub fn new() -> Self {
         Self::with_config(EmaConfig::default())
     }
 
+    /// Create a new estimator with the supplied configuration.
     pub fn with_config(config: EmaConfig) -> Self {
         Self {
             estimates: HashMap::new(),

@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 /// Sparse off-diagonal correlation data loaded from a calibration JSON file.
 ///
-/// Stores only pairs `(i, j)` with `i < j` and `|r| >= threshold` so that
+/// Stores only pairs `(i, j)` with `i < j` and `|r| > 1e-9` so that
 /// iteration over non-zero entries is O(non-zero) rather than O(n²).
 #[derive(Debug, Default)]
 pub struct CorrelationData {
@@ -51,21 +51,29 @@ pub struct CorrelationData {
 }
 
 impl CorrelationData {
+    /// Return the Pearson r for an event index pair, regardless of argument order; 0.0 if absent.
     fn get(&self, a: usize, b: usize) -> f64 {
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
         self.correlations.get(&(lo, hi)).copied().unwrap_or(0.0)
     }
 
+    /// Map an `EventId` to its index in `variances` and the correlation matrix.
     fn idx(&self, event_id: EventId) -> Option<usize> {
         self.event_index.get(&event_id).copied()
     }
 }
 
+/// Configuration for the multivariate Kalman filter estimator.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct KalmanConfig {
+    /// Process noise added to `P[i,i]` per nanosecond of elapsed time (units: (events/ns)²/ns).
     pub process_noise_per_ns: f64,
+    /// Floor applied to measurement variance `R` to prevent division by near-zero values.
     pub min_measurement_variance: f64,
+    /// Initial diagonal value of `P` when a new event is introduced (units: (events/ns)²).
     pub initial_variance: f64,
+    /// Reference variance used to normalize `P[i,i]` into a [0, 1] uncertainty score;
+    /// a diagonal entry equal to this value maps to uncertainty ≈ 0.5.
     pub uncertainty_reference_variance: f64,
     /// Path to a `correlation.json` file produced by `python/correlation.py`.
     /// When set, off-diagonal P entries are seeded on event introduction
@@ -80,6 +88,7 @@ pub struct KalmanConfig {
 }
 
 impl KalmanConfig {
+    /// Returns the default `correlation_process_noise_scale` (0.1) for use with `#[serde(default = ...)]`.
     fn default_correlation_process_noise_scale() -> f64 {
         0.1
     }
@@ -98,22 +107,30 @@ impl Default for KalmanConfig {
     }
 }
 
+/// Per-thread multivariate Kalman filter state.
 #[derive(Default)]
 struct ThreadFilter {
+    /// Maps `EventId` to its column/row index in `x` and `p`.
     event_index: HashMap<EventId, usize>,
+    /// Inverse of `event_index`; maps index back to `EventId`.
     index_event: Vec<EventId>,
+    /// State vector: estimated rate (events/ns) per event.
     x: Vec<f64>,
+    /// Covariance matrix stored as a row-major `Vec<Vec<f64>>`.
     p: Vec<Vec<f64>>,
-    /// Timestamp of most recent `measurement_update` per event (for reporting).
+    /// Timestamp (ns) of the most recent `measurement_update` per event; used only for reporting.
     last_ts: Vec<u64>,
     /// Time up to which `P[i,i]` reflects accumulated process noise.
     /// Advanced by `predict_event_to`; never moves backward.
     last_predicted_ns: Vec<u64>,
+    /// Cumulative number of physical samples seen per event.
     sample_counts: Vec<u64>,
+    /// Within-quantum stddev of per-sample rates from the most recent measurement per event.
     last_stddev: Vec<f64>,
 }
 
 impl ThreadFilter {
+    /// Return the index for `event_id`, inserting a new state entry if it has not been seen before.
     fn ensure_event(
         &mut self,
         event_id: EventId,
@@ -173,11 +190,10 @@ impl ThreadFilter {
     }
 
     /// Inflate `P[event_idx, event_idx]` by `Q · (target_ns − last_predicted_ns[event_idx])`.
-    /// Idempotent; never moves the event's clock backward.
     ///
-    /// NOTE: Only inflates the single event's diagonal. Correct under `F = I`
-    /// and diagonal `Q`. For off-diagonal `Q`, this must become a full-filter
-    /// predict keyed on a thread-level clock — see module docs.
+    /// Idempotent; never moves the event's clock backward. Only touches the single
+    /// diagonal entry — correct under `F = I` and diagonal `Q`. Off-diagonal process
+    /// noise is handled separately by `quantum_step`.
     fn predict_event_to(&mut self, event_idx: usize, target_ns: u64, config: &KalmanConfig) {
         if target_ns > self.last_predicted_ns[event_idx] {
             let delta = target_ns - self.last_predicted_ns[event_idx];
@@ -186,6 +202,10 @@ impl ThreadFilter {
         }
     }
 
+    /// Apply a scalar Kalman measurement update for `event_idx` with observation `z` and noise `r`.
+    ///
+    /// Uses a one-hot `H` (only `event_idx` observed), propagating the gain through the full
+    /// state vector and covariance matrix, then symmetrizes `P` to suppress floating-point drift.
     #[allow(clippy::needless_range_loop)]
     fn scalar_update(&mut self, event_idx: usize, z: f64, r: f64) {
         let n = self.x.len();
@@ -216,14 +236,21 @@ impl ThreadFilter {
     }
 }
 
+/// Multivariate Kalman filter estimator; maintains one `ThreadFilter` per thread.
 pub struct KalmanFilterEstimator {
+    /// Per-thread filter state, keyed by thread id.
     threads: HashMap<u32, ThreadFilter>,
+    /// Denormalized snapshot of the latest `CounterEstimate` per (tid, event_id), returned by
+    /// `all_estimates` and the `rate`/`uncertainty` accessors.
     snapshots: HashMap<EstimateKey, CounterEstimate>,
+    /// Filter tuning parameters.
     config: KalmanConfig,
+    /// Optional calibration-derived cross-event correlations; `None` when not loaded.
     correlation: Option<CorrelationData>,
 }
 
 impl KalmanFilterEstimator {
+    /// Create a new estimator with default Kalman parameters and no correlation data.
     pub fn new() -> Self {
         Self::with_config(KalmanConfig::default())
     }
@@ -342,10 +369,12 @@ impl KalmanFilterEstimator {
         });
     }
 
+    /// Return a reference to the active configuration.
     pub fn config(&self) -> &KalmanConfig {
         &self.config
     }
 
+    /// Convert a covariance diagonal value to a [0, 1] uncertainty score.
     fn uncertainty_from_variance(&self, var: f64) -> f64 {
         let v = var.max(0.0);
         let denom = v + self.config.uncertainty_reference_variance;
@@ -356,6 +385,7 @@ impl KalmanFilterEstimator {
         }
     }
 
+    /// Rebuild the `snapshots` map for `tid` from the current filter state.
     fn refresh_snapshots(&mut self, tid: u32) {
         let Some(filter) = self.threads.get(&tid) else {
             return;

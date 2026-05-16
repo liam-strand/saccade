@@ -1,3 +1,5 @@
+//! CSV output sink that records one row per raw sample.
+
 use crate::event::EventId;
 use crate::quantum::Quantum;
 use crate::sink::OutputSink;
@@ -6,13 +8,15 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// CSV sink. Writes one row per `RawSample` with raw counts and durations.
+/// Writes one row per `RawSample` with raw counts and durations.
 /// Rate computation is left to the consumer; this preserves the full raw data.
 pub struct CsvSink {
+    /// Buffered writer for the output CSV file.
     writer: BufWriter<File>,
 }
 
 impl CsvSink {
+    /// Create a new CSV sink at `path`, writing the header row immediately.
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
