@@ -27,7 +27,8 @@
 //! ### Sample Structure
 //!
 //! The `saccade_sample` struct is ABI-compatible between C (`sampler.h`) and
-//! Rust (`WireSample` in `src/sample.rs`). Counters hold **absolute** perf
+//! Rust (`WireSample` in `src/sample.rs`). In fact, `WireSample` is generated
+//! from `saccade_sample` at compile-time! Counters hold **absolute** perf
 //! counter readings; delta computation happens in userspace.
 //!
 //! ```c
@@ -48,7 +49,7 @@
 //!     __u32 tid;                      // Kernel thread ID (task_struct->pid)
 //!     __u64 counters[MAX_COUNTERS];   // Absolute perf counter readings (not deltas)
 //!     __u64 events[MAX_COUNTERS];     // active_counter_ids at sample time
-//!     char task[TASK_COMM_LEN];       // Null-terminated task comm string
+//!     __u8  task[TASK_COMM_LEN];       // Null-terminated task comm string
 //! };
 //! ```
 //!

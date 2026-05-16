@@ -1,6 +1,14 @@
 #pragma once
 
+#ifdef __BPF__
 #include "vmlinux.h"
+#else
+#include <stdint.h>
+typedef uint8_t __u8;
+typedef uint16_t __u16;
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+#endif
 
 /* Maximum length of a task command name, matching TASK_COMM_LEN in the kernel. */
 #define TASK_COMM_LEN 16
@@ -31,5 +39,5 @@ struct saccade_sample {
     __u32 tid;                    // Kernel thread ID (task_struct->pid); pid field holds TGID.
     __u64 counters[MAX_COUNTERS]; // Absolute perf counter readings (not deltas); delta computed in userspace.
     __u64 events[MAX_COUNTERS];   // active_counter_ids slot values at sample time, identifying each counter.
-    char task[TASK_COMM_LEN];     // Null-terminated task command name from bpf_get_current_comm.
+    __u8 task[TASK_COMM_LEN];     // Null-terminated task command name from bpf_get_current_comm.
 };

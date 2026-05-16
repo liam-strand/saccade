@@ -28,5 +28,6 @@ hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 ureq = "3"
 
 [build-dependencies]
+bindgen = "0.72"
 libbpf-cargo = "0.26.0"
 vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git", rev = "db131a55c624fbe1da97de90ac08e9cec9e8ed49" }
