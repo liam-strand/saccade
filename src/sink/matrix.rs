@@ -19,11 +19,18 @@ struct ThreadData {
     /// Thread group ID (process ID) of the real thread.
     tgid: u32,
     /// Per-event list of `(rel_ts_ns, rate)` observations collected across quantums.
+    /// In sweep mode the anchor event's rates are events/ns; all other events are stored
+    /// as events/instruction and scaled to events/ns in `finish()`.
     series: HashMap<EventId, Vec<(u64, f64)>>,
 }
 
 /// Writes an HDF5 file with one `thread_<N>/rates` dataset per observed thread,
-/// where `rates` is an `[n_events × n_timesteps]` f32 matrix of mean event rates.
+/// where `rates` is an `[n_events × n_timesteps]` f32 matrix of mean event rates (events/ns).
+///
+/// In sweep mode, rates are instruction-normalized: non-anchor events are stored as
+/// `count / anchor_count` (events/instruction) during collection, then scaled by the global
+/// instruction rate in `finish()` so the final unit is events/ns across all batches.
+/// The anchor event (`ex_ret_instr`) is written as plain events/ns throughout.
 pub struct MatrixSink {
     /// Output HDF5 file path.
     path: PathBuf,
@@ -56,6 +63,12 @@ pub struct MatrixSink {
     batch_name_counters: HashMap<String, u32>,
     /// Timestamp of the first sample seen in the current batch, used to compute relative times.
     batch_t0: Option<u64>,
+
+    /// Anchor event ID for instruction-count normalization (None in non-sweep runs).
+    anchor_id: Option<EventId>,
+    /// Global instruction rate (instructions/ns) applied in finish() to convert
+    /// events/instruction back to events/ns (None in non-sweep runs).
+    global_ref_rate: Option<f64>,
 }
 
 impl MatrixSink {
@@ -76,11 +89,18 @@ impl MatrixSink {
             batch_real_to_synthetic: HashMap::new(),
             batch_name_counters: HashMap::new(),
             batch_t0: None,
+            anchor_id: None,
+            global_ref_rate: None,
         }
     }
 }
 
 impl OutputSink for MatrixSink {
+    fn set_anchor(&mut self, anchor_id: EventId, global_ref_rate: f64) {
+        self.anchor_id = Some(anchor_id);
+        self.global_ref_rate = Some(global_ref_rate);
+    }
+
     fn begin_batch(&mut self, batch_id: u32, events: &[EventId]) {
         self.current_batch_id = batch_id;
         self.current_batch_events = events.to_vec();
@@ -100,6 +120,21 @@ impl OutputSink for MatrixSink {
         _estimator: &dyn StateEstimator,
         _active_set: &[EventId],
     ) -> io::Result<()> {
+        // In sweep mode, build a (cpu_id, timestamp_ns, tid) → anchor_count lookup so
+        // each sample can be normalized by the co-measured instruction count.
+        // Samples from the same BPF wire event share identical (cpu_id, timestamp_ns, tid).
+        let anchor_counts: HashMap<(u32, u64, u32), u64> =
+            if let Some(anchor_id) = self.anchor_id {
+                quantum
+                    .samples()
+                    .iter()
+                    .filter(|s| s.event_id == anchor_id && s.duration_ns > 0)
+                    .map(|s| ((s.cpu_id, s.timestamp_ns, s.tid), s.count))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+
         for s in quantum.samples() {
             if s.duration_ns == 0 {
                 continue;
@@ -140,7 +175,22 @@ impl OutputSink for MatrixSink {
                     series: HashMap::new(),
                 });
 
-            let rate = s.count as f64 / s.duration_ns as f64;
+            let rate = match self.anchor_id {
+                Some(anchor_id) if s.event_id != anchor_id => {
+                    // Non-anchor in sweep mode: events/instruction.
+                    // global_ref_rate is applied in finish() to convert to events/ns.
+                    let ac = anchor_counts
+                        .get(&(s.cpu_id, s.timestamp_ns, s.tid))
+                        .copied()
+                        .unwrap_or(0);
+                    if ac > 0 {
+                        s.count as f64 / ac as f64
+                    } else {
+                        s.count as f64 / s.duration_ns as f64
+                    }
+                }
+                _ => s.count as f64 / s.duration_ns as f64,
+            };
             td.series
                 .entry(s.event_id)
                 .or_default()
@@ -151,6 +201,20 @@ impl OutputSink for MatrixSink {
 
     fn finish(&mut self) -> io::Result<()> {
         let dt = self.dt_ns.max(1);
+
+        // Convert events/instruction → events/ns for non-anchor events by applying
+        // the global instruction rate computed across all sweep batches.
+        if let (Some(anchor_id), Some(ref_rate)) = (self.anchor_id, self.global_ref_rate) {
+            for td in self.threads.values_mut() {
+                for (&event_id, pts) in td.series.iter_mut() {
+                    if event_id != anchor_id {
+                        for (_, rate) in pts.iter_mut() {
+                            *rate *= ref_rate;
+                        }
+                    }
+                }
+            }
+        }
 
         // Compute per-thread max rel_ts to determine n_timesteps
         let mut per_thread_max_ts: HashMap<u32, u64> = HashMap::new();

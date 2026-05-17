@@ -26,6 +26,13 @@ pub trait OutputSink {
     /// Called once before each sweep batch begins; sinks that need batch-identity
     /// metadata (e.g. `MatrixSink`) override this; all others use this no-op default.
     fn begin_batch(&mut self, _batch_id: u32, _events: &[EventId]) {}
+
+    /// Configure instruction-count normalization for sweep output. Called once after
+    /// all batches complete. `anchor_id` is the event whose count is the denominator;
+    /// `global_ref_rate` (instructions/ns) is the multiplier used to convert
+    /// events/instruction back to events/ns. Sinks that don't support normalization
+    /// ignore this call via the default no-op.
+    fn set_anchor(&mut self, _anchor_id: EventId, _global_ref_rate: f64) {}
 }
 
 /// Call `finish` on every sink, ignoring individual errors.

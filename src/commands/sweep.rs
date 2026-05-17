@@ -1,4 +1,11 @@
-//! Implementation of the `sweep` subcommand: exhaustively measure every hardware event by cycling the target through fixed 4-counter batches.
+//! Implementation of the `sweep` subcommand: exhaustively measure every hardware event by cycling
+//! the target through fixed-counter batches.
+//!
+//! Each batch reserves one counter slot for `ex_ret_instr` (retired instructions) as an anchor and
+//! fills the remaining three slots with user events.  After all batches complete, every non-anchor
+//! event rate is normalized to `(count / anchor_count) * global_ref_rate` so that rates are
+//! comparable across batches regardless of run-to-run timing variation.  The anchor event's own
+//! track shows the instruction throughput (events/ns) over time.
 
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
@@ -28,6 +35,34 @@ use std::time::Duration;
 
 /// Maps real TID → (tgid, task_name), one HashMap per batch.
 type BatchMaps = Vec<HashMap<u32, (u32, String)>>;
+
+/// Accumulates the anchor event's raw count and duration across all quanta and batches.
+/// Used after the sweep loop to compute the global instruction rate for normalization.
+/// Shares accumulated totals with the outer scope via `Rc<RefCell<(total_count, total_duration_ns)>>`.
+struct InstructionTrackerSink {
+    anchor_id: EventId,
+    totals: Rc<RefCell<(u64, u64)>>,
+}
+
+impl OutputSink for InstructionTrackerSink {
+    fn emit(
+        &mut self,
+        quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+        _active_set: &[EventId],
+    ) -> io::Result<()> {
+        if let Some(agg) = quantum.aggregates().get(&self.anchor_id) {
+            let mut t = self.totals.borrow_mut();
+            t.0 += agg.total_count;
+            t.1 += agg.total_duration_ns;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Lightweight sink that records, for each batch, which real TIDs appeared and what task they belong to.
 struct TidCollectorSink {
@@ -65,13 +100,25 @@ impl OutputSink for TidCollectorSink {
 }
 
 /// Read the Perfetto trace at `trace`, assign synthetic TIDs (sorted-TID order within each
-/// task_name group, reproducible across runs), and overwrite the trace.
+/// task_name group, reproducible across runs), normalize non-anchor rates to instruction-count,
+/// and overwrite the trace.
 fn remap_sweep_tids(
     trace: &Path,
     batch_maps: &[HashMap<u32, (u32, String)>],
     event_names: &[String],
+    anchor_event_name: &str,
+    global_ref_rate: f64,
 ) -> io::Result<()> {
     let ts = read_rate_timeseries(trace)?;
+
+    // Pre-build per-real_tid anchor rate maps. Each batch run produces its own real_tid
+    // for the target process, so anchor data keyed by real_tid is batch-specific.
+    let anchor_maps: HashMap<u32, HashMap<u64, f64>> = ts
+        .series
+        .iter()
+        .filter(|((name, _), _)| name == anchor_event_name)
+        .map(|((_, tid), pts)| (*tid, pts.iter().copied().collect()))
+        .collect();
 
     // Build real_tid → batch_index.
     let mut tid_to_batch: HashMap<u32, usize> = HashMap::new();
@@ -117,7 +164,7 @@ fn remap_sweep_tids(
         .map(|(i, name)| (name.as_str(), i as EventId))
         .collect();
 
-    // Remap (event_name, real_tid) → (event_id, synthetic_tid).
+    // Remap (event_name, real_tid) → (event_id, synthetic_tid), normalizing non-anchor rates.
     let mut remapped: HashMap<(EventId, u32), Vec<(u64, f64)>> = HashMap::new();
     for ((event_name, real_tid), pts) in &ts.series {
         let Some(&event_id) = event_name_to_id.get(event_name.as_str()) else {
@@ -129,10 +176,29 @@ fn remap_sweep_tids(
         let Some(&syn_tid) = batch_real_to_synthetic[batch_idx].get(real_tid) else {
             continue;
         };
+        let normalized_pts: Vec<(u64, f64)> = if event_name == anchor_event_name {
+            pts.clone()
+        } else {
+            pts.iter()
+                .map(|&(ts_ns, rate)| {
+                    let anchor_rate = anchor_maps
+                        .get(real_tid)
+                        .and_then(|m| m.get(&ts_ns))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let norm = if anchor_rate > 0.0 {
+                        (rate / anchor_rate) * global_ref_rate
+                    } else {
+                        rate
+                    };
+                    (ts_ns, norm)
+                })
+                .collect()
+        };
         remapped
             .entry((event_id, syn_tid))
             .or_default()
-            .extend_from_slice(pts);
+            .extend_from_slice(&normalized_pts);
     }
 
     // Build thread_meta: synthetic_tid → (tgid, task_name).
@@ -162,11 +228,29 @@ pub fn sweep(
 ) -> std::io::Result<()> {
     let lib = load_library(library)?;
     let all_ids: Vec<u32> = (0..lib.events.len() as u32).collect();
-    let batches: Vec<Vec<u32>> = all_ids.chunks(4).map(|c| c.to_vec()).collect();
+
+    // Reserve one counter slot per batch for the anchor event (retired instructions).
+    // Batches become [anchor, user_0, user_1, user_2] instead of 4 user events.
+    let anchor_name = "ex_ret_instr";
+    let anchor_id: u32 = lib
+        .events
+        .iter()
+        .position(|e| e.name == anchor_name)
+        .expect("ex_ret_instr not found in event library") as u32;
+    let user_ids: Vec<u32> = all_ids
+        .iter()
+        .copied()
+        .filter(|&id| id != anchor_id)
+        .collect();
+    let batches: Vec<Vec<u32>> = user_ids
+        .chunks(3)
+        .map(|c| std::iter::once(anchor_id).chain(c.iter().copied()).collect())
+        .collect();
     let num_batches = batches.len();
     tracing::info!(
-        "Sweep: {} events across {} runs",
-        all_ids.len(),
+        "Sweep: {} events (+ anchor {}) across {} runs",
+        user_ids.len(),
+        anchor_name,
         num_batches
     );
 
@@ -193,6 +277,11 @@ pub fn sweep(
     }
     sinks.push(Box::new(TidCollectorSink {
         maps: Rc::clone(&shared_maps),
+    }));
+    let shared_totals: Rc<RefCell<(u64, u64)>> = Rc::new(RefCell::new((0, 0)));
+    sinks.push(Box::new(InstructionTrackerSink {
+        anchor_id,
+        totals: Rc::clone(&shared_totals),
     }));
 
     let pb = if quiet {
@@ -264,12 +353,24 @@ pub fn sweep(
     }
 
     pb.finish_and_clear();
+
+    // Compute the global instruction rate and configure normalization in all sinks.
+    let (total_count, total_dur) = *shared_totals.borrow();
+    let global_ref_rate = if total_dur > 0 {
+        total_count as f64 / total_dur as f64
+    } else {
+        1.0
+    };
+    for sink in &mut sinks {
+        sink.set_anchor(anchor_id, global_ref_rate);
+    }
+
     sink::finish_sinks(&mut sinks);
     // Drop sinks before reopening the trace path so PerfettoSink's BufWriter<File> is closed.
     drop(sinks);
 
     let batch_maps = Rc::try_unwrap(shared_maps).unwrap().into_inner();
-    remap_sweep_tids(&trace, &batch_maps, &event_names)?;
+    remap_sweep_tids(&trace, &batch_maps, &event_names, anchor_name, global_ref_rate)?;
 
     tracing::info!("Sweep complete. Trace written to {:?}", trace);
 
