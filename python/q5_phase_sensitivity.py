@@ -61,10 +61,7 @@ def run_sweep(
     library: Path | None,
     q_schedule: int,
 ) -> None:
-    """Run saccade sweep against the workload binary with a given JSON config.
-
-    Requires root privileges (eBPF).
-    """
+    """Run saccade sweep against the workload binary with a given JSON config."""
     cmd = [
         str(saccade),
         "sweep",
@@ -277,7 +274,7 @@ def main() -> None:
     print(f"Workload configs written to {configs_dir}/")
 
     # -----------------------------------------------------------------------
-    # Ground-truth sweeps (require sudo / eBPF).
+    # Ground-truth sweeps.
     # -----------------------------------------------------------------------
 
     gt_multiphase = args.gt_multiphase or (args.results_dir / "gt_multiphase.perfetto")
@@ -285,7 +282,6 @@ def main() -> None:
 
     if not args.gt_multiphase:
         print("\n[1/2] Collecting multi-phase ground-truth sweep...")
-        print("      NOTE: saccade sweep requires root privileges (eBPF).")
         run_sweep(
             args.saccade,
             args.workload,
@@ -300,7 +296,6 @@ def main() -> None:
 
     if not args.gt_steadystate:
         print("\n[2/2] Collecting steady-state ground-truth sweep...")
-        print("      NOTE: saccade sweep requires root privileges (eBPF).")
         run_sweep(
             args.saccade,
             args.workload,

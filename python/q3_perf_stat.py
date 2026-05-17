@@ -136,7 +136,6 @@ def run_saccade_rep(
 ) -> float | None:
     """Run one saccade-run rep and return mean_nrmse, or None on failure."""
     cmd = [
-        "sudo",
         str(saccade),
         "run",
         "--library", str(library),

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Measure wall-clock overhead imposed by saccade across parameter grid.
-
-Must be run as root (or with sudo) because saccade run requires eBPF privileges.
-"""
+"""Measure wall-clock overhead imposed by saccade across parameter grid."""
 
 import argparse
 import csv
-import os
 import subprocess
 import sys
 import time
@@ -21,31 +17,6 @@ Q_SAMPLE_NS = [10_000, 100_000, 1_000_000]
 SINKS = ["none", "csv", "perfetto"]
 
 CSV_TMP = Path("/tmp/saccade_q1.csv")
-
-
-def check_root(saccade: Path) -> None:
-    """Verify we can run saccade with the required privileges."""
-    if os.geteuid() == 0:
-        return
-    # Try a quick sudo -n probe to see if passwordless sudo is available.
-    probe = subprocess.run(
-        ["sudo", "-n", str(saccade), "--help"],
-        capture_output=True,
-    )
-    if probe.returncode != 0:
-        print(
-            "ERROR: saccade run requires root. Either run this script as root "
-            "or ensure passwordless sudo is configured (sudo -n).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-def saccade_prefix() -> list[str]:
-    """Return ['sudo', '-n'] when not already root, else []."""
-    if os.geteuid() == 0:
-        return []
-    return ["sudo", "-n"]
 
 
 def run_timed(cmd: list[str], *, check: bool = True) -> float:
@@ -79,7 +50,7 @@ def build_saccade_cmd(
     target: list[str],
 ) -> list[str]:
     """Construct the full saccade run command for one grid cell."""
-    cmd = saccade_prefix() + [
+    cmd = [
         str(saccade),
         "run",
         "--q-schedule",
@@ -190,8 +161,6 @@ def main() -> None:
 
     if not args.saccade.exists():
         parser.error(f"saccade binary not found: {args.saccade}")
-
-    check_root(args.saccade)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     out_csv = args.results_dir / "q1_overhead.csv"

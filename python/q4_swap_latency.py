@@ -7,6 +7,7 @@ parses slot_swap log lines from stderr, and aggregates swap latency statistics.
 
 import argparse
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -36,9 +37,6 @@ def run_once(
 ) -> list[tuple[int, int]]:
     """Run saccade once and return list of (swap_ns, quantum_ns) pairs."""
     cmd = [
-        "sudo",
-        "env",
-        "RUST_LOG=debug",
         str(saccade),
         "run",
         "--q-schedule",
@@ -55,6 +53,7 @@ def run_once(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
+        env={**os.environ, "RUST_LOG": "debug"},
     )
 
     pairs: list[tuple[int, int]] = []
