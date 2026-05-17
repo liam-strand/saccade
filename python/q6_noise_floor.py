@@ -80,12 +80,6 @@ def main() -> None:
         default=3,
         help="Number of warmup runs to discard before measured runs (default: 3)",
     )
-    parser.add_argument(
-        "--reps",
-        type=int,
-        default=10,
-        help="Number of measured runs recorded in output metadata (default: 10)",
-    )
     args = parser.parse_args()
 
     args.saccade = args.saccade.resolve()
@@ -136,7 +130,6 @@ def main() -> None:
         "median_nrmse": median_nrmse,
         "per_event": per_event,
         "target": target_str,
-        "reps": args.reps,
     }
 
     noise_floor_path = args.results_dir / "noise_floor.json"
