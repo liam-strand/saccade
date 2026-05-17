@@ -6,3 +6,4 @@
 saccade.csv
 src/bpf/sampler.skel.rs
 .claude/worktrees
+python/__pycache__
