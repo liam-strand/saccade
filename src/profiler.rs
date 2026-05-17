@@ -53,9 +53,12 @@ impl<'s> Profiler<'s> {
         let decision = self.scheduler.next_step(&quantum, self.estimator.as_ref());
 
         // 5. Apply schedule
+        let swap_start = std::time::Instant::now();
         self.source
             .apply_schedule(&self.active_set, &decision.active_events)
             .unwrap();
+        let swap_ns = swap_start.elapsed().as_nanos();
+        tracing::debug!(swap_ns, quantum_ns = elapsed_ns, "slot_swap");
         self.active_set = decision.active_events;
 
         // 6. Emit to all sinks
