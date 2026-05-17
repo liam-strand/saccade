@@ -2,20 +2,155 @@
 
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
+use crate::event::EventId;
 use crate::event::EventRegistry;
+use crate::perfetto::{PerfettoWriter, read_rate_timeseries};
 use crate::profiler::ProfilerBuilder;
+use crate::quantum::Quantum;
+use crate::sample::TASK_COMM_LEN;
 use crate::scheduler::fixed::FixedScheduler;
 use crate::sink::matrix::MatrixSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::sink::{self, OutputSink};
 use crate::source::hardware::HardwareSampleSource;
+use crate::state::StateEstimator;
 use crate::state::propagate::PropagateEstimator;
 use crate::syscalls;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
+
+/// Maps real TID → (tgid, task_name), one HashMap per batch.
+type BatchMaps = Vec<HashMap<u32, (u32, String)>>;
+
+/// Lightweight sink that records, for each batch, which real TIDs appeared and what task they belong to.
+struct TidCollectorSink {
+    maps: Rc<RefCell<BatchMaps>>,
+}
+
+impl OutputSink for TidCollectorSink {
+    fn begin_batch(&mut self, _batch_id: u32, _events: &[EventId]) {
+        self.maps.borrow_mut().push(HashMap::new());
+    }
+
+    fn emit(
+        &mut self,
+        quantum: &Quantum,
+        _estimator: &dyn StateEstimator,
+        _active_set: &[EventId],
+    ) -> io::Result<()> {
+        let mut maps = self.maps.borrow_mut();
+        let map = maps.last_mut().expect("begin_batch must be called before emit");
+        for s in quantum.samples() {
+            if s.tid == 0 {
+                continue;
+            }
+            map.entry(s.tid).or_insert_with(|| {
+                let task_len = s.task.iter().position(|&c| c == 0).unwrap_or(TASK_COMM_LEN);
+                (s.pid, String::from_utf8_lossy(&s.task[..task_len]).into_owned())
+            });
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Read the Perfetto trace at `trace`, assign synthetic TIDs (sorted-TID order within each
+/// task_name group, reproducible across runs), and overwrite the trace.
+fn remap_sweep_tids(
+    trace: &Path,
+    batch_maps: &[HashMap<u32, (u32, String)>],
+    event_names: &[String],
+) -> io::Result<()> {
+    let ts = read_rate_timeseries(trace)?;
+
+    // Build real_tid → batch_index.
+    let mut tid_to_batch: HashMap<u32, usize> = HashMap::new();
+    for (batch_idx, map) in batch_maps.iter().enumerate() {
+        for &real_tid in map.keys() {
+            tid_to_batch.entry(real_tid).or_insert(batch_idx);
+        }
+    }
+
+    // Assign synthetic TIDs: within each batch, group real TIDs by task_name, sort each group
+    // by real TID value, then assign ordinals. Same (task_name, ordinal) → same synthetic TID
+    // across batches, making evaluate() comparisons work across sweep runs.
+    let mut name_idx_to_synthetic: HashMap<(String, usize), u32> = HashMap::new();
+    let mut next_synthetic: u32 = 1;
+    let mut batch_real_to_synthetic: Vec<HashMap<u32, u32>> =
+        vec![HashMap::new(); batch_maps.len()];
+
+    for (batch_idx, map) in batch_maps.iter().enumerate() {
+        let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
+        for (&real_tid, (_, task_name)) in map {
+            by_name.entry(task_name.as_str()).or_default().push(real_tid);
+        }
+        for tids in by_name.values_mut() {
+            tids.sort_unstable();
+        }
+        for (task_name, tids) in &by_name {
+            for (ordinal, &real_tid) in tids.iter().enumerate() {
+                let key = (task_name.to_string(), ordinal);
+                let syn = *name_idx_to_synthetic.entry(key).or_insert_with(|| {
+                    let id = next_synthetic;
+                    next_synthetic += 1;
+                    id
+                });
+                batch_real_to_synthetic[batch_idx].insert(real_tid, syn);
+            }
+        }
+    }
+
+    // Build event_name → event_id index.
+    let event_name_to_id: HashMap<&str, EventId> = event_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i as EventId))
+        .collect();
+
+    // Remap (event_name, real_tid) → (event_id, synthetic_tid).
+    let mut remapped: HashMap<(EventId, u32), Vec<(u64, f64)>> = HashMap::new();
+    for ((event_name, real_tid), pts) in &ts.series {
+        let Some(&event_id) = event_name_to_id.get(event_name.as_str()) else {
+            continue;
+        };
+        let Some(&batch_idx) = tid_to_batch.get(real_tid) else {
+            continue;
+        };
+        let Some(&syn_tid) = batch_real_to_synthetic[batch_idx].get(real_tid) else {
+            continue;
+        };
+        remapped
+            .entry((event_id, syn_tid))
+            .or_default()
+            .extend_from_slice(pts);
+    }
+
+    // Build thread_meta: synthetic_tid → (tgid, task_name).
+    let mut thread_meta: HashMap<u32, (u32, String)> = HashMap::new();
+    for (batch_idx, map) in batch_maps.iter().enumerate() {
+        for (&real_tid, (tgid, task_name)) in map {
+            if let Some(&syn_tid) = batch_real_to_synthetic[batch_idx].get(&real_tid) {
+                thread_meta
+                    .entry(syn_tid)
+                    .or_insert_with(|| (*tgid, task_name.clone()));
+            }
+        }
+    }
+
+    PerfettoWriter::new(trace, event_names.to_vec())?.write_raw_series(&remapped, &thread_meta)?;
+
+    Ok(())
+}
 
 pub fn sweep(
     library: Option<PathBuf>,
@@ -41,6 +176,8 @@ pub fn sweep(
         .map(|&id| registry.get_event_name(id).to_string())
         .collect();
 
+    let shared_maps: Rc<RefCell<BatchMaps>> = Rc::new(RefCell::new(Vec::new()));
+
     let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
     sinks.push(Box::new(PerfettoSink::new(
         &trace,
@@ -50,10 +187,13 @@ pub fn sweep(
     if let Some(matrix_path) = matrix {
         sinks.push(Box::new(MatrixSink::new(
             matrix_path,
-            event_names,
+            event_names.clone(),
             config.q_sample_ns,
         )));
     }
+    sinks.push(Box::new(TidCollectorSink {
+        maps: Rc::clone(&shared_maps),
+    }));
 
     let pb = if quiet {
         ProgressBar::hidden()
@@ -125,6 +265,12 @@ pub fn sweep(
 
     pb.finish_and_clear();
     sink::finish_sinks(&mut sinks);
+    // Drop sinks before reopening the trace path so PerfettoSink's BufWriter<File> is closed.
+    drop(sinks);
+
+    let batch_maps = Rc::try_unwrap(shared_maps).unwrap().into_inner();
+    remap_sweep_tids(&trace, &batch_maps, &event_names)?;
+
     tracing::info!("Sweep complete. Trace written to {:?}", trace);
 
     Ok(())
