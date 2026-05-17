@@ -146,6 +146,8 @@ pub struct ResolvedConfig {
     /// Optional RNG seed for reproducible runs; `None` uses a random seed.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Number of hardware counter slots available during simulation.
+    pub num_slots: usize,
     /// Settings for LLM-backed schedulers; ignored when no LLM scheduler is selected.
     #[serde(default)]
     pub llm: LlmConfig,
@@ -250,6 +252,8 @@ pub struct CliOverrides {
     pub noise_stddev: Option<f64>,
     /// Overrides the RNG seed.
     pub seed: Option<u64>,
+    /// Overrides the number of hardware counter slots.
+    pub num_slots: Option<usize>,
     /// Overrides the LLM guidance string.
     pub guidance: Option<String>,
 }
@@ -269,6 +273,8 @@ struct Defaults {
     q_output_ns: u64,
     /// Default noise standard deviation (0 = no noise).
     noise_stddev: f64,
+    /// Default number of hardware counter slots (4).
+    num_slots: usize,
     /// Default Kalman filter configuration.
     kalman: KalmanConfig,
     /// Default EMA configuration.
@@ -287,6 +293,7 @@ impl Default for Defaults {
             q_sample_ns: 100_000,
             q_output_ns: 0,
             noise_stddev: 0.0,
+            num_slots: 4,
             kalman: KalmanConfig::default(),
             ema: EmaConfig::default(),
             llm: LlmConfig::default(),
@@ -317,6 +324,7 @@ fn build_config(
         .set_override_option("q_output_ns", ov.q_output_ns.map(|v| v as i64))?
         .set_override_option("noise_stddev", ov.noise_stddev)?
         .set_override_option("seed", ov.seed.map(|v| v as i64))?
+        .set_override_option("num_slots", ov.num_slots.map(|v| v as i64))?
         .set_override_option("llm.guidance", ov.guidance)?
         .build()?
         .try_deserialize::<ResolvedConfig>()
@@ -362,6 +370,7 @@ mod tests {
             q_output_ns: None,
             noise_stddev: None,
             seed: None,
+            num_slots: None,
             guidance: None,
         }
     }

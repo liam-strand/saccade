@@ -157,6 +157,10 @@ pub enum Commands {
         #[arg(long)]
         seed: Option<u64>,
 
+        /// Number of hardware counter slots available during simulation
+        #[arg(long, default_value_t = 4)]
+        num_slots: usize,
+
         /// Output CSV file
         #[arg(long)]
         csv: Option<PathBuf>,

@@ -78,7 +78,7 @@ pub fn simulate(
         config.noise_stddev,
         config.q_schedule_ns,
         config.seed,
-        4,
+        config.num_slots,
     );
 
     let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();

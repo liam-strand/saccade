@@ -60,6 +60,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: q_output,
                     noise_stddev: None,
                     seed: None,
+                    num_slots: None,
                     guidance,
                 },
             )?;
@@ -85,6 +86,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: None,
                     noise_stddev: None,
                     seed: None,
+                    num_slots: None,
                     guidance: None,
                 },
             )?;
@@ -100,6 +102,7 @@ fn main() -> std::io::Result<()> {
             q_output,
             noise_stddev,
             seed,
+            num_slots,
             csv,
             trace,
         } => {
@@ -114,6 +117,7 @@ fn main() -> std::io::Result<()> {
                     q_output_ns: q_output,
                     noise_stddev,
                     seed,
+                    num_slots: Some(num_slots),
                     guidance,
                 },
             )?;
