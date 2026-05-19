@@ -194,12 +194,14 @@ int handle__sched_switch(u64 *ctx) {
         bpf_map_delete_elem(&start_map, &prev_pid);
     }
 
-    // Switch-IN: register next so timer samples and the eventual flush can measure it.
+    // If the incoming thread is not our target, ignore it.
     if (target_tgid != 0 && next->tgid != target_tgid) {
         return 0;
     }
 
+    // Switch-IN: register next so timer samples and the eventual flush can measure it.
     bpf_map_update_elem(&start_map, &next_pid, &now, BPF_ANY);
+    record_sample(next->pid, next->tgid, now, 0, SAMPLE_TYPE_RESUME);
 
     return 0;
 }
