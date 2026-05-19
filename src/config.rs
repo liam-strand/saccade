@@ -11,6 +11,7 @@ use crate::scheduler::Scheduler;
 use crate::scheduler::distribution::DistributionScheduler;
 use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::random::RandomScheduler;
+use crate::scheduler::rate_of_change::RateOfChangeScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
 use crate::scheduler::static_llm::StaticLlmScheduler;
 use crate::scheduler::weighted_round_robin_llm::WeightedRoundRobinLlmScheduler;
@@ -39,6 +40,8 @@ pub enum SchedulerKind {
     DynamicLlm,
     /// Round-robins through LLM-assigned per-counter weights.
     WeightedRoundRobinLlm,
+    /// Prioritizes events with the highest rate-of-change (non-linearity) using Lim 2014 triangle cost.
+    RateOfChange,
 }
 
 impl fmt::Display for SchedulerKind {
@@ -51,6 +54,7 @@ impl fmt::Display for SchedulerKind {
             SchedulerKind::StaticLlm => write!(f, "static_llm"),
             SchedulerKind::DynamicLlm => write!(f, "dynamic_llm"),
             SchedulerKind::WeightedRoundRobinLlm => write!(f, "weighted_round_robin_llm"),
+            SchedulerKind::RateOfChange => write!(f, "rate_of_change"),
         }
     }
 }
@@ -209,6 +213,7 @@ impl ResolvedConfig {
                     self.llm.guidance.clone(),
                 ))
             }
+            SchedulerKind::RateOfChange => Box::new(RateOfChangeScheduler::default()),
         }
     }
 

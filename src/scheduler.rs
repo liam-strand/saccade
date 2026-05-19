@@ -5,6 +5,7 @@ pub mod dynamic_llm;
 pub mod fixed;
 pub mod llm_common;
 pub mod random;
+pub mod rate_of_change;
 pub mod round_robin;
 pub mod static_llm;
 pub mod test;
