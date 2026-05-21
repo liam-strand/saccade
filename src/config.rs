@@ -8,7 +8,7 @@
 use crate::event::{EventId, EventRegistry};
 use crate::llm::LlmClient;
 use crate::scheduler::Scheduler;
-use crate::scheduler::distribution::DistributionScheduler;
+use crate::scheduler::max_uncertainty::MaxUncertaintyScheduler;
 use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::rate_of_change::RateOfChangeScheduler;
@@ -32,8 +32,8 @@ pub enum SchedulerKind {
     Random,
     /// Cycles through all counter sets in a fixed order.
     RoundRobin,
-    /// Samples counters according to a learned probability distribution.
-    Distribution,
+    /// Selects the counters that are most uncertain at the time of the decision.
+    MaxUncertainty,
     /// Queries an LLM once at startup to produce a static counter schedule.
     StaticLlm,
     /// Re-queries an LLM periodically to adapt the counter schedule at runtime.
@@ -50,7 +50,7 @@ impl fmt::Display for SchedulerKind {
         match self {
             SchedulerKind::Random => write!(f, "random"),
             SchedulerKind::RoundRobin => write!(f, "round_robin"),
-            SchedulerKind::Distribution => write!(f, "distribution"),
+            SchedulerKind::MaxUncertainty => write!(f, "max_uncertainty"),
             SchedulerKind::StaticLlm => write!(f, "static_llm"),
             SchedulerKind::DynamicLlm => write!(f, "dynamic_llm"),
             SchedulerKind::WeightedRoundRobinLlm => write!(f, "weighted_round_robin_llm"),
@@ -163,7 +163,7 @@ impl ResolvedConfig {
         match self.scheduler {
             SchedulerKind::Random => Box::new(RandomScheduler::default()),
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
-            SchedulerKind::Distribution => Box::new(DistributionScheduler::default()),
+            SchedulerKind::MaxUncertainty => Box::new(MaxUncertaintyScheduler::default()),
             SchedulerKind::StaticLlm => {
                 let event_info = registry
                     .get_event_ids()

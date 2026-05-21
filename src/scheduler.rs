@@ -1,6 +1,6 @@
 //! Pluggable counter-rotation policy: trait definition and decision type.
 
-pub mod distribution;
+pub mod max_uncertainty;
 pub mod dynamic_llm;
 pub mod fixed;
 pub mod llm_common;

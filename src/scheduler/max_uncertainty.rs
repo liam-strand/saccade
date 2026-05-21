@@ -7,14 +7,14 @@ use crate::state::StateEstimator;
 use std::collections::HashMap;
 
 /// Selects the `num_slots` events whose per-thread uncertainty is highest on average, maximizing information gain.
-pub struct DistributionScheduler {
+pub struct MaxUncertaintyScheduler {
     /// Full set of candidate events, set by `init`.
     events: Vec<EventId>,
     /// Number of counters to activate per step, overridden by `init`.
     num_slots: usize,
 }
 
-impl DistributionScheduler {
+impl MaxUncertaintyScheduler {
     /// Creates a scheduler with an empty event list and a default slot count of 4.
     fn new() -> Self {
         Self {
@@ -24,13 +24,13 @@ impl DistributionScheduler {
     }
 }
 
-impl Default for DistributionScheduler {
+impl Default for MaxUncertaintyScheduler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Scheduler for DistributionScheduler {
+impl Scheduler for MaxUncertaintyScheduler {
     fn init(
         &mut self,
         all_events: Vec<EventId>,
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn selects_highest_uncertainty_events() {
-        let mut sched = DistributionScheduler::default();
+        let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1, 2, 3, 4, 5], 2).unwrap();
 
         let mut est = MockEstimator::new();
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn averages_uncertainty_across_threads() {
-        let mut sched = DistributionScheduler::default();
+        let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1, 2], 1).unwrap();
 
         let mut est = MockEstimator::new();
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn empty_estimator_returns_empty() {
-        let mut sched = DistributionScheduler::default();
+        let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1, 2, 3], 4).unwrap();
 
         let decision = sched.next_step(&empty_quantum(), &MockEstimator::new());
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn fewer_events_than_slots_returns_all() {
-        let mut sched = DistributionScheduler::default();
+        let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1, 2], 4).unwrap();
 
         let mut est = MockEstimator::new();
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn duration_is_none() {
-        let mut sched = DistributionScheduler::default();
+        let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1], 4).unwrap();
 
         let mut est = MockEstimator::new();
