@@ -149,6 +149,10 @@ pub enum Commands {
         #[arg(long = "q-output")]
         q_output: Option<u64>,
 
+        /// q-sample: minimum interval between samples within a scheduling quantum, in nanoseconds
+        #[arg(long = "q-sample")]
+        q_sample: Option<u64>,
+
         /// Gaussian noise standard deviation on simulated rates (0 = no noise)
         #[arg(long)]
         noise_stddev: Option<f64>,

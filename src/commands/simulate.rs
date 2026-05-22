@@ -77,6 +77,7 @@ pub fn simulate(
         TimeVaryingRates { series: series_map },
         config.noise_stddev,
         config.q_schedule_ns,
+        config.q_sample_ns,
         config.seed,
         config.num_slots,
     );

@@ -22,6 +22,8 @@ pub struct VirtualSampleSource {
     active_set: Vec<EventId>,
     /// Duration of each simulated quantum in nanoseconds.
     quantum_ns: u64,
+    /// Duration of each intra-quantum sample interval in nanoseconds.
+    sample_ns: u64,
     /// RNG used for Gaussian noise sampling.
     rng: StdRng,
     /// Simulated wall-clock time at the start of the current quantum.
@@ -40,6 +42,7 @@ impl VirtualSampleSource {
         rates: TimeVaryingRates,
         noise_stddev: f64,
         quantum_ns: u64,
+        sample_ns: u64,
         seed: Option<u64>,
         num_slots: usize,
     ) -> Self {
@@ -60,6 +63,7 @@ impl VirtualSampleSource {
             noise_stddev,
             active_set: Vec::new(),
             quantum_ns,
+            sample_ns: sample_ns.max(1),
             rng,
             current_time_ns: 0,
             num_slots,
@@ -71,7 +75,7 @@ impl VirtualSampleSource {
 impl SampleSource for VirtualSampleSource {
     fn collect(&mut self) -> (Vec<RawSample>, u64) {
         let mut samples = Vec::new();
-        let ts = self.current_time_ns + self.quantum_ns;
+        let n = (self.quantum_ns / self.sample_ns).max(1);
 
         for &event_id in &self.active_set {
             let Some(tids) = self.tids_by_event.get(&event_id) else {
@@ -79,30 +83,33 @@ impl SampleSource for VirtualSampleSource {
             };
 
             for &tid in tids {
-                let base_rate = self.rates.rate_at(event_id, tid, self.current_time_ns);
-                let lambda = base_rate * self.quantum_ns as f64;
+                for i in 0..n {
+                    let sub_start = self.current_time_ns + i * self.sample_ns;
+                    let base_rate = self.rates.rate_at(event_id, tid, sub_start);
+                    let lambda = base_rate * self.sample_ns as f64;
 
-                let count = if lambda > 0.0 && self.noise_stddev > 0.0 {
-                    let normal = Normal::new(lambda, self.noise_stddev * lambda).unwrap();
-                    normal.sample(&mut self.rng).max(0.0) as u64
-                } else {
-                    lambda as u64
-                };
+                    let count = if lambda > 0.0 && self.noise_stddev > 0.0 {
+                        let normal = Normal::new(lambda, self.noise_stddev * lambda).unwrap();
+                        normal.sample(&mut self.rng).max(0.0) as u64
+                    } else {
+                        lambda as u64
+                    };
 
-                samples.push(RawSample {
-                    timestamp_ns: ts,
-                    duration_ns: self.quantum_ns,
-                    cpu_id: 0,
-                    pid: 0,
-                    tid,
-                    event_id,
-                    count,
-                    task: *b"simulate\0\0\0\0\0\0\0\0",
-                });
+                    samples.push(RawSample {
+                        timestamp_ns: sub_start + self.sample_ns,
+                        duration_ns: self.sample_ns,
+                        cpu_id: 0,
+                        pid: 0,
+                        tid,
+                        event_id,
+                        count,
+                        task: *b"simulate\0\0\0\0\0\0\0\0",
+                    });
+                }
             }
         }
 
-        self.current_time_ns = ts;
+        self.current_time_ns += self.quantum_ns;
         (samples, self.quantum_ns)
     }
 
