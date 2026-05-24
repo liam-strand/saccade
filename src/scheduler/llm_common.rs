@@ -16,7 +16,7 @@ pub(super) struct ScheduleStep {
 }
 
 /// LLM-assigned sampling priority for a single hardware event.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(super) struct EventWeight {
     /// The hardware event this weight applies to.
     pub(super) event_id: EventId,
@@ -140,6 +140,12 @@ pub(super) fn build_weights_prompt(
     for (id, name, desc) in event_info {
         event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
     }
+    let example_weights: Vec<EventWeight> = [8u32, 5, 3]
+        .iter()
+        .zip(event_info.iter().take(3))
+        .map(|(&weight, (event_id, _, _))| EventWeight { event_id: *event_id, weight })
+        .collect();
+    let example = serde_json::to_string_pretty(&example_weights).expect("should serialize");
     let system = system_message(num_slots, guidance);
     let user = format!(
         "Available performance counters (format — ID: name: description):
@@ -149,6 +155,9 @@ A higher weight means the counter should be sampled more often. \
 Prioritize counters that reveal common bottlenecks — cache misses, \
 TLB pressure, branch mispredictions, memory stalls. \
 Every counter must appear exactly once in your response.
+
+Example output (hypothetical IDs):
+{example}
 
 Your entire response must be a single JSON array of objects with \
 \"event_id\" (integer) and \"weight\" (integer 1–10) fields. \
