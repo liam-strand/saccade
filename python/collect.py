@@ -15,10 +15,10 @@ SPEC_ROOT = Path("/tank/yhe7443/benchmarks/SPEC2017")
 
 NPB_BENCHMARKS = [
     {"binary": "bt.A.x", "slug": "npb_bt_A"},
-    {"binary": "cg.A.x", "slug": "npb_cg_A"},
+    {"binary": "cg.B.x", "slug": "npb_cg_B"},
     {"binary": "ep.A.x", "slug": "npb_ep_A"},
-    {"binary": "ft.A.x", "slug": "npb_ft_A"},
-    {"binary": "mg.A.x", "slug": "npb_mg_A"},
+    {"binary": "ft.B.x", "slug": "npb_ft_B"},
+    {"binary": "mg.C.x", "slug": "npb_mg_C"},
 ]
 
 NPB_BENCHMARKS_SMALL = [
@@ -39,6 +39,11 @@ SPEC_BENCHMARKS = [
         "suite": "505.mcf_r",
         "slug": "spec_505_mcf_r",
         "args": ["inp.in"],
+    },
+    {
+        "suite": "548.exchange2_r",
+        "slug": "spec_548_exchange2_r",
+        "args": ["6"],
     },
 ]
 

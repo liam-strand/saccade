@@ -74,12 +74,6 @@ def main() -> None:
         default=Path("./results"),
         help="Directory for output files (default: ./results)",
     )
-    parser.add_argument(
-        "--warmup",
-        type=int,
-        default=3,
-        help="Number of warmup runs to discard before measured runs (default: 3)",
-    )
     args = parser.parse_args()
 
     args.saccade = args.saccade.resolve()
@@ -91,15 +85,6 @@ def main() -> None:
         parser.error(f"saccade binary not found: {args.saccade}")
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
-
-    # Warmup runs — discard output using a temp file.
-    if args.warmup > 0:
-        print(f"Running {args.warmup} warmup sweep(s) (output discarded)...")
-        with tempfile.TemporaryDirectory() as tmp:
-            warmup_trace = Path(tmp) / "warmup.perfetto"
-            for i in range(args.warmup):
-                print(f"  Warmup {i + 1}/{args.warmup}")
-                run_sweep(args.saccade, args.target, warmup_trace, args.library)
 
     # Two measured sweeps.
     gt1 = args.results_dir / "gt1.perfetto"

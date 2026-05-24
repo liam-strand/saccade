@@ -40,10 +40,10 @@ STEADYSTATE_CONFIG = {
 }
 
 # Schedulers that do not require an LLM API — always run these.
-BASELINE_SCHEDULERS = ["random", "round_robin", "distribution"]
+BASELINE_SCHEDULERS = ["random", "round-robin", "max-uncertainty", "rate-of-change"]
 
 # LLM-backed schedulers — attempted but skipped gracefully on failure.
-LLM_SCHEDULERS = ["static_llm", "dynamic_llm", "weighted_round_robin_llm"]
+LLM_SCHEDULERS = ["static-llm", "dynamic-llm", "weighted-round-robin-llm"]
 
 ALL_SCHEDULERS = BASELINE_SCHEDULERS + LLM_SCHEDULERS
 

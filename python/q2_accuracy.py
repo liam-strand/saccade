@@ -21,16 +21,16 @@ import numpy as np
 from tqdm import tqdm
 
 SCHEDULERS = [
-    "fixed",
-    "round_robin",
+    "round-robin",
     "random",
-    "distribution",
-    "static_llm",
-    "dynamic_llm",
-    "weighted_round_robin_llm",
+    "max-uncertainty",
+    "rate-of-change",
+    "static-llm",
+    "dynamic-llm",
+    "weighted-round-robin-llm",
 ]
 ESTIMATORS = ["propagate", "ema", "kalman"]
-LLM_SCHEDULERS = {"static_llm", "dynamic_llm", "weighted_round_robin_llm"}
+LLM_SCHEDULERS = {"static-llm", "dynamic-llm", "weighted-round-robin-llm"}
 
 # Pool sizes: number of events in the filtered library.
 POOL_SIZES = [4, 8, 16, 32, 64]

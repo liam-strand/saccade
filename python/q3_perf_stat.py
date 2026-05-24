@@ -5,8 +5,8 @@ Q3: Does saccade produce better time-series fidelity than perf stat -I?
 
 Runs the workload under:
   1. perf stat -I 100  (kernel-native multiplexing)
-  2. saccade run --scheduler distribution --estimator propagate
-  3. saccade run --scheduler round_robin --estimator propagate
+  2. saccade run --scheduler max-uncertainty --estimator propagate
+  3. saccade run --scheduler round-robin --estimator propagate
 
 Each approach is evaluated against a pre-existing sweep ground-truth trace
 using ``saccade evaluate --json``, which reports mean_nrmse (lower is better).
@@ -332,26 +332,26 @@ def main() -> None:
             print("  No valid reps collected for perf stat.", file=sys.stderr)
 
         # ------------------------------------------------------------------
-        # 2. saccade — distribution + propagate
+        # 2. saccade — max-uncertainty + propagate
         # ------------------------------------------------------------------
-        print("\n=== saccade --scheduler distribution --estimator propagate ===")
+        print("\n=== saccade --scheduler max-uncertainty --estimator propagate ===")
 
         def run_dist(i: int) -> float | None:
             pft_path = tmp / f"saccade_dist_rep{i}.perfetto"
             return run_saccade_rep(
                 args.saccade, args.library,
-                "distribution", "propagate",
+                "max-uncertainty", "propagate",
                 target, pft_path, args.gt_trace,
             )
 
-        dist_scores = collect_reps("saccade/distribution", run_dist, args.warmup, args.reps)
+        dist_scores = collect_reps("saccade/max-uncertainty", run_dist, args.warmup, args.reps)
 
         if dist_scores:
             med, iqr = median_iqr(dist_scores)
             sig = (noise_floor is None) or (med > noise_floor)
             results.append({
                 "approach": "saccade",
-                "scheduler": "distribution",
+                "scheduler": "max-uncertainty",
                 "estimator": "propagate",
                 "median_nrmse": med,
                 "iqr": iqr,
@@ -360,29 +360,29 @@ def main() -> None:
             })
             print(f"  median nRMSE={med:.4f}  IQR={iqr:.4f}  n={len(dist_scores)}")
         else:
-            print("  No valid reps collected for saccade/distribution.", file=sys.stderr)
+            print("  No valid reps collected for saccade/max-uncertainty.", file=sys.stderr)
 
         # ------------------------------------------------------------------
-        # 3. saccade — round_robin + propagate
+        # 3. saccade — round-robin + propagate
         # ------------------------------------------------------------------
-        print("\n=== saccade --scheduler round_robin --estimator propagate ===")
+        print("\n=== saccade --scheduler round-robin --estimator propagate ===")
 
         def run_rr(i: int) -> float | None:
             pft_path = tmp / f"saccade_rr_rep{i}.perfetto"
             return run_saccade_rep(
                 args.saccade, args.library,
-                "round_robin", "propagate",
+                "round-robin", "propagate",
                 target, pft_path, args.gt_trace,
             )
 
-        rr_scores = collect_reps("saccade/round_robin", run_rr, args.warmup, args.reps)
+        rr_scores = collect_reps("saccade/round-robin", run_rr, args.warmup, args.reps)
 
         if rr_scores:
             med, iqr = median_iqr(rr_scores)
             sig = (noise_floor is None) or (med > noise_floor)
             results.append({
                 "approach": "saccade",
-                "scheduler": "round_robin",
+                "scheduler": "round-robin",
                 "estimator": "propagate",
                 "median_nrmse": med,
                 "iqr": iqr,
@@ -391,7 +391,7 @@ def main() -> None:
             })
             print(f"  median nRMSE={med:.4f}  IQR={iqr:.4f}  n={len(rr_scores)}")
         else:
-            print("  No valid reps collected for saccade/round_robin.", file=sys.stderr)
+            print("  No valid reps collected for saccade/round-robin.", file=sys.stderr)
 
     # ----------------------------------------------------------------------
     # Write CSV

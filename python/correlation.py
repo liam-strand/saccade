@@ -2,11 +2,13 @@
 """
 Compute pairwise Pearson cross-correlations from saccade sweep HDF5 data.
 
-Events measured in the same sweep batch share a common time axis within each
-benchmark run, making their rates directly comparable at each timestep.
-Events from different batches were measured in separate runs — their timestep
-indices are not co-observed — so only same-batch pairs yield reliable temporal
-correlations.
+Cross-batch correlations are valid because:
+  1. Each batch's time axis is relative to that batch's first sample, so
+     timestep t in any batch represents "t ns into the program's execution"
+     (the same program phase regardless of which batch produced the event).
+  2. Non-anchor rates are instruction-normalized
+     (count/anchor_count * global_ref_rate), making them directly comparable
+     across batches.
 
 Outputs correlation.json (event_names, correlation matrix, per-event variance,
 co-observation counts, same-batch flag) and a heatmap PNG.
@@ -14,7 +16,6 @@ co-observation counts, same-batch flag) and a heatmap PNG.
 
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import h5py
@@ -49,14 +50,14 @@ def compute_correlations(
         ]
         n_events = len(event_names)
 
-        # Accumulators for pooled within-group Pearson r.
-        # Subtract per-group means before accumulating so the result reflects
-        # within-run temporal correlation, not between-benchmark mean differences.
-        # Only upper triangle (i < j); diagonal handled separately.
-        sum_xy = np.zeros((n_events, n_events), dtype=np.float64)
-        sum_x2 = np.zeros((n_events, n_events), dtype=np.float64)
-        sum_y2 = np.zeros((n_events, n_events), dtype=np.float64)
-        pair_count = np.zeros((n_events, n_events), dtype=np.int64)
+        # Accumulators for pooled Pearson r using the online identity:
+        #   r = (n·Σxy − Σx·Σy) / sqrt((n·Σxx − Σx²)(n·Σyy − Σy²))
+        # where all sums are over joint-valid timesteps for each pair.
+        # Computed via matmul rather than a Python pair loop.
+        acc_n   = np.zeros((n_events, n_events), dtype=np.float64)  # co-observation count
+        acc_si  = np.zeros((n_events, n_events), dtype=np.float64)  # Σx over joint-valid
+        acc_sij = np.zeros((n_events, n_events), dtype=np.float64)  # Σxy
+        acc_sii = np.zeros((n_events, n_events), dtype=np.float64)  # Σx² over joint-valid
         is_same_batch = np.zeros((n_events, n_events), dtype=bool)
 
         # Per-event variance accumulator (Welford)
@@ -65,6 +66,7 @@ def compute_correlations(
         ev_M2 = np.zeros(n_events, dtype=np.float64)
 
         for bench_name in bench_names:
+            print(f"  {bench_name} ...", file=sys.stderr)
             bg = f[bench_name]
             b_batch_ids = bg["batch_id"][:].tolist()
             b_arr = np.asarray(b_batch_ids, dtype=np.int64)
@@ -90,52 +92,37 @@ def compute_correlations(
                     ev_M2[i] += M2_new + delta * delta * ev_count[i] * n_new / n_total
                     ev_count[i] = n_total
 
-                # Cross-correlation: same-batch pairs only.
-                # Group event indices by batch so we only iterate within-batch.
-                by_batch: dict[int, list[int]] = defaultdict(list)
-                for idx, bid in enumerate(b_batch_ids):
-                    by_batch[bid].append(idx)
+                # Cross-correlation via matmul (all pairs, including cross-batch).
+                # NaN → 0 so matmul ignores missing timesteps; mask tracks validity.
+                M   = ~np.isnan(rates)
+                Mf  = M.astype(np.float64)
+                R   = np.where(M, rates, 0.0).astype(np.float64)
+                R2  = R * R
+                acc_n   += Mf @ Mf.T   # [i,j] = co-observed timestep count
+                acc_si  += R  @ Mf.T   # [i,j] = Σ R[i,t] where both valid
+                acc_sij += R  @ R.T    # [i,j] = Σ R[i,t]*R[j,t]
+                acc_sii += R2 @ Mf.T   # [i,j] = Σ R[i,t]² where both valid
 
-                for bid, idxs in by_batch.items():
-                    if len(idxs) < 2:
-                        continue
-                    # For each pair within this batch:
-                    for ii, i in enumerate(idxs):
-                        valid_i = ~np.isnan(rates[i])
-                        if not valid_i.any():
-                            continue
-                        for j in idxs[ii + 1 :]:
-                            valid_j = ~np.isnan(rates[j])
-                            both = valid_i & valid_j
-                            n = int(both.sum())
-                            if n < min_samples:
-                                continue
-                            xi = rates[i, both].astype(np.float64)
-                            xj = rates[j, both].astype(np.float64)
-                            # Subtract per-group means so accumulated sums reflect within-group
-                            # (temporal) correlation only.
-                            xi -= xi.mean()
-                            xj -= xj.mean()
-                            lo, hi = min(i, j), max(i, j)
-                            sum_xy[lo, hi] += np.dot(xi, xj)
-                            sum_x2[lo, hi] += np.dot(xi, xi)
-                            sum_y2[lo, hi] += np.dot(xj, xj)
-                            pair_count[lo, hi] += n
+    # Build full symmetric correlation matrix via the online Pearson identity.
+    n    = acc_n
+    si   = acc_si
+    sj   = si.T          # symmetric: Σy over joint-valid = (Σx over joint-valid).T
+    sij  = acc_sij
+    sii  = acc_sii
+    sjj  = sii.T
 
-    # Build full symmetric correlation matrix.
-    corr = np.eye(n_events, dtype=np.float64)
-    for i in range(n_events):
-        for j in range(i + 1, n_events):
-            n = pair_count[i, j]
-            if n < min_samples:
-                continue
-            denom_sq = sum_x2[i, j] * sum_y2[i, j]
-            if denom_sq <= 0.0:
-                continue
-            r = float(np.clip(sum_xy[i, j] / np.sqrt(denom_sq), -1.0, 1.0))
-            corr[i, j] = r
-            corr[j, i] = r
+    numer    = n * sij - si * sj
+    denom_i  = n * sii - si  ** 2
+    denom_j  = n * sjj - sj  ** 2
+    denom_sq = denom_i * denom_j
 
+    valid = (n >= min_samples) & (denom_sq > 0)
+    corr  = np.where(
+        valid,
+        np.clip(numer / np.sqrt(np.where(denom_sq > 0, denom_sq, 1.0)), -1.0, 1.0),
+        0.0,
+    )
+    np.fill_diagonal(corr, 1.0)
     # Threshold weak correlations (off-diagonals only).
     mask = (np.abs(corr) < threshold) & (
         ~np.eye(n_events, dtype=bool)
@@ -163,7 +150,7 @@ def compute_correlations(
         "event_names": event_names,
         "correlation": corr_psd.tolist(),
         "variance": variance,
-        "n_coobserved": pair_count.tolist(),
+        "n_coobserved": acc_n.astype(np.int64).tolist(),
         "is_same_batch": is_same_batch.tolist(),
     }
 
