@@ -38,6 +38,7 @@ def run_once(
     """Run saccade once and return list of (swap_ns, quantum_ns) pairs."""
     cmd = [
         str(saccade),
+        "--verbose",
         "run",
         "--q-schedule",
         str(q_schedule_ns),
@@ -53,7 +54,7 @@ def run_once(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "RUST_LOG": "debug"},
+        env={**os.environ, "NO_COLOR": "1"},
     )
 
     pairs: list[tuple[int, int]] = []
@@ -93,13 +94,13 @@ def main() -> None:
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("./target/release/saccade"),
+        default=Path("../target/release/saccade"),
         help="Path to saccade binary (default: ./target/release/saccade)",
     )
     parser.add_argument(
         "--library",
         type=Path,
-        default=None,
+        default=Path("../event_lib.json"),
         help="Event library JSON file (optional)",
     )
     parser.add_argument(

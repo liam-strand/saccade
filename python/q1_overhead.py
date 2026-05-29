@@ -112,13 +112,13 @@ def main() -> None:
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("./target/release/saccade"),
+        default=Path("../target/release/saccade"),
         help="Path to saccade binary (default: ./target/release/saccade)",
     )
     parser.add_argument(
         "--library",
         type=Path,
-        default=None,
+        default="../event_lib.json",
         help="Event library JSON file (optional)",
     )
     parser.add_argument(

@@ -306,13 +306,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("./target/release/saccade"),
+        default=Path("../target/release/saccade"),
         help="Path to the saccade binary (default: ./target/release/saccade)",
     )
     parser.add_argument(
         "--library",
         type=Path,
-        required=True,
+        default=Path("../event_lib.json"),
         help="Event library JSON file (produced by saccade generate)",
     )
     parser.add_argument(
