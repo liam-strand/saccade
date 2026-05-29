@@ -30,7 +30,7 @@ pub fn simulate(
         .collect();
     debug!("Loaded {} events.", all_ids.len());
 
-    let scheduler = config.build_scheduler(&registry);
+    let scheduler = config.build_scheduler(&registry, true);
 
     debug!("Loading rate time-series from {:?}", rates_trace);
     let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;

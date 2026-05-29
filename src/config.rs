@@ -159,7 +159,8 @@ pub struct ResolvedConfig {
 
 impl ResolvedConfig {
     /// Constructs and returns the scheduler specified by `self.scheduler`, wired to the given event registry.
-    pub fn build_scheduler(&self, registry: &EventRegistry) -> Box<dyn Scheduler> {
+    /// `simulation` should be `true` when replaying a trace (no real-time sleep between quanta).
+    pub fn build_scheduler(&self, registry: &EventRegistry, simulation: bool) -> Box<dyn Scheduler> {
         match self.scheduler {
             SchedulerKind::Random => Box::new(RandomScheduler::default()),
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
@@ -195,6 +196,7 @@ impl ResolvedConfig {
                     client,
                     self.llm.update_interval,
                     self.llm.guidance.clone(),
+                    simulation,
                 ))
             }
             SchedulerKind::WeightedRoundRobinLlm => {

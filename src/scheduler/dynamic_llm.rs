@@ -35,15 +35,32 @@ pub struct DynamicLlmScheduler {
     result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
     /// Optional natural-language guidance forwarded to the LLM system message.
     guidance: Option<String>,
+    /// When `true`, block the simulation loop during LLM calls to avoid racing ahead.
+    simulation_mode: bool,
+    /// Total number of `next_step` calls since `init`.
+    step_count: u64,
+    /// `step_count` value when the last query was dispatched (simulation mode only).
+    dispatch_step: u64,
+    /// Wall-clock time when the last query was dispatched (simulation mode only).
+    dispatch_instant: Option<std::time::Instant>,
+    /// `true` while the simulation loop should block waiting for a background response.
+    waiting_for_response: bool,
+    /// A received schedule held until `buffered_release_step` is reached.
+    buffered_schedule: Option<Vec<ScheduleStep>>,
+    /// The `step_count` at which `buffered_schedule` should be applied.
+    buffered_release_step: u64,
 }
 
 impl DynamicLlmScheduler {
     /// Create a new scheduler; `init` must be called before `next_step` to populate the schedule.
+    /// Set `simulation_mode` to `true` when replaying a trace (no real-time sleep between quanta)
+    /// so that the scheduler blocks during LLM calls and replays the realistic delay afterwards.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
         update_interval: u32,
         guidance: Option<String>,
+        simulation_mode: bool,
     ) -> Self {
         Self {
             client,
@@ -57,6 +74,13 @@ impl DynamicLlmScheduler {
             request_tx: None,
             result_rx: None,
             guidance,
+            simulation_mode,
+            step_count: 0,
+            dispatch_step: 0,
+            dispatch_instant: None,
+            waiting_for_response: false,
+            buffered_schedule: None,
+            buffered_release_step: 0,
         }
     }
 
@@ -190,15 +214,65 @@ impl Scheduler for DynamicLlmScheduler {
         Ok(())
     }
 
-    /// Serve the next scheduled step, non-blockingly polling for a background schedule update and
-    /// dispatching a refresh request to the worker when the update interval has elapsed.
+    /// Serve the next scheduled step.
+    ///
+    /// In production mode this polls the background worker non-blockingly.
+    /// In simulation mode this blocks during the LLM call, then buffers the result and releases
+    /// it K quanta later (K = wall-clock LLM latency / quantum duration) to mirror production.
     fn next_step(
         &mut self,
-        _quantum: &Quantum,
+        quantum: &Quantum,
         estimator: &dyn StateEstimator,
     ) -> ScheduleDecision {
-        // 1. Check for a completed background update.
-        if let Some(rx) = &self.result_rx {
+        // 0. Advance the step counter.
+        self.step_count += 1;
+
+        // 1. Apply any buffered schedule that has reached its release step.
+        if self.buffered_schedule.is_some() && self.step_count >= self.buffered_release_step {
+            self.schedule = self.buffered_schedule.take().unwrap();
+            self.step_idx = 0;
+            tracing::info!(
+                "DynamicLlmScheduler: applying buffered update at step {}",
+                self.step_count
+            );
+        }
+
+        // 2. Poll or block for a completed background update.
+        if self.simulation_mode && self.waiting_for_response {
+            tracing::info!(
+                "DynamicLlmScheduler: blocking for LLM response at step {}",
+                self.step_count
+            );
+            if let Some(rx) = &self.result_rx {
+                match rx.recv() {
+                    Ok(Ok(steps)) => {
+                        let w = self
+                            .dispatch_instant
+                            .map(|t| t.elapsed())
+                            .unwrap_or_default();
+                        let k = (w.as_nanos() / quantum.elapsed_ns().max(1) as u128).max(1) as u64;
+                        tracing::info!(
+                            "DynamicLlmScheduler: buffering update for release at step {} (K={})",
+                            self.dispatch_step + k + 1,
+                            k
+                        );
+                        self.buffered_schedule = Some(steps);
+                        self.buffered_release_step = self.dispatch_step + k + 1;
+                        self.waiting_for_response = false;
+                    }
+                    Ok(Err(msg)) => {
+                        tracing::warn!(
+                            "DynamicLlmScheduler: update failed, keeping schedule: {msg}"
+                        );
+                        self.waiting_for_response = false;
+                    }
+                    Err(_) => {
+                        tracing::warn!("DynamicLlmScheduler: worker thread exited");
+                        self.waiting_for_response = false;
+                    }
+                }
+            }
+        } else if let Some(rx) = &self.result_rx {
             match rx.try_recv() {
                 Ok(Ok(steps)) => {
                     tracing::info!("DynamicLlmScheduler: updated to {} steps", steps.len());
@@ -215,7 +289,7 @@ impl Scheduler for DynamicLlmScheduler {
             }
         }
 
-        // 2. Send a new update request if the interval has elapsed.
+        // 3. Dispatch a new update request if the interval has elapsed.
         // Reset the counter only on successful send; if the worker is busy,
         // leave the counter alone so we retry on the next step.
         self.steps_since_update += 1;
@@ -225,10 +299,15 @@ impl Scheduler for DynamicLlmScheduler {
                 && tx.try_send(messages).is_ok()
             {
                 self.steps_since_update = 0;
+                if self.simulation_mode {
+                    self.dispatch_step = self.step_count;
+                    self.dispatch_instant = Some(std::time::Instant::now());
+                    self.waiting_for_response = true;
+                }
             }
         }
 
-        // 3. Serve the current schedule step.
+        // 4. Serve the current schedule step.
         let step = &self.schedule[self.step_idx];
         let result = ScheduleDecision {
             active_events: step.events.clone(),
@@ -294,7 +373,7 @@ mod tests {
     }
 
     /// Build a `DynamicLlmScheduler` pre-populated with a two-step schedule and three events.
-    fn make_scheduler(update_interval: u32) -> DynamicLlmScheduler {
+    fn make_scheduler(update_interval: u32, simulation_mode: bool) -> DynamicLlmScheduler {
         let mut s = DynamicLlmScheduler::new(
             vec![
                 (0, "cache-misses".into(), "Cache misses".into()),
@@ -304,6 +383,7 @@ mod tests {
             LlmClient::new("http://localhost:0", "test-model"),
             update_interval,
             None,
+            simulation_mode,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -322,7 +402,7 @@ mod tests {
 
     #[test]
     fn next_step_cycles_without_update() {
-        let mut s = make_scheduler(100);
+        let mut s = make_scheduler(100, false);
         let q = empty_quantum();
         let est = MockEstimator::new();
 
@@ -338,7 +418,7 @@ mod tests {
 
     #[test]
     fn build_update_prompt_includes_observations() {
-        let s = make_scheduler(100);
+        let s = make_scheduler(100, false);
         let mut est = MockEstimator::new();
         est.add(0, 0, 1.5e-6, 0.2);
         est.add(0, 1, 3.0e-7, 0.8);
@@ -362,6 +442,7 @@ mod tests {
             LlmClient::new("http://localhost:0", "test-model"),
             0,
             None,
+            false,
         );
         let result = s.init(vec![], 2);
         assert!(result.is_err());
@@ -380,6 +461,7 @@ mod tests {
             LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4"),
             1,
             None,
+            false,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -406,5 +488,40 @@ mod tests {
             .expect("should parse into a valid schedule");
 
         assert!(!steps.is_empty());
+    }
+
+    #[test]
+    fn buffered_update_applied_at_correct_step() {
+        let mut s = make_scheduler(100, true);
+        let q = empty_quantum();
+        let est = MockEstimator::new();
+
+        // Pre-populate a buffered schedule distinct from the current one.
+        s.buffered_schedule = Some(vec![ScheduleStep {
+            duration_ms: 5,
+            events: vec![1, 2],
+        }]);
+        s.buffered_release_step = 5;
+
+        // Steps 1–4: buffer should still be held; events served from original schedule.
+        for _ in 0..4 {
+            s.next_step(&q, &est);
+            assert!(
+                s.buffered_schedule.is_some(),
+                "buffer should not be released before step 5"
+            );
+        }
+
+        // Step 5 (step_count == 5): buffer released; new schedule applied.
+        let d5 = s.next_step(&q, &est);
+        assert!(
+            s.buffered_schedule.is_none(),
+            "buffer should be consumed at release step"
+        );
+        assert_eq!(
+            d5.active_events,
+            vec![1, 2],
+            "first decision after release should come from buffered schedule"
+        );
     }
 }
