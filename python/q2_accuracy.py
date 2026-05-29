@@ -50,10 +50,13 @@ def run_simulate(
     num_slots: int,
     q_schedule: int,
     seed: int | None,
+    base_config: Path | None = None,
 ) -> None:
     """Run saccade simulate, writing output to out_trace."""
-    cmd = [
-        str(saccade),
+    cmd = [str(saccade)]
+    if base_config is not None:
+        cmd += ["--config", str(base_config)]
+    cmd += [
         "simulate",
         "--library",
         str(library),
@@ -210,6 +213,7 @@ def simulate_and_eval(
     tmp_dir: Path,
     workload: str,
     trial: int = 0,
+    base_config: Path | None = None,
 ) -> dict:
     """Run one simulate + evaluate pair. Returns the evaluate JSON dict."""
     trace_path = tmp_dir / f"est_{workload}_{scheduler}_{estimator}_slots{num_slots}_t{trial}.perfetto"
@@ -223,6 +227,7 @@ def simulate_and_eval(
         num_slots,
         q_schedule,
         seed,
+        base_config,
     )
     result = run_evaluate(saccade, rates_trace, trace_path)
     # Clean up trace immediately to save disk space.
@@ -242,6 +247,7 @@ def run_combo(
     llm_trials: int,
     tmp_dir: Path,
     workload: str,
+    base_config: Path | None = None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Run simulate+evaluate for a given combo, repeating for LLM schedulers.
 
@@ -265,6 +271,7 @@ def run_combo(
             tmp_dir,
             workload,
             trial,
+            base_config,
         )
         mn = median_nrmse(eval_json)
         mc = mean_coverage(eval_json)
@@ -301,13 +308,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("./target/release/saccade"),
+        default=Path("../target/release/saccade"),
         help="Path to the saccade binary (default: ./target/release/saccade)",
     )
     parser.add_argument(
         "--library",
         type=Path,
-        required=True,
+        default=Path("../event_lib.json"),
         help="Event library JSON file (produced by saccade generate)",
     )
     parser.add_argument(
@@ -350,6 +357,16 @@ def build_parser() -> argparse.ArgumentParser:
             "above the noise floor."
         ),
     )
+    parser.add_argument(
+        "--base-config",
+        type=Path,
+        default=None,
+        help=(
+            "Optional saccade TOML config file forwarded as --config to every simulate "
+            "call. Useful for setting subsection parameters (e.g. [kalman], [ema], [llm]). "
+            "CLI args (--scheduler, --estimator, etc.) override values in this file."
+        ),
+    )
     return parser
 
 
@@ -362,6 +379,11 @@ def main() -> None:
     args.library = args.library.resolve()
     args.traces_dir = args.traces_dir.resolve()
     args.results_dir = args.results_dir.resolve()
+
+    if args.base_config is not None:
+        args.base_config = args.base_config.resolve()
+        if not args.base_config.exists():
+            parser.error(f"Base config not found: {args.base_config}")
 
     if not args.saccade.exists():
         parser.error(f"saccade binary not found: {args.saccade}")
@@ -445,6 +467,7 @@ def main() -> None:
                         llm_trials=args.llm_trials,
                         tmp_dir=tmp_dir,
                         workload=workload,
+                        base_config=args.base_config,
                     )
                 except subprocess.CalledProcessError as exc:
                     tqdm.write(
@@ -488,6 +511,7 @@ def main() -> None:
                         llm_trials=args.llm_trials,
                         tmp_dir=tmp_dir,
                         workload=workload,
+                        base_config=args.base_config,
                     )
                 except subprocess.CalledProcessError as exc:
                     tqdm.write(
