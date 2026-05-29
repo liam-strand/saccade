@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Sweep (scheduler × estimator × pool-size) and (scheduler × slot-count) combinations
+"""Sweep (scheduler × estimator) and (scheduler × slot-count) combinations
 to evaluate accuracy of adaptive scheduling strategies.
 
-Pool-size axis: controls how many events are in the library (first N events from the GT
-trace are used). Achieved by writing a filtered library JSON for each pool_size.
+Scheduler/estimator grid: fixed pool_size=16 and num_slots=4, sweeps all
+scheduler × estimator combinations. Outputs q2_scheduler_estimator.csv.
 Slot-count axis: controls --num-slots passed to saccade simulate.
 """
 
@@ -31,9 +31,6 @@ SCHEDULERS = [
 ]
 ESTIMATORS = ["propagate", "ema", "kalman"]
 LLM_SCHEDULERS = {"static-llm", "dynamic-llm", "weighted-round-robin-llm"}
-
-# Pool sizes: number of events in the filtered library.
-POOL_SIZES = [4, 8, 16, 32, 64]
 
 # Slot counts: --num-slots values to sweep.
 SLOT_COUNTS = [2, 4, 6, 8]
@@ -299,7 +296,7 @@ def run_combo(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep (scheduler × estimator × pool-size) and (scheduler × slot-count) "
+            "Sweep (scheduler × estimator) and (scheduler × slot-count) "
             "combinations to evaluate accuracy of adaptive scheduling strategies."
         )
     )
@@ -386,52 +383,48 @@ def main() -> None:
     gt_event_names = extract_gt_event_names(None, args.gt_trace, args.saccade)
     print(f"  Found {len(gt_event_names)} unique events in GT trace.", file=sys.stderr)
 
-    pool_csv_path = args.results_dir / "q2_pool_size.csv"
+    grid_csv_path = args.results_dir / "q2_scheduler_estimator.csv"
     slot_csv_path = args.results_dir / "q2_slot_count.csv"
 
-    pool_rows: list[dict] = []
+    grid_rows: list[dict] = []
     slot_rows: list[dict] = []
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
 
-        # -----------------------------------------------------------------------
-        # Pool-size axis: fix num_slots=4, sweep pool_size × scheduler × estimator
-        # -----------------------------------------------------------------------
+        FIXED_POOL_SIZE = 16
         FIXED_NUM_SLOTS = 4
-        pool_combos = [
-            (sched, est, ps)
-            for ps in POOL_SIZES
-            for sched in SCHEDULERS
-            for est in ESTIMATORS
-        ]
+        FIXED_ESTIMATOR = "propagate"
+
+        filtered_lib_16_path = tmp_dir / f"lib_pool{FIXED_POOL_SIZE}.json"
+        actual_size = write_filtered_library(
+            library_data, gt_event_names, FIXED_POOL_SIZE, filtered_lib_16_path
+        )
+        if actual_size < FIXED_POOL_SIZE:
+            print(
+                f"  Warning: pool_size={FIXED_POOL_SIZE} requested but only "
+                f"{actual_size} events available in GT trace + library.",
+                file=sys.stderr,
+            )
+
+        # -----------------------------------------------------------------------
+        # Scheduler/estimator grid: fix pool_size=16, num_slots=4, sweep scheduler × estimator
+        # -----------------------------------------------------------------------
+        grid_combos = [(sched, est) for sched in SCHEDULERS for est in ESTIMATORS]
         print(
-            f"\nPool-size sweep: {len(pool_combos)} combinations "
-            f"(num_slots={FIXED_NUM_SLOTS} fixed)",
+            f"\nScheduler/estimator grid: {len(grid_combos)} combinations "
+            f"(pool_size={FIXED_POOL_SIZE}, num_slots={FIXED_NUM_SLOTS} fixed)",
             file=sys.stderr,
         )
 
-        bar = tqdm(pool_combos, desc="pool-size sweep", unit="combo")
-        for scheduler, estimator, pool_size in bar:
-            bar.set_postfix_str(f"{scheduler}/{estimator}/pool={pool_size}")
-
-            # Write a filtered library for this pool_size.
-            filtered_lib_path = tmp_dir / f"lib_pool{pool_size}.json"
-            if not filtered_lib_path.exists():
-                actual_size = write_filtered_library(
-                    library_data, gt_event_names, pool_size, filtered_lib_path
-                )
-                if actual_size < pool_size:
-                    tqdm.write(
-                        f"  Warning: pool_size={pool_size} requested but only "
-                        f"{actual_size} events available in GT trace + library.",
-                        file=sys.stderr,
-                    )
+        bar = tqdm(grid_combos, desc="scheduler/estimator grid", unit="combo")
+        for scheduler, estimator in bar:
+            bar.set_postfix_str(f"{scheduler}/{estimator}")
 
             try:
                 med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
                     saccade=args.saccade,
-                    library=filtered_lib_path,
+                    library=filtered_lib_16_path,
                     rates_trace=args.gt_trace,
                     scheduler=scheduler,
                     estimator=estimator,
@@ -443,7 +436,7 @@ def main() -> None:
                 )
             except subprocess.CalledProcessError as exc:
                 tqdm.write(
-                    f"  ERROR: {scheduler}/{estimator}/pool={pool_size}: {exc}",
+                    f"  ERROR: {scheduler}/{estimator}: {exc}",
                     file=sys.stderr,
                 )
                 med_nrmse = cov = nrmse_mean = nrmse_std = None
@@ -453,7 +446,6 @@ def main() -> None:
             row: dict = {
                 "scheduler": scheduler,
                 "estimator": estimator,
-                "pool_size": pool_size,
                 "median_nrmse": med_nrmse if med_nrmse is not None else "",
                 "coverage": cov if cov is not None else "",
                 "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
@@ -461,19 +453,11 @@ def main() -> None:
             }
             if noise_floor is not None:
                 row["significant"] = "" if sig is None else str(sig).lower()
-            pool_rows.append(row)
+            grid_rows.append(row)
 
         # -----------------------------------------------------------------------
         # Slot-count axis: fix pool_size=16, estimator=propagate, sweep scheduler × num_slots
         # -----------------------------------------------------------------------
-        FIXED_POOL_SIZE = 16
-        FIXED_ESTIMATOR = "propagate"
-
-        filtered_lib_16_path = tmp_dir / f"lib_pool{FIXED_POOL_SIZE}.json"
-        if not filtered_lib_16_path.exists():
-            write_filtered_library(
-                library_data, gt_event_names, FIXED_POOL_SIZE, filtered_lib_16_path
-            )
 
         slot_combos = [
             (sched, ns)
@@ -525,22 +509,21 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Write CSVs
     # -----------------------------------------------------------------------
-    pool_fieldnames = [
+    grid_fieldnames = [
         "scheduler",
         "estimator",
-        "pool_size",
         "median_nrmse",
         "coverage",
         "nrmse_mean",
         "nrmse_stddev",
     ]
     if noise_floor is not None:
-        pool_fieldnames.append("significant")
+        grid_fieldnames.append("significant")
 
-    with pool_csv_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=pool_fieldnames)
+    with grid_csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=grid_fieldnames)
         writer.writeheader()
-        writer.writerows(pool_rows)
+        writer.writerows(grid_rows)
 
     slot_fieldnames = ["scheduler", "num_slots", "median_nrmse", "coverage"]
     if noise_floor is not None:
@@ -552,7 +535,7 @@ def main() -> None:
         writer.writerows(slot_rows)
 
     print(f"\nResults written to:", file=sys.stderr)
-    print(f"  {pool_csv_path}", file=sys.stderr)
+    print(f"  {grid_csv_path}", file=sys.stderr)
     print(f"  {slot_csv_path}", file=sys.stderr)
 
 
