@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Sweep (scheduler × estimator) and (scheduler × slot-count) combinations
-to evaluate accuracy of adaptive scheduling strategies.
+across all workload traces to evaluate accuracy of adaptive scheduling strategies.
 
 Scheduler/estimator grid: fixed pool_size=16 and num_slots=4, sweeps all
 scheduler × estimator combinations. Outputs q2_scheduler_estimator.csv.
 Slot-count axis: controls --num-slots passed to saccade simulate.
+Both sweeps iterate over every .perfetto trace in --traces-dir.
 """
 
 import argparse
 import csv
 import json
-import math
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -145,13 +144,9 @@ def write_filtered_library(
     return len(filtered)
 
 
-def extract_gt_event_names(gt_trace_json: dict | None, rates_trace: Path, saccade: Path) -> list[str]:
+def extract_gt_event_names(rates_trace: Path, saccade: Path) -> list[str]:
     """Extract the ordered list of event names present in the GT trace by running
-    evaluate against itself (which surfaces all GT event names in per_event). Falls
-    back to reading the trace indirectly via a dummy evaluate call."""
-    # We can't directly parse the perfetto proto without a dependency, so we call
-    # evaluate --json with the same trace as both GT and estimated; coverage=1 and
-    # nrmse=0 for all events; we just want the event names.
+    evaluate against itself."""
     result = subprocess.run(
         [
             str(saccade),
@@ -213,10 +208,11 @@ def simulate_and_eval(
     q_schedule: int,
     seed: int | None,
     tmp_dir: Path,
+    workload: str,
     trial: int = 0,
 ) -> dict:
     """Run one simulate + evaluate pair. Returns the evaluate JSON dict."""
-    trace_path = tmp_dir / f"est_{scheduler}_{estimator}_slots{num_slots}_t{trial}.perfetto"
+    trace_path = tmp_dir / f"est_{workload}_{scheduler}_{estimator}_slots{num_slots}_t{trial}.perfetto"
     run_simulate(
         saccade,
         library,
@@ -245,6 +241,7 @@ def run_combo(
     seed: int | None,
     llm_trials: int,
     tmp_dir: Path,
+    workload: str,
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Run simulate+evaluate for a given combo, repeating for LLM schedulers.
 
@@ -266,6 +263,7 @@ def run_combo(
             q_schedule,
             seed,
             tmp_dir,
+            workload,
             trial,
         )
         mn = median_nrmse(eval_json)
@@ -296,27 +294,27 @@ def run_combo(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep (scheduler × estimator) and (scheduler × slot-count) "
-            "combinations to evaluate accuracy of adaptive scheduling strategies."
+            "Sweep (scheduler × estimator) and (scheduler × slot-count) combinations "
+            "across all workload traces to evaluate accuracy of adaptive scheduling strategies."
         )
     )
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("../target/release/saccade"),
+        default=Path("./target/release/saccade"),
         help="Path to the saccade binary (default: ./target/release/saccade)",
     )
     parser.add_argument(
         "--library",
         type=Path,
-        default=Path("../event_lib.json"),
+        required=True,
         help="Event library JSON file (produced by saccade generate)",
     )
     parser.add_argument(
-        "--gt-trace",
+        "--traces-dir",
         type=Path,
-        required=True,
-        help="Ground-truth Perfetto trace produced by saccade sweep --trace",
+        default=Path("./sweep_data_eval_traces"),
+        help="Directory of ground-truth .perfetto traces (default: ./sweep_data_eval_traces)",
     )
     parser.add_argument(
         "--results-dir",
@@ -362,15 +360,19 @@ def main() -> None:
     # Resolve paths.
     args.saccade = args.saccade.resolve()
     args.library = args.library.resolve()
-    args.gt_trace = args.gt_trace.resolve()
+    args.traces_dir = args.traces_dir.resolve()
     args.results_dir = args.results_dir.resolve()
 
     if not args.saccade.exists():
         parser.error(f"saccade binary not found: {args.saccade}")
     if not args.library.exists():
         parser.error(f"Library file not found: {args.library}")
-    if not args.gt_trace.exists():
-        parser.error(f"GT trace not found: {args.gt_trace}")
+    if not args.traces_dir.is_dir():
+        parser.error(f"Traces directory not found: {args.traces_dir}")
+
+    traces = sorted(args.traces_dir.glob("*.perfetto"))
+    if not traces:
+        parser.error(f"No .perfetto files found in {args.traces_dir}")
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,9 +381,9 @@ def main() -> None:
     # Load library JSON once.
     library_data = json.loads(args.library.read_text())
 
-    print("Discovering events in GT trace...", file=sys.stderr)
-    gt_event_names = extract_gt_event_names(None, args.gt_trace, args.saccade)
-    print(f"  Found {len(gt_event_names)} unique events in GT trace.", file=sys.stderr)
+    FIXED_POOL_SIZE = 16
+    FIXED_NUM_SLOTS = 4
+    FIXED_ESTIMATOR = "propagate"
 
     grid_csv_path = args.results_dir / "q2_scheduler_estimator.csv"
     slot_csv_path = args.results_dir / "q2_slot_count.csv"
@@ -389,127 +391,129 @@ def main() -> None:
     grid_rows: list[dict] = []
     slot_rows: list[dict] = []
 
+    grid_combos = [(sched, est) for sched in SCHEDULERS for est in ESTIMATORS]
+    slot_combos = [(sched, ns) for sched in SCHEDULERS for ns in SLOT_COUNTS]
+
+    print(
+        f"Found {len(traces)} workload trace(s). "
+        f"Grid: {len(grid_combos)} combos × {len(traces)} workloads = "
+        f"{len(grid_combos) * len(traces)} total. "
+        f"Slot-count: {len(slot_combos)} combos × {len(traces)} workloads = "
+        f"{len(slot_combos) * len(traces)} total.",
+        file=sys.stderr,
+    )
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
 
-        FIXED_POOL_SIZE = 16
-        FIXED_NUM_SLOTS = 4
-        FIXED_ESTIMATOR = "propagate"
+        for trace_path in traces:
+            workload = trace_path.stem
+            print(f"\n=== Workload: {workload} ===", file=sys.stderr)
 
-        filtered_lib_16_path = tmp_dir / f"lib_pool{FIXED_POOL_SIZE}.json"
-        actual_size = write_filtered_library(
-            library_data, gt_event_names, FIXED_POOL_SIZE, filtered_lib_16_path
-        )
-        if actual_size < FIXED_POOL_SIZE:
-            print(
-                f"  Warning: pool_size={FIXED_POOL_SIZE} requested but only "
-                f"{actual_size} events available in GT trace + library.",
-                file=sys.stderr,
+            print("  Discovering events in GT trace...", file=sys.stderr)
+            gt_event_names = extract_gt_event_names(trace_path, args.saccade)
+            print(f"  Found {len(gt_event_names)} unique events.", file=sys.stderr)
+
+            filtered_lib_path = tmp_dir / f"lib_pool{FIXED_POOL_SIZE}_{workload}.json"
+            actual_size = write_filtered_library(
+                library_data, gt_event_names, FIXED_POOL_SIZE, filtered_lib_path
             )
-
-        # -----------------------------------------------------------------------
-        # Scheduler/estimator grid: fix pool_size=16, num_slots=4, sweep scheduler × estimator
-        # -----------------------------------------------------------------------
-        grid_combos = [(sched, est) for sched in SCHEDULERS for est in ESTIMATORS]
-        print(
-            f"\nScheduler/estimator grid: {len(grid_combos)} combinations "
-            f"(pool_size={FIXED_POOL_SIZE}, num_slots={FIXED_NUM_SLOTS} fixed)",
-            file=sys.stderr,
-        )
-
-        bar = tqdm(grid_combos, desc="scheduler/estimator grid", unit="combo")
-        for scheduler, estimator in bar:
-            bar.set_postfix_str(f"{scheduler}/{estimator}")
-
-            try:
-                med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
-                    saccade=args.saccade,
-                    library=filtered_lib_16_path,
-                    rates_trace=args.gt_trace,
-                    scheduler=scheduler,
-                    estimator=estimator,
-                    num_slots=FIXED_NUM_SLOTS,
-                    q_schedule=args.q_schedule,
-                    seed=args.seed,
-                    llm_trials=args.llm_trials,
-                    tmp_dir=tmp_dir,
-                )
-            except subprocess.CalledProcessError as exc:
-                tqdm.write(
-                    f"  ERROR: {scheduler}/{estimator}: {exc}",
+            if actual_size < FIXED_POOL_SIZE:
+                print(
+                    f"  Warning: pool_size={FIXED_POOL_SIZE} requested but only "
+                    f"{actual_size} events available in GT trace + library.",
                     file=sys.stderr,
                 )
-                med_nrmse = cov = nrmse_mean = nrmse_std = None
 
-            sig = is_significant(med_nrmse, noise_floor)
+            # -------------------------------------------------------------------
+            # Scheduler/estimator grid
+            # -------------------------------------------------------------------
+            bar = tqdm(grid_combos, desc=f"  grid [{workload}]", unit="combo")
+            for scheduler, estimator in bar:
+                bar.set_postfix_str(f"{scheduler}/{estimator}")
 
-            row: dict = {
-                "scheduler": scheduler,
-                "estimator": estimator,
-                "median_nrmse": med_nrmse if med_nrmse is not None else "",
-                "coverage": cov if cov is not None else "",
-                "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
-                "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
-            }
-            if noise_floor is not None:
-                row["significant"] = "" if sig is None else str(sig).lower()
-            grid_rows.append(row)
+                try:
+                    med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
+                        saccade=args.saccade,
+                        library=filtered_lib_path,
+                        rates_trace=trace_path,
+                        scheduler=scheduler,
+                        estimator=estimator,
+                        num_slots=FIXED_NUM_SLOTS,
+                        q_schedule=args.q_schedule,
+                        seed=args.seed,
+                        llm_trials=args.llm_trials,
+                        tmp_dir=tmp_dir,
+                        workload=workload,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    tqdm.write(
+                        f"  ERROR: {workload}/{scheduler}/{estimator}: {exc}",
+                        file=sys.stderr,
+                    )
+                    med_nrmse = cov = nrmse_mean = nrmse_std = None
 
-        # -----------------------------------------------------------------------
-        # Slot-count axis: fix pool_size=16, estimator=propagate, sweep scheduler × num_slots
-        # -----------------------------------------------------------------------
+                sig = is_significant(med_nrmse, noise_floor)
 
-        slot_combos = [
-            (sched, ns)
-            for sched in SCHEDULERS
-            for ns in SLOT_COUNTS
-        ]
-        print(
-            f"\nSlot-count sweep: {len(slot_combos)} combinations "
-            f"(pool_size={FIXED_POOL_SIZE}, estimator={FIXED_ESTIMATOR})",
-            file=sys.stderr,
-        )
+                row: dict = {
+                    "workload": workload,
+                    "scheduler": scheduler,
+                    "estimator": estimator,
+                    "median_nrmse": med_nrmse if med_nrmse is not None else "",
+                    "coverage": cov if cov is not None else "",
+                    "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
+                    "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
+                }
+                if noise_floor is not None:
+                    row["significant"] = "" if sig is None else str(sig).lower()
+                grid_rows.append(row)
 
-        bar = tqdm(slot_combos, desc="slot-count sweep", unit="combo")
-        for scheduler, num_slots in bar:
-            bar.set_postfix_str(f"{scheduler}/slots={num_slots}")
+            # -------------------------------------------------------------------
+            # Slot-count sweep
+            # -------------------------------------------------------------------
+            bar = tqdm(slot_combos, desc=f"  slots [{workload}]", unit="combo")
+            for scheduler, num_slots in bar:
+                bar.set_postfix_str(f"{scheduler}/slots={num_slots}")
 
-            try:
-                med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
-                    saccade=args.saccade,
-                    library=filtered_lib_16_path,
-                    rates_trace=args.gt_trace,
-                    scheduler=scheduler,
-                    estimator=FIXED_ESTIMATOR,
-                    num_slots=num_slots,
-                    q_schedule=args.q_schedule,
-                    seed=args.seed,
-                    llm_trials=args.llm_trials,
-                    tmp_dir=tmp_dir,
-                )
-            except subprocess.CalledProcessError as exc:
-                tqdm.write(
-                    f"  ERROR: {scheduler}/slots={num_slots}: {exc}",
-                    file=sys.stderr,
-                )
-                med_nrmse = cov = None
+                try:
+                    med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
+                        saccade=args.saccade,
+                        library=filtered_lib_path,
+                        rates_trace=trace_path,
+                        scheduler=scheduler,
+                        estimator=FIXED_ESTIMATOR,
+                        num_slots=num_slots,
+                        q_schedule=args.q_schedule,
+                        seed=args.seed,
+                        llm_trials=args.llm_trials,
+                        tmp_dir=tmp_dir,
+                        workload=workload,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    tqdm.write(
+                        f"  ERROR: {workload}/{scheduler}/slots={num_slots}: {exc}",
+                        file=sys.stderr,
+                    )
+                    med_nrmse = cov = nrmse_mean = nrmse_std = None
 
-            sig = is_significant(med_nrmse, noise_floor)
+                sig = is_significant(med_nrmse, noise_floor)
 
-            row = {
-                "scheduler": scheduler,
-                "num_slots": num_slots,
-                "median_nrmse": med_nrmse if med_nrmse is not None else "",
-                "coverage": cov if cov is not None else "",
-            }
-            if noise_floor is not None:
-                row["significant"] = "" if sig is None else str(sig).lower()
-            slot_rows.append(row)
+                row = {
+                    "workload": workload,
+                    "scheduler": scheduler,
+                    "num_slots": num_slots,
+                    "median_nrmse": med_nrmse if med_nrmse is not None else "",
+                    "coverage": cov if cov is not None else "",
+                }
+                if noise_floor is not None:
+                    row["significant"] = "" if sig is None else str(sig).lower()
+                slot_rows.append(row)
 
     # -----------------------------------------------------------------------
     # Write CSVs
     # -----------------------------------------------------------------------
     grid_fieldnames = [
+        "workload",
         "scheduler",
         "estimator",
         "median_nrmse",
@@ -525,7 +529,7 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(grid_rows)
 
-    slot_fieldnames = ["scheduler", "num_slots", "median_nrmse", "coverage"]
+    slot_fieldnames = ["workload", "scheduler", "num_slots", "median_nrmse", "coverage"]
     if noise_floor is not None:
         slot_fieldnames.append("significant")
 
