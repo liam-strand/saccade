@@ -145,7 +145,7 @@ mod tests {
     fn next_step_cycles() {
         let mut s = StaticLlmScheduler::new(
             vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             None,
             None,
         );
@@ -226,7 +226,7 @@ mod tests {
         ];
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
 
-        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
+        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4", None);
         let mut s = StaticLlmScheduler::new(event_info, client, None, None);
         s.all_events = all_events.clone();
         s.num_slots = 4;

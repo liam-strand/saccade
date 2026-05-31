@@ -6,7 +6,7 @@
 # same-batch Pearson r (python/correlation.json) with expert cross-batch correlations grounded
 # in AMD Zen micro-architecture semantics.
 
-estimator = "kalman"
+# estimator = "kalman"
 
 [kalman]
 # Calibrated from temporal step-variance of compute-bound npb_* benchmarks:
@@ -44,3 +44,5 @@ correlation_path               = "python/correlation_expert.json"
 # Off-diagonal Q per quantum: dP_ij = scale · process_noise_per_ns · elapsed_ns · r_ij.
 # 0.5 keeps scale·|r| ≤ 0.5 < 1, preventing rank-deficiency accumulation.
 correlation_process_noise_scale = 0.5
+
+llm.update_interval = 100

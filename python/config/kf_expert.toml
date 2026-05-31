@@ -1,0 +1,12 @@
+# Kalman filter: expert-calibrated hyperparameters + expert-augmented correlation.
+# Correlation matrix from python/expert_correlation.py: data-driven correlations
+# supplemented with AMD Zen micro-architecture expert priors.
+# Usage: --config python/config/kf_expert.toml  (from repo root)
+
+[kalman]
+process_noise_per_ns            = 1e-8
+min_measurement_variance        = 1e-18
+initial_variance                = 1000.0
+uncertainty_reference_variance  = 0.5
+correlation_process_noise_scale = 0.5
+correlation_path                = "python/correlation_expert.json"

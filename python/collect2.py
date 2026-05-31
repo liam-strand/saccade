@@ -36,6 +36,8 @@ SPEC_BENCHMARKS = [
     {
         "suite": "538.imagick_r",
         "slug": "spec_538_imagick_r",
+        # imagevalidate_538_base sorts first alphabetically; name the real binary explicitly.
+        "binary_name": "imagick_r_base.*",
         "args": [
             "-limit", "disk", "0",
             "refrate_input.tga",
@@ -51,7 +53,8 @@ SPEC_BENCHMARKS = [
     {
         "suite": "520.omnetpp_r",
         "slug": "spec_520_omnetpp_r",
-        "args": ["-c", "General", "-r", "0"],
+        # sim-time-limit=2.25s in the ini completes in ~0.2s wall-clock; extend it.
+        "args": ["-c", "General", "-r", "0", "--sim-time-limit=200s"],
     },
 ]
 
@@ -66,9 +69,9 @@ def source_shrc(spec_root: Path) -> dict[str, str]:
     return dict(line.partition("=")[::2] for line in result.stdout.splitlines() if "=" in line)
 
 
-def spec_ensure_built(bench: str, spec_root: Path, env: dict) -> Path:
+def spec_ensure_built(bench: str, spec_root: Path, env: dict, binary_name: str = "*_base.*") -> Path:
     exe_dir = spec_root / "benchspec/CPU" / bench / "exe"
-    binaries = sorted(exe_dir.glob("*_base.*")) if exe_dir.exists() else []
+    binaries = sorted(exe_dir.glob(binary_name)) if exe_dir.exists() else []
     if not binaries:
         try:
             subprocess.run(
@@ -90,7 +93,7 @@ def spec_ensure_built(bench: str, spec_root: Path, env: dict) -> Path:
                 file=sys.stderr,
             )
             raise SystemExit(1) from e
-        binaries = sorted(exe_dir.glob("*_base.*"))
+        binaries = sorted(exe_dir.glob(binary_name))
     if not binaries:
         print(
             f"ERROR: no binary in {exe_dir} after build.\n"
@@ -164,8 +167,13 @@ def run_sweep(
     )
 
 
-def merge_into(src_h5: Path, dst_h5: Path, group: str) -> None:
+def merge_into(src_h5: Path, dst_h5: Path, group: str, replace: bool = False) -> None:
     with h5py.File(src_h5, "r") as src, h5py.File(dst_h5, "a") as dst:
+        if group in dst:
+            if replace:
+                del dst[group]
+            else:
+                raise ValueError(f"Group '{group}' already exists in {dst_h5}. Use --replace to overwrite.")
         src.copy("/", dst, name=group)
 
 
@@ -191,7 +199,7 @@ def build_benchmark_list(
     if run_spec:
         env = source_shrc(spec_root)
         for b in SPEC_BENCHMARKS:
-            binary = spec_ensure_built(b["suite"], spec_root, env)
+            binary = spec_ensure_built(b["suite"], spec_root, env, b.get("binary_name", "*_base.*"))
             cwd = spec_run_dir(b["suite"], spec_root, env)
             benchmarks.append(
                 {
@@ -246,6 +254,18 @@ def main() -> None:
         help="Run only NPB at class W (skip SPEC); for quick smoke tests",
     )
     parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="SLUG",
+        default=None,
+        help="Run only benchmarks with these slugs (e.g. spec_520_omnetpp_r spec_538_imagick_r)",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Overwrite existing groups in the HDF5 output file instead of erroring",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print commands without executing",
@@ -255,7 +275,7 @@ def main() -> None:
     if args.small:
         args.spec = False
 
-    if not args.npb and not args.spec:
+    if not args.npb and not args.spec and not args.only:
         parser.error("At least one of --npb or --spec must be enabled.")
 
     args.saccade = args.saccade.resolve()
@@ -266,6 +286,13 @@ def main() -> None:
         parser.error(f"saccade binary not found: {args.saccade}")
 
     benchmarks = build_benchmark_list(args.npb, args.spec, SPEC_ROOT, args.small)
+
+    if args.only:
+        known = {b["slug"] for b in benchmarks}
+        unknown = set(args.only) - known
+        if unknown:
+            parser.error(f"Unknown slug(s): {', '.join(sorted(unknown))}. Known: {', '.join(sorted(known))}")
+        benchmarks = [b for b in benchmarks if b["slug"] in set(args.only)]
 
     trace_dir = args.output.parent / f"{args.output.stem}_traces"
 
@@ -306,7 +333,7 @@ def main() -> None:
                 args.library,
                 dry_run=False,
             )
-            merge_into(tmp_h5, args.output, b["slug"])
+            merge_into(tmp_h5, args.output, b["slug"], replace=args.replace)
             tmp_h5.unlink()
 
     print(f"Done. Output: {args.output}")

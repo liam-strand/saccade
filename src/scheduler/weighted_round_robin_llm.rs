@@ -194,7 +194,7 @@ mod tests {
     fn make_scheduler(cycle: Vec<EventId>, num_slots: usize) -> WeightedRoundRobinLlmScheduler {
         let mut s = WeightedRoundRobinLlmScheduler::new(
             vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             None,
             None,
         );
@@ -333,7 +333,7 @@ mod tests {
     fn init_rejects_too_few_events() {
         let mut scheduler = WeightedRoundRobinLlmScheduler::new(
             vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             None,
             None,
         );
@@ -378,7 +378,7 @@ mod tests {
             ),
         ];
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
-        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
+        let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4", None);
 
         let pb = llm_common::build_weights_prompt(&event_info, 2, None);
         let response = client.chat(pb.build(), "wrr_setup", None).expect("LLM call should succeed");

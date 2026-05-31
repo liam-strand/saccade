@@ -24,6 +24,10 @@
 
 # --- LLM scheduler parameters ---
 # [llm]
+# base_url = "http://dubliner.cs.northwestern.edu:11434"  # Ollama (default)
+# base_url = "https://openrouter.ai/api"                  # OpenRouter
+# model = "gemma4"
+# api_key = "sk-or-..."     # required for OpenRouter; omit for Ollama
 # guidance = "I'm most interested in the memory behavior of this program"
 
 # --- EMA estimator parameters ---

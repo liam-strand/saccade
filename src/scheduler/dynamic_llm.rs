@@ -67,6 +67,7 @@ impl DynamicLlmScheduler {
         simulation_mode: bool,
         latency_profile: Option<LlmLatencyProfile>,
     ) -> Self {
+
         Self {
             client,
             event_info,
@@ -237,6 +238,7 @@ impl Scheduler for DynamicLlmScheduler {
         if self.buffered_schedule.is_some() && self.step_count >= self.buffered_release_step {
             self.schedule = self.buffered_schedule.take().unwrap();
             self.step_idx = 0;
+            self.steps_since_update = 0;
             tracing::info!(
                 "DynamicLlmScheduler: applying buffered update at step {}",
                 self.step_count
@@ -302,7 +304,7 @@ impl Scheduler for DynamicLlmScheduler {
         // Reset the counter only on successful send; if the worker is busy,
         // leave the counter alone so we retry on the next step.
         self.steps_since_update += 1;
-        if self.steps_since_update >= self.update_interval {
+        if self.steps_since_update >= self.update_interval && self.buffered_schedule.is_none() {
             let messages = self.build_update_prompt(estimator).build().to_vec();
             let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("dynamic_update"));
             if let Some(tx) = &self.request_tx
@@ -391,7 +393,7 @@ mod tests {
                 (1, "branch-misses".into(), "Branch mispredictions".into()),
                 (2, "instructions".into(), "Instructions retired".into()),
             ],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             update_interval,
             None,
             simulation_mode,
@@ -451,7 +453,7 @@ mod tests {
     fn init_rejects_zero_update_interval() {
         let mut s = DynamicLlmScheduler::new(
             vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             0,
             None,
             false,
@@ -463,6 +465,56 @@ mod tests {
     }
 
     #[test]
+    fn no_request_while_buffer_held() {
+        let mut s = make_scheduler(2, false);
+        let (tx, rx) = mpsc::sync_channel(4);
+        s.request_tx = Some(tx);
+
+        let q = empty_quantum();
+        let est = MockEstimator::new();
+
+        s.buffered_schedule = Some(vec![ScheduleStep {
+            duration_ms: 5,
+            events: vec![1, 2],
+        }]);
+        s.buffered_release_step = 1_000;
+
+        for _ in 0..10 {
+            s.next_step(&q, &est);
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no request should be sent while buffered_schedule is held"
+        );
+    }
+
+    #[test]
+    fn steps_since_update_resets_on_activation() {
+        let mut s = make_scheduler(10, false);
+        let q = empty_quantum();
+        let est = MockEstimator::new();
+
+        s.buffered_schedule = Some(vec![ScheduleStep {
+            duration_ms: 5,
+            events: vec![1, 2],
+        }]);
+        s.buffered_release_step = 5;
+
+        for _ in 0..5 {
+            s.next_step(&q, &est);
+        }
+
+        assert!(s.buffered_schedule.is_none(), "buffer should be consumed");
+        // The reset happens before the step-3 increment in the same next_step call,
+        // so the activation step itself counts as step 1 of the new interval.
+        assert_eq!(
+            s.steps_since_update, 1,
+            "counter should reset at activation and count that step as the first"
+        );
+    }
+
+    #[test]
     #[ignore = "requires network access to dubliner.cs.northwestern.edu"]
     fn llm_generates_parseable_update() {
         let mut s = DynamicLlmScheduler::new(
@@ -471,7 +523,7 @@ mod tests {
                 (1, "branch-misses".into(), "Branch mispredictions".into()),
                 (2, "instructions".into(), "Instructions retired".into()),
             ],
-            LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4"),
+            LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4", None),
             1,
             None,
             false,
