@@ -19,6 +19,8 @@ import argparse
 
 from tqdm import tqdm
 
+import numpy as np
+
 from sim_utils import (
     SCHEDULERS,
     ESTIMATORS,
@@ -29,69 +31,9 @@ from sim_utils import (
     load_noise_floor,
     mean_coverage,
     median_nrmse,
-    parallel_run_combos,
     run_batch_simulate,
-    run_combo,
     run_evaluate,
 )
-
-
-# ---------------------------------------------------------------------------
-# Per-combo worker (used by parallel_run_combos)
-# ---------------------------------------------------------------------------
-
-
-def _run_one_combo(
-    combo: tuple,
-    *,
-    saccade: Path,
-    library: Path,
-    trace_map: dict,
-    num_slots: int,
-    q_schedule: int,
-    seed: int | None,
-    llm_trials: int,
-    traces_out_dir: Path,
-    base_config: Path | None,
-    noise_floor: float | None,
-) -> dict:
-    """Execute run_combo for one (workload, scheduler, estimator) tuple.
-
-    Returns a row dict ready for the CSV writer, with error values on failure.
-    """
-    workload, scheduler, estimator = combo
-    try:
-        med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
-            saccade=saccade,
-            library=library,
-            rates_trace=trace_map[workload],
-            scheduler=scheduler,
-            estimator=estimator,
-            num_slots=num_slots,
-            q_schedule=q_schedule,
-            seed=seed,
-            llm_trials=llm_trials,
-            tmp_dir=traces_out_dir,
-            workload=workload,
-            base_config=base_config,
-        )
-    except subprocess.CalledProcessError as exc:
-        tqdm.write(f"  ERROR: {workload}/{scheduler}/{estimator}: {exc}", file=sys.stderr)
-        med_nrmse = cov = nrmse_mean = nrmse_std = None
-
-    sig = is_significant(med_nrmse, noise_floor)
-    row: dict = {
-        "workload": workload,
-        "scheduler": scheduler,
-        "estimator": estimator,
-        "median_nrmse": med_nrmse if med_nrmse is not None else "",
-        "coverage": cov if cov is not None else "",
-        "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
-        "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
-    }
-    if noise_floor is not None:
-        row["significant"] = "" if sig is None else str(sig).lower()
-    return row
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("./results"),
         help="Directory to write CSV output files (default: ./results)",
-    )
-    parser.add_argument(
-        "--llm-trials",
-        type=int,
-        default=3,
-        help="Number of trials for non-deterministic LLM schedulers (default: 3)",
     )
     parser.add_argument(
         "--seed",
@@ -194,16 +130,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--llm-trials",
+        type=int,
+        default=3,
+        help="Number of trials for LLM schedulers; results are averaged (default: 3)",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
-        help="Max parallel workers for non-LLM combos (default: 1)",
-    )
-    parser.add_argument(
-        "--llm-concurrency",
-        type=int,
-        default=1,
-        help="Max parallel workers for LLM combos (default: 1)",
+        help="Rayon threads for each per-workload batch call (default: 1)",
     )
     return parser
 
@@ -278,55 +214,58 @@ def main() -> None:
     if args.exclude_schedulers:
         print(f"Excluded schedulers: {args.exclude_schedulers}", file=sys.stderr)
 
-    # -----------------------------------------------------------------------
-    # Non-LLM combos: batch simulate per workload (1 trace load shared across
-    # all scheduler × estimator pairs), then evaluate in parallel.
-    # -----------------------------------------------------------------------
-    non_llm_schedulers = [s for s in schedulers if s not in LLM_SCHEDULERS]
     llm_schedulers = [s for s in schedulers if s in LLM_SCHEDULERS]
+    non_llm_schedulers = [s for s in schedulers if s not in LLM_SCHEDULERS]
 
-    non_llm_combos = [
-        (t.stem, sched, est)
-        for t in traces
-        for sched in non_llm_schedulers
-        for est in ESTIMATORS
-    ]
+    def _out_trace(workload: str, sched: str, est: str, trial: int = 0) -> Path:
+        return traces_out_dir / f"est_{workload}_{sched}_{est}_slots{FIXED_NUM_SLOTS}_t{trial}.perfetto"
+
+    def _batch_spec(workload: str, sched_list: list[str], trial: int) -> list[dict]:
+        entries = []
+        for sched in sched_list:
+            for est in ESTIMATORS:
+                entry: dict = {
+                    "scheduler": sched,
+                    "estimator": est,
+                    "trace": str(_out_trace(workload, sched, est, trial)),
+                }
+                if args.seed is not None:
+                    entry["seed"] = args.seed
+                entries.append(entry)
+        return entries
 
     combo_to_row: dict[tuple, dict] = {}
 
-    def _out_trace(workload: str, sched: str, est: str) -> Path:
-        return traces_out_dir / f"est_{workload}_{sched}_{est}_slots{FIXED_NUM_SLOTS}_t0.perfetto"
+    for trace in tqdm(traces, desc="simulate", unit="workload"):
+        workload = trace.stem
 
-    if non_llm_combos:
-        # Group by workload so each batch call loads the trace only once.
-        by_workload: dict[str, list[tuple[str, str]]] = defaultdict(list)
-        for workload, sched, est in non_llm_combos:
-            by_workload[workload].append((sched, est))
+        # Trial 0: all schedulers batched together in one process.
+        # Trials 1..N-1: LLM schedulers only (non-LLM is deterministic with a
+        # fixed seed so repeating adds no information).
+        trial_specs = [_batch_spec(workload, schedulers, 0)]
+        for trial in range(1, args.llm_trials):
+            if llm_schedulers:
+                trial_specs.append(_batch_spec(workload, llm_schedulers, trial))
 
-        for trace in tqdm(traces, desc="batch-simulate", unit="workload"):
-            workload = trace.stem
-            pairs = by_workload.get(workload, [])
-            if not pairs:
-                continue
-            batch_spec = [
-                {
-                    "scheduler": sched,
-                    "estimator": est,
-                    "trace": str(_out_trace(workload, sched, est)),
-                    **({"seed": args.seed} if args.seed is not None else {}),
-                }
-                for sched, est in pairs
-            ]
+        failed = False
+        for trial, spec in enumerate(trial_specs):
             try:
                 run_batch_simulate(
-                    args.saccade, args.library, trace, batch_spec,
+                    args.saccade, args.library, trace, spec,
                     FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
                     traces_out_dir, args.base_config,
                 )
             except subprocess.CalledProcessError as exc:
-                tqdm.write(f"  ERROR batch-simulate {workload}: {exc}", file=sys.stderr)
-                for sched, est in pairs:
-                    sig = is_significant(None, noise_floor)
+                tqdm.write(
+                    f"  ERROR batch-simulate {workload} trial {trial}: {exc}",
+                    file=sys.stderr,
+                )
+                failed = True
+                break
+
+        if failed:
+            for sched in schedulers:
+                for est in ESTIMATORS:
                     row: dict = {
                         "workload": workload, "scheduler": sched, "estimator": est,
                         "median_nrmse": "", "coverage": "",
@@ -335,71 +274,59 @@ def main() -> None:
                     if noise_floor is not None:
                         row["significant"] = ""
                     combo_to_row[(workload, sched, est)] = row
-                continue
+            continue
 
-            def _eval(ws_es: tuple[str, str, str]) -> dict:
-                wl, sc, es = ws_es
-                out_trace = _out_trace(wl, sc, es)
-                try:
-                    ev = run_evaluate(args.saccade, trace_map[wl], out_trace)
-                    mn = median_nrmse(ev)
-                    mc = mean_coverage(ev)
-                except subprocess.CalledProcessError as exc:
-                    tqdm.write(f"  ERROR evaluate {wl}/{sc}/{es}: {exc}", file=sys.stderr)
-                    mn = mc = None
-                sig = is_significant(mn, noise_floor)
-                r: dict = {
-                    "workload": wl, "scheduler": sc, "estimator": es,
-                    "median_nrmse": mn if mn is not None else "",
-                    "coverage": mc if mc is not None else "",
-                    "nrmse_mean": mn if mn is not None else "",
-                    "nrmse_stddev": "",
+        # Evaluate all output traces in parallel, then average LLM results.
+        def _eval_trial(args_tuple: tuple) -> tuple:
+            sched, est, trial = args_tuple
+            out_trace = _out_trace(workload, sched, est, trial)
+            try:
+                ev = run_evaluate(args.saccade, trace, out_trace)
+                return sched, est, trial, median_nrmse(ev), mean_coverage(ev)
+            except subprocess.CalledProcessError as exc:
+                tqdm.write(
+                    f"  ERROR evaluate {workload}/{sched}/{est} t{trial}: {exc}",
+                    file=sys.stderr,
+                )
+                return sched, est, trial, None, None
+
+        n_trials = {sched: args.llm_trials if sched in LLM_SCHEDULERS else 1
+                    for sched in schedulers}
+        eval_work = [
+            (sched, est, t)
+            for sched in schedulers
+            for est in ESTIMATORS
+            for t in range(n_trials[sched])
+        ]
+        raw: dict[tuple, list] = defaultdict(list)
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            for fut in as_completed(ex.submit(_eval_trial, w) for w in eval_work):
+                sched, est, _t, mn, mc = fut.result()
+                raw[(sched, est)].append((mn, mc))
+
+        for sched in schedulers:
+            for est in ESTIMATORS:
+                results = raw[(sched, est)]
+                nrmse_vals = [mn for mn, _ in results if mn is not None]
+                cov_vals = [mc for _, mc in results if mc is not None]
+                final_nrmse = float(np.median(nrmse_vals)) if nrmse_vals else None
+                final_cov = float(np.mean(cov_vals)) if cov_vals else None
+                nrmse_mean = float(np.mean(nrmse_vals)) if nrmse_vals else None
+                nrmse_std = (
+                    float(np.std(nrmse_vals, ddof=1))
+                    if len(nrmse_vals) > 1 else None
+                )
+                sig = is_significant(final_nrmse, noise_floor)
+                row = {
+                    "workload": workload, "scheduler": sched, "estimator": est,
+                    "median_nrmse": final_nrmse if final_nrmse is not None else "",
+                    "coverage": final_cov if final_cov is not None else "",
+                    "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
+                    "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
                 }
                 if noise_floor is not None:
-                    r["significant"] = "" if sig is None else str(sig).lower()
-                return r
-
-            eval_triples = [(workload, sched, est) for sched, est in pairs]
-            with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-                for fut in as_completed(ex.submit(_eval, t) for t in eval_triples):
-                    row = fut.result()
-                    combo_to_row[(row["workload"], row["scheduler"], row["estimator"])] = row
-
-    # -----------------------------------------------------------------------
-    # LLM combos: unchanged path — run_combo via parallel_run_combos,
-    # throttled to llm_concurrency concurrent workers (default 1).
-    # Each worker is still an independent subprocess, which is fine since
-    # llm_concurrency is small and LLM scheduling already dominates latency.
-    # -----------------------------------------------------------------------
-    from functools import partial
-    llm_grid_combos = [
-        (t.stem, sched, est)
-        for t in traces
-        for sched in llm_schedulers
-        for est in ESTIMATORS
-    ]
-    if llm_grid_combos:
-        run_fn = partial(
-            _run_one_combo,
-            saccade=args.saccade,
-            library=args.library,
-            trace_map=trace_map,
-            num_slots=FIXED_NUM_SLOTS,
-            q_schedule=args.q_schedule,
-            seed=args.seed,
-            llm_trials=args.llm_trials,
-            traces_out_dir=traces_out_dir,
-            base_config=args.base_config,
-            noise_floor=noise_floor,
-        )
-        llm_results = parallel_run_combos(
-            llm_grid_combos,
-            run_fn,
-            jobs=args.jobs,
-            llm_concurrency=args.llm_concurrency,
-        )
-        for combo, row in llm_results:
-            combo_to_row[combo] = row
+                    row["significant"] = "" if sig is None else str(sig).lower()
+                combo_to_row[(workload, sched, est)] = row
 
     ordered_rows = [combo_to_row[c] for c in grid_combos if c in combo_to_row]
 
