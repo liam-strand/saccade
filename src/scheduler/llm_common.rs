@@ -231,7 +231,17 @@ pub(super) fn chat_with_retry<T>(
 ) -> Result<T, Box<dyn std::error::Error>> {
     let mut messages = initial_messages;
     for attempt in 0..=max_retries {
+        for (i, msg) in messages.iter().enumerate() {
+            tracing::debug!(
+                "LLM request [attempt={} msg={}] role={}\n{}",
+                attempt,
+                i,
+                msg.role,
+                msg.content
+            );
+        }
         let response = chat_fn(&messages)?;
+        tracing::debug!("LLM response [attempt={}]\n{}", attempt, response);
         match parse(&response) {
             Ok(result) => return Ok(result),
             Err(err) => {

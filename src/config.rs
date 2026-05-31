@@ -89,7 +89,7 @@ impl LlmConfig {
 
     /// Returns the default number of quanta between LLM re-queries.
     fn default_update_interval() -> u32 {
-        10
+        1000
     }
 }
 
