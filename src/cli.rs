@@ -46,6 +46,14 @@ pub enum Commands {
         #[arg(long)]
         guidance: Option<String>,
 
+        /// LLM model name, overrides [llm] model in config file
+        #[arg(long)]
+        llm_model: Option<String>,
+
+        /// LLM inference server base URL, overrides [llm] base_url in config file
+        #[arg(long)]
+        llm_base_url: Option<String>,
+
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]
         q_schedule: Option<u64>,
@@ -140,6 +148,14 @@ pub enum Commands {
         /// Guidance hint for LLM-guided schedulers (e.g. "focus on memory behavior")
         #[arg(long)]
         guidance: Option<String>,
+
+        /// LLM model name, overrides [llm] model in config file
+        #[arg(long)]
+        llm_model: Option<String>,
+
+        /// LLM inference server base URL, overrides [llm] base_url in config file
+        #[arg(long)]
+        llm_base_url: Option<String>,
 
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]

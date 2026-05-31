@@ -42,6 +42,8 @@ fn main() -> std::io::Result<()> {
             scheduler,
             estimator,
             guidance,
+            llm_model,
+            llm_base_url,
             q_schedule,
             q_sample,
             q_output,
@@ -62,6 +64,8 @@ fn main() -> std::io::Result<()> {
                     seed: None,
                     num_slots: None,
                     guidance,
+                    llm_model,
+                    llm_base_url,
                 },
             )?;
             run(library, config, trace, csv, target)?;
@@ -88,6 +92,8 @@ fn main() -> std::io::Result<()> {
                     seed: None,
                     num_slots: None,
                     guidance: None,
+                    llm_model: None,
+                    llm_base_url: None,
                 },
             )?;
             sweep(library, config, trace, matrix, quiet, target)?;
@@ -98,6 +104,8 @@ fn main() -> std::io::Result<()> {
             scheduler,
             estimator,
             guidance,
+            llm_model,
+            llm_base_url,
             q_schedule,
             q_output,
             q_sample,
@@ -121,6 +129,8 @@ fn main() -> std::io::Result<()> {
                     seed,
                     num_slots: Some(num_slots),
                     guidance,
+                    llm_model,
+                    llm_base_url,
                 },
             )?;
             simulate(library, rates_trace, config, csv, trace, llm_latency_profile)?;

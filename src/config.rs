@@ -279,6 +279,10 @@ pub struct CliOverrides {
     pub num_slots: Option<usize>,
     /// Overrides the LLM guidance string.
     pub guidance: Option<String>,
+    /// Overrides the LLM model name.
+    pub llm_model: Option<String>,
+    /// Overrides the LLM inference server base URL.
+    pub llm_base_url: Option<String>,
 }
 
 /// Hard-coded baseline values serialized as the lowest-priority config layer.
@@ -349,6 +353,8 @@ fn build_config(
         .set_override_option("seed", ov.seed.map(|v| v as i64))?
         .set_override_option("num_slots", ov.num_slots.map(|v| v as i64))?
         .set_override_option("llm.guidance", ov.guidance)?
+        .set_override_option("llm.model", ov.llm_model)?
+        .set_override_option("llm.base_url", ov.llm_base_url)?
         .build()?
         .try_deserialize::<ResolvedConfig>()
 }
@@ -395,6 +401,8 @@ mod tests {
             seed: None,
             num_slots: None,
             guidance: None,
+            llm_model: None,
+            llm_base_url: None,
         }
     }
 
