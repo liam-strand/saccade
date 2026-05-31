@@ -62,7 +62,9 @@ impl fmt::Display for SchedulerKind {
 /// LLM connection and behaviour settings shared by all LLM-backed schedulers.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LlmConfig {
-    /// Base URL of the Ollama-compatible inference server.
+    /// Base URL of the OpenAI-compatible inference server.
+    /// - Ollama: `"http://host:11434"` (default)
+    /// - OpenRouter: `"https://openrouter.ai/api"`
     #[serde(default = "LlmConfig::default_base_url")]
     pub base_url: String,
     /// Name of the model to request from the server.
@@ -74,6 +76,10 @@ pub struct LlmConfig {
     /// Optional free-text hint forwarded to the LLM to steer its counter selection.
     #[serde(default)]
     pub guidance: Option<String>,
+    /// Bearer token for services that require authentication (e.g. OpenRouter).
+    /// Leave unset for unauthenticated servers such as local Ollama.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl LlmConfig {
@@ -101,6 +107,7 @@ impl Default for LlmConfig {
             model: Self::default_model(),
             update_interval: Self::default_update_interval(),
             guidance: None,
+            api_key: None,
         }
     }
 }
@@ -174,7 +181,7 @@ impl ResolvedConfig {
                         (id, ev.name.clone(), ev.desc.clone())
                     })
                     .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
                 Box::new(StaticLlmScheduler::new(
                     event_info,
                     client,
@@ -190,7 +197,7 @@ impl ResolvedConfig {
                         (id, ev.name.clone(), ev.desc.clone())
                     })
                     .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
                 Box::new(DynamicLlmScheduler::new(
                     event_info,
                     client,
@@ -208,7 +215,7 @@ impl ResolvedConfig {
                         (id, ev.name.clone(), ev.desc.clone())
                     })
                     .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model);
+                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
                 Box::new(WeightedRoundRobinLlmScheduler::new(
                     event_info,
                     client,

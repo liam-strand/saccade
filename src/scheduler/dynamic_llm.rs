@@ -380,7 +380,7 @@ mod tests {
                 (1, "branch-misses".into(), "Branch mispredictions".into()),
                 (2, "instructions".into(), "Instructions retired".into()),
             ],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             update_interval,
             None,
             simulation_mode,
@@ -439,7 +439,7 @@ mod tests {
     fn init_rejects_zero_update_interval() {
         let mut s = DynamicLlmScheduler::new(
             vec![],
-            LlmClient::new("http://localhost:0", "test-model"),
+            LlmClient::new("http://localhost:0", "test-model", None),
             0,
             None,
             false,
@@ -508,7 +508,7 @@ mod tests {
                 (1, "branch-misses".into(), "Branch mispredictions".into()),
                 (2, "instructions".into(), "Instructions retired".into()),
             ],
-            LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4"),
+            LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4", None),
             1,
             None,
             false,
