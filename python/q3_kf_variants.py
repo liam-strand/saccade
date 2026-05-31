@@ -16,6 +16,7 @@ import argparse
 import csv
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +27,10 @@ from sim_utils import (
     filter_traces_by_kind,
     is_significant,
     load_noise_floor,
-    run_combo,
+    mean_coverage,
+    median_nrmse,
+    run_batch_simulate,
+    run_evaluate,
     REPO_ROOT,
 )
 
@@ -75,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON with 'nrmse_floor' or 'median_nrmse' for significance testing",
     )
+    p.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="Rayon threads for the per-workload batch call (default: 4 = one per KF variant)",
+    )
     return p
 
 
@@ -119,49 +129,80 @@ def main() -> None:
 
     rows: list[dict] = []
 
-    combos = [(t, v) for t in traces for v in KF_VARIANTS]
-    bar = tqdm(combos, desc="kf_variants", unit="combo")
-    for trace_path, variant in bar:
+    # For each workload, batch all 4 KF variants in a single saccade process so
+    # the rates trace is loaded only once.  Each variant carries its own config
+    # file (or None for ema) via the per-combo "config" key.
+    for trace_path in tqdm(traces, desc="kf_variants", unit="workload"):
         workload = trace_path.stem
-        bar.set_postfix_str(f"{workload}/{variant['label']}")
 
-        base_config: Path | None = None
-        if variant["config"] is not None:
-            base_config = config_dir / Path(variant["config"]).name
+        def _out_trace(label: str) -> Path:
+            return tmp_dir / f"est_{workload}_{FIXED_SCHEDULER}_{label}_slots{FIXED_NUM_SLOTS}_t0.perfetto"
+
+        batch_spec = []
+        for variant in KF_VARIANTS:
+            entry: dict = {
+                "scheduler": FIXED_SCHEDULER,
+                "estimator": variant["estimator"],
+                "trace": str(_out_trace(variant["label"])),
+            }
+            if args.seed is not None:
+                entry["seed"] = args.seed
+            if variant["config"] is not None:
+                entry["config"] = str(config_dir / Path(variant["config"]).name)
+            batch_spec.append(entry)
 
         try:
-            med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
-                saccade=args.saccade,
-                library=args.library,
-                rates_trace=trace_path,
-                scheduler=FIXED_SCHEDULER,
-                estimator=variant["estimator"],
-                num_slots=FIXED_NUM_SLOTS,
-                q_schedule=args.q_schedule,
-                seed=args.seed,
-                llm_trials=1,
-                tmp_dir=tmp_dir,
-                workload=f"{workload}_{variant['label']}",
-                base_config=base_config,
+            run_batch_simulate(
+                args.saccade, args.library, trace_path, batch_spec,
+                FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
+                tmp_dir,
+                base_config=None,  # per-combo configs carry all hyperparams
             )
         except subprocess.CalledProcessError as exc:
-            tqdm.write(f"  ERROR {workload}/{variant['label']}: {exc}", file=sys.stderr)
-            med_nrmse = cov = nrmse_mean = nrmse_std = None
+            tqdm.write(f"  ERROR batch-simulate {workload}: {exc}", file=sys.stderr)
+            for variant in KF_VARIANTS:
+                sig = is_significant(None, noise_floor)
+                row: dict = {
+                    "workload": workload,
+                    "scheduler": FIXED_SCHEDULER,
+                    "kf_variant": variant["label"],
+                    "estimator": variant["estimator"],
+                    "median_nrmse": "", "coverage": "",
+                    "nrmse_mean": "", "nrmse_stddev": "",
+                }
+                if noise_floor is not None:
+                    row["significant"] = ""
+                rows.append(row)
+            continue
 
-        sig = is_significant(med_nrmse, noise_floor)
-        row: dict = {
-            "workload": workload,
-            "scheduler": FIXED_SCHEDULER,
-            "kf_variant": variant["label"],
-            "estimator": variant["estimator"],
-            "median_nrmse": med_nrmse if med_nrmse is not None else "",
-            "coverage": cov if cov is not None else "",
-            "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
-            "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
-        }
-        if noise_floor is not None:
-            row["significant"] = "" if sig is None else str(sig).lower()
-        rows.append(row)
+        def _eval_variant(variant: dict) -> dict:
+            label = variant["label"]
+            out_trace = _out_trace(label)
+            try:
+                ev = run_evaluate(args.saccade, trace_path, out_trace)
+                mn = median_nrmse(ev)
+                mc = mean_coverage(ev)
+            except subprocess.CalledProcessError as exc:
+                tqdm.write(f"  ERROR evaluate {workload}/{label}: {exc}", file=sys.stderr)
+                mn = mc = None
+            sig = is_significant(mn, noise_floor)
+            r: dict = {
+                "workload": workload,
+                "scheduler": FIXED_SCHEDULER,
+                "kf_variant": label,
+                "estimator": variant["estimator"],
+                "median_nrmse": mn if mn is not None else "",
+                "coverage": mc if mc is not None else "",
+                "nrmse_mean": mn if mn is not None else "",
+                "nrmse_stddev": "",
+            }
+            if noise_floor is not None:
+                r["significant"] = "" if sig is None else str(sig).lower()
+            return r
+
+        with ThreadPoolExecutor(max_workers=len(KF_VARIANTS)) as ex:
+            variant_rows = list(ex.map(_eval_variant, KF_VARIANTS))
+        rows.extend(variant_rows)
 
     with out_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

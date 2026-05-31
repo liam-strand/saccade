@@ -10,11 +10,12 @@ Outputs timestamped results under --results-dir/<timestamp>/.
 import csv
 import subprocess
 import sys
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 import argparse
-from functools import partial
 
 from tqdm import tqdm
 
@@ -22,11 +23,16 @@ from sim_utils import (
     SCHEDULERS,
     ESTIMATORS,
     FIXED_NUM_SLOTS,
+    LLM_SCHEDULERS,
     filter_traces_by_kind,
     is_significant,
     load_noise_floor,
+    mean_coverage,
+    median_nrmse,
     parallel_run_combos,
+    run_batch_simulate,
     run_combo,
+    run_evaluate,
 )
 
 
@@ -272,28 +278,126 @@ def main() -> None:
     if args.exclude_schedulers:
         print(f"Excluded schedulers: {args.exclude_schedulers}", file=sys.stderr)
 
-    run_fn = partial(
-        _run_one_combo,
-        saccade=args.saccade,
-        library=args.library,
-        trace_map=trace_map,
-        num_slots=FIXED_NUM_SLOTS,
-        q_schedule=args.q_schedule,
-        seed=args.seed,
-        llm_trials=args.llm_trials,
-        traces_out_dir=traces_out_dir,
-        base_config=args.base_config,
-        noise_floor=noise_floor,
-    )
+    # -----------------------------------------------------------------------
+    # Non-LLM combos: batch simulate per workload (1 trace load shared across
+    # all scheduler × estimator pairs), then evaluate in parallel.
+    # -----------------------------------------------------------------------
+    non_llm_schedulers = [s for s in schedulers if s not in LLM_SCHEDULERS]
+    llm_schedulers = [s for s in schedulers if s in LLM_SCHEDULERS]
 
-    results = parallel_run_combos(
-        grid_combos,
-        run_fn,
-        jobs=args.jobs,
-        llm_concurrency=args.llm_concurrency,
-    )
+    non_llm_combos = [
+        (t.stem, sched, est)
+        for t in traces
+        for sched in non_llm_schedulers
+        for est in ESTIMATORS
+    ]
 
-    combo_to_row = {combo: row for combo, row in results}
+    combo_to_row: dict[tuple, dict] = {}
+
+    def _out_trace(workload: str, sched: str, est: str) -> Path:
+        return traces_out_dir / f"est_{workload}_{sched}_{est}_slots{FIXED_NUM_SLOTS}_t0.perfetto"
+
+    if non_llm_combos:
+        # Group by workload so each batch call loads the trace only once.
+        by_workload: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for workload, sched, est in non_llm_combos:
+            by_workload[workload].append((sched, est))
+
+        for trace in tqdm(traces, desc="batch-simulate", unit="workload"):
+            workload = trace.stem
+            pairs = by_workload.get(workload, [])
+            if not pairs:
+                continue
+            batch_spec = [
+                {
+                    "scheduler": sched,
+                    "estimator": est,
+                    "trace": str(_out_trace(workload, sched, est)),
+                    **({"seed": args.seed} if args.seed is not None else {}),
+                }
+                for sched, est in pairs
+            ]
+            try:
+                run_batch_simulate(
+                    args.saccade, args.library, trace, batch_spec,
+                    FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
+                    traces_out_dir, args.base_config,
+                )
+            except subprocess.CalledProcessError as exc:
+                tqdm.write(f"  ERROR batch-simulate {workload}: {exc}", file=sys.stderr)
+                for sched, est in pairs:
+                    sig = is_significant(None, noise_floor)
+                    row: dict = {
+                        "workload": workload, "scheduler": sched, "estimator": est,
+                        "median_nrmse": "", "coverage": "",
+                        "nrmse_mean": "", "nrmse_stddev": "",
+                    }
+                    if noise_floor is not None:
+                        row["significant"] = ""
+                    combo_to_row[(workload, sched, est)] = row
+                continue
+
+            def _eval(ws_es: tuple[str, str, str]) -> dict:
+                wl, sc, es = ws_es
+                out_trace = _out_trace(wl, sc, es)
+                try:
+                    ev = run_evaluate(args.saccade, trace_map[wl], out_trace)
+                    mn = median_nrmse(ev)
+                    mc = mean_coverage(ev)
+                except subprocess.CalledProcessError as exc:
+                    tqdm.write(f"  ERROR evaluate {wl}/{sc}/{es}: {exc}", file=sys.stderr)
+                    mn = mc = None
+                sig = is_significant(mn, noise_floor)
+                r: dict = {
+                    "workload": wl, "scheduler": sc, "estimator": es,
+                    "median_nrmse": mn if mn is not None else "",
+                    "coverage": mc if mc is not None else "",
+                    "nrmse_mean": mn if mn is not None else "",
+                    "nrmse_stddev": "",
+                }
+                if noise_floor is not None:
+                    r["significant"] = "" if sig is None else str(sig).lower()
+                return r
+
+            eval_triples = [(workload, sched, est) for sched, est in pairs]
+            with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+                for fut in as_completed(ex.submit(_eval, t) for t in eval_triples):
+                    row = fut.result()
+                    combo_to_row[(row["workload"], row["scheduler"], row["estimator"])] = row
+
+    # -----------------------------------------------------------------------
+    # LLM combos: keep the existing throttled serial path.
+    # -----------------------------------------------------------------------
+    from functools import partial
+    llm_grid_combos = [
+        (t.stem, sched, est)
+        for t in traces
+        for sched in llm_schedulers
+        for est in ESTIMATORS
+    ]
+    if llm_grid_combos:
+        run_fn = partial(
+            _run_one_combo,
+            saccade=args.saccade,
+            library=args.library,
+            trace_map=trace_map,
+            num_slots=FIXED_NUM_SLOTS,
+            q_schedule=args.q_schedule,
+            seed=args.seed,
+            llm_trials=args.llm_trials,
+            traces_out_dir=traces_out_dir,
+            base_config=args.base_config,
+            noise_floor=noise_floor,
+        )
+        llm_results = parallel_run_combos(
+            llm_grid_combos,
+            run_fn,
+            jobs=1,
+            llm_concurrency=args.llm_concurrency,
+        )
+        for combo, row in llm_results:
+            combo_to_row[combo] = row
+
     ordered_rows = [combo_to_row[c] for c in grid_combos if c in combo_to_row]
 
     grid_fieldnames = [

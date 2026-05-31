@@ -1,7 +1,7 @@
 //! Implementation of the `simulate` subcommand: replay a ground-truth Perfetto rate trace through the profiler pipeline without real hardware.
 
 use crate::commands::load_library;
-use crate::config::{EstimatorKind, ResolvedConfig, SchedulerKind};
+use crate::config::{CliOverrides, EstimatorKind, ResolvedConfig, SchedulerKind, load_config};
 use crate::event::{EventId, EventRegistry};
 use crate::llm::LlmLatencyProfile;
 use crate::perfetto;
@@ -47,6 +47,12 @@ pub struct BatchCombo {
     /// Optional CSV output path for this combo.
     #[serde(default)]
     pub csv: Option<PathBuf>,
+    /// Optional per-combo TOML config file.  When set, this file is loaded in
+    /// place of the global `--config`, letting combos differ in estimator
+    /// hyperparameters (e.g. Kalman correlation matrices) while still sharing
+    /// the same rates trace and q_schedule/num_slots settings from the base config.
+    #[serde(default)]
+    pub config: Option<PathBuf>,
 }
 
 /// Load the rates trace, filter to known events, re-anchor to t=0, and return an Arc-wrapped TimeVaryingRates.
@@ -108,15 +114,39 @@ fn run_one_combo(
     combo: &BatchCombo,
     llm_latency_profile_path: Option<&Path>,
 ) -> std::io::Result<()> {
-    let mut config = base_config.clone();
-    config.scheduler = combo.scheduler.clone();
-    config.estimator = combo.estimator.clone();
-    if let Some(seed) = combo.seed {
-        config.seed = Some(seed);
-    }
-    if let Some(guidance) = &combo.guidance {
-        config.llm.guidance = Some(guidance.clone());
-    }
+    // When the combo carries its own config file (e.g. a different Kalman
+    // correlation matrix), reload from that file while preserving the
+    // non-hyperparameter fields (quantum sizes, slots, etc.) from base_config.
+    let config = if let Some(ref combo_cfg_path) = combo.config {
+        load_config(
+            Some(combo_cfg_path.clone()),
+            true,
+            CliOverrides {
+                scheduler: Some(combo.scheduler.clone()),
+                estimator: Some(combo.estimator.clone()),
+                q_schedule_ns: Some(base_config.q_schedule_ns),
+                q_sample_ns: Some(base_config.q_sample_ns),
+                q_output_ns: Some(base_config.q_output_ns),
+                noise_stddev: Some(base_config.noise_stddev),
+                seed: combo.seed.or(base_config.seed),
+                num_slots: Some(base_config.num_slots),
+                guidance: combo.guidance.clone().or_else(|| base_config.llm.guidance.clone()),
+                llm_model: Some(base_config.llm.model.clone()),
+                llm_base_url: Some(base_config.llm.base_url.clone()),
+            },
+        )?
+    } else {
+        let mut c = base_config.clone();
+        c.scheduler = combo.scheduler.clone();
+        c.estimator = combo.estimator.clone();
+        if let Some(seed) = combo.seed {
+            c.seed = Some(seed);
+        }
+        if let Some(guidance) = &combo.guidance {
+            c.llm.guidance = Some(guidance.clone());
+        }
+        c
+    };
 
     let latency_profile = llm_latency_profile_path
         .map(|p| LlmLatencyProfile::load(p, config.seed))
