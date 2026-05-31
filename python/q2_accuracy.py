@@ -366,7 +366,10 @@ def main() -> None:
                     combo_to_row[(row["workload"], row["scheduler"], row["estimator"])] = row
 
     # -----------------------------------------------------------------------
-    # LLM combos: keep the existing throttled serial path.
+    # LLM combos: unchanged path — run_combo via parallel_run_combos,
+    # throttled to llm_concurrency concurrent workers (default 1).
+    # Each worker is still an independent subprocess, which is fine since
+    # llm_concurrency is small and LLM scheduling already dominates latency.
     # -----------------------------------------------------------------------
     from functools import partial
     llm_grid_combos = [
@@ -392,7 +395,7 @@ def main() -> None:
         llm_results = parallel_run_combos(
             llm_grid_combos,
             run_fn,
-            jobs=1,
+            jobs=args.jobs,
             llm_concurrency=args.llm_concurrency,
         )
         for combo, row in llm_results:
