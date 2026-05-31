@@ -1,0 +1,11 @@
+# Kalman filter: expert-calibrated hyperparameters, no correlation matrix.
+# Isolates the effect of adding cross-event correlation vs. naive independent KF.
+# Usage: --config python/config/kf_naive.toml  (from repo root)
+
+[kalman]
+process_noise_per_ns            = 1e-8
+min_measurement_variance        = 1e-18
+initial_variance                = 1000.0
+uncertainty_reference_variance  = 0.5
+correlation_process_noise_scale = 0.5
+# correlation_path intentionally absent

@@ -62,6 +62,7 @@ impl DynamicLlmScheduler {
         guidance: Option<String>,
         simulation_mode: bool,
     ) -> Self {
+
         Self {
             client,
             event_info,
@@ -139,8 +140,6 @@ Current schedule (for reference):
 {current_schedule}
 
 Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
-Prioritize events with high uncertainty or high rate — they are most informative. \
-Cover all counters at least once across the full cycle.
 
 Your entire response must be a single JSON array. \
 No explanation, no prose, no markdown fences."
@@ -175,7 +174,7 @@ impl Scheduler for DynamicLlmScheduler {
             let client = &self.client;
             let all_events = &self.all_events;
             llm_common::chat_with_retry(
-                |m| client.chat(m),
+                |m| client.chat(m, "static_setup"),
                 messages,
                 |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
                 2,
@@ -197,7 +196,7 @@ impl Scheduler for DynamicLlmScheduler {
         std::thread::spawn(move || {
             for messages in req_rx {
                 let result = llm_common::chat_with_retry(
-                    |m| client.chat(m),
+                    |m| client.chat(m, "dynamic_update"),
                     messages,
                     |resp| llm_common::parse_schedule_response(resp, &all_events, num_slots),
                     2,
@@ -231,6 +230,7 @@ impl Scheduler for DynamicLlmScheduler {
         if self.buffered_schedule.is_some() && self.step_count >= self.buffered_release_step {
             self.schedule = self.buffered_schedule.take().unwrap();
             self.step_idx = 0;
+            self.steps_since_update = 0;
             tracing::info!(
                 "DynamicLlmScheduler: applying buffered update at step {}",
                 self.step_count
@@ -293,7 +293,7 @@ impl Scheduler for DynamicLlmScheduler {
         // Reset the counter only on successful send; if the worker is busy,
         // leave the counter alone so we retry on the next step.
         self.steps_since_update += 1;
-        if self.steps_since_update >= self.update_interval {
+        if self.steps_since_update >= self.update_interval && self.buffered_schedule.is_none() {
             let messages = self.build_update_prompt(estimator).build().to_vec();
             if let Some(tx) = &self.request_tx
                 && tx.try_send(messages).is_ok()
@@ -450,6 +450,56 @@ mod tests {
     }
 
     #[test]
+    fn no_request_while_buffer_held() {
+        let mut s = make_scheduler(2, false);
+        let (tx, rx) = mpsc::sync_channel(4);
+        s.request_tx = Some(tx);
+
+        let q = empty_quantum();
+        let est = MockEstimator::new();
+
+        s.buffered_schedule = Some(vec![ScheduleStep {
+            duration_ms: 5,
+            events: vec![1, 2],
+        }]);
+        s.buffered_release_step = 1_000;
+
+        for _ in 0..10 {
+            s.next_step(&q, &est);
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no request should be sent while buffered_schedule is held"
+        );
+    }
+
+    #[test]
+    fn steps_since_update_resets_on_activation() {
+        let mut s = make_scheduler(10, false);
+        let q = empty_quantum();
+        let est = MockEstimator::new();
+
+        s.buffered_schedule = Some(vec![ScheduleStep {
+            duration_ms: 5,
+            events: vec![1, 2],
+        }]);
+        s.buffered_release_step = 5;
+
+        for _ in 0..5 {
+            s.next_step(&q, &est);
+        }
+
+        assert!(s.buffered_schedule.is_none(), "buffer should be consumed");
+        // The reset happens before the step-3 increment in the same next_step call,
+        // so the activation step itself counts as step 1 of the new interval.
+        assert_eq!(
+            s.steps_since_update, 1,
+            "counter should reset at activation and count that step as the first"
+        );
+    }
+
+    #[test]
     #[ignore = "requires network access to dubliner.cs.northwestern.edu"]
     fn llm_generates_parseable_update() {
         let mut s = DynamicLlmScheduler::new(
@@ -481,7 +531,7 @@ mod tests {
         est.add(0, 1, 3.0e-7, 0.2);
 
         let pb = s.build_update_prompt(&est);
-        let response = s.client.chat(pb.build()).expect("LLM call should succeed");
+        let response = s.client.chat(pb.build(), "dynamic_update").expect("LLM call should succeed");
         eprintln!("LLM update response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &s.all_events, s.num_slots)

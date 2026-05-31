@@ -44,6 +44,7 @@ struct ChatRequest<'a> {
     messages: &'a [ChatMessage],
     /// Must be `false`; streaming responses are not supported by this client.
     stream: bool,
+    think : bool,
 }
 
 /// Top-level wrapper in the `POST /api/chat` response body.
@@ -91,14 +92,20 @@ impl LlmClient {
     }
 
     /// Blocking chat round-trip to `POST /api/chat`. Returns the assistant's reply text.
-    pub fn chat(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
+    ///
+    /// `call_type` labels the purpose of this call (e.g. `"static_setup"`, `"wrr_setup"`,
+    /// `"dynamic_update"`) and is included in the latency log line for profiling.
+    pub fn chat(&self, messages: &[ChatMessage], call_type: &str) -> Result<String, LlmError> {
         let url = format!("{}/api/chat", self.base_url);
         let body = serde_json::to_vec(&ChatRequest {
             model: &self.model,
             messages,
             stream: false,
+            think: false,
         })
         .map_err(LlmError::Json)?;
+
+        let t0 = std::time::Instant::now();
 
         let mut response = self
             .agent
@@ -111,6 +118,13 @@ impl LlmClient {
             .body_mut()
             .read_to_string()
             .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
+
+        tracing::info!(
+            latency_ms = t0.elapsed().as_millis() as u64,
+            model = %self.model,
+            call_type = call_type,
+            "llm_call"
+        );
 
         serde_json::from_str::<ChatResponse>(&text)
             .map(|parsed| parsed.message.content)

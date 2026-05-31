@@ -102,7 +102,7 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
         let messages = pb.build().to_vec();
         let client = &self.client;
         let weights = llm_common::chat_with_retry(
-            |m| client.chat(m),
+            |m| client.chat(m, "wrr_setup"),
             messages,
             |resp| llm_common::parse_weights_response(resp, &all_events),
             2,
@@ -374,7 +374,7 @@ mod tests {
         let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
 
         let pb = llm_common::build_weights_prompt(&event_info, 2, None);
-        let response = client.chat(pb.build()).expect("LLM call should succeed");
+        let response = client.chat(pb.build(), "wrr_setup").expect("LLM call should succeed");
         eprintln!("LLM weights response:\n{response}");
 
         let weights = llm_common::parse_weights_response(&response, &all_events)
