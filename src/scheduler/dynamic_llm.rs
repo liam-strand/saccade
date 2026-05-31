@@ -138,9 +138,7 @@ Recent observations (rate in events/ns, uncertainty in [0=confident, 1=unknown])
 Current schedule (for reference):
 {current_schedule}
 
-Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
-Prioritize events with high uncertainty or high rate — they are most informative. \
-Cover all counters at least once across the full cycle.
+Generate an updated cyclic schedule for the same {num_slots}-slot profiler.
 
 Your entire response must be a single JSON array. \
 No explanation, no prose, no markdown fences."
