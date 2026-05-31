@@ -9,7 +9,7 @@ mod sweep;
 pub use evaluate::evaluate;
 pub use generate::generate;
 pub use run::run;
-pub use simulate::simulate;
+pub use simulate::{batch_simulate, simulate};
 pub use sweep::sweep;
 
 use crate::event::EventLibrary;

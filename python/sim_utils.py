@@ -83,6 +83,53 @@ def run_simulate(
     )
 
 
+def run_batch_simulate(
+    saccade: Path,
+    library: Path,
+    rates_trace: Path,
+    combos: list[dict],
+    num_slots: int,
+    q_schedule: int,
+    jobs: int,
+    tmp_dir: Path,
+    base_config: Path | None = None,
+) -> None:
+    """Run multiple simulate combos sharing one ``saccade simulate --batch`` process.
+
+    Each entry in *combos* must have ``"scheduler"``, ``"estimator"``, and
+    ``"trace"`` keys (absolute paths).  Optional keys: ``"seed"`` (int),
+    ``"guidance"`` (str), ``"csv"`` (str path).
+
+    Loads *rates_trace* once in saccade and runs all combos in a Rayon thread
+    pool capped at *jobs* threads.  Use this instead of N calls to
+    ``run_simulate`` to avoid N× memory usage when replaying the same trace.
+
+    *base_config* is forwarded as the global ``--config`` flag; per-combo
+    scheduler/estimator/seed/guidance override those values.
+    """
+    spec_path = tmp_dir / f"batch_spec_{rates_trace.stem}.json"
+    spec_path.write_text(json.dumps(combos))
+    cmd = [str(saccade)]
+    if base_config is not None:
+        cmd += ["--config", str(base_config)]
+    cmd += [
+        "simulate",
+        "--library", str(library),
+        "--rates-trace", str(rates_trace),
+        "--num-slots", str(num_slots),
+        "--q-schedule", str(q_schedule),
+        "--batch", str(spec_path),
+        "--jobs", str(max(1, jobs)),
+    ]
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=REPO_ROOT,
+    )
+
+
 def run_evaluate(
     saccade: Path,
     ground_truth: Path,
@@ -255,6 +302,7 @@ def parallel_run_combos(
     jobs: int,
     llm_concurrency: int = 1,
     is_llm: Callable | None = None,
+    batch_fn: Callable | None = None,
 ) -> list[tuple]:
     """Run *combos* in parallel with ``ThreadPoolExecutor``.
 
@@ -264,6 +312,13 @@ def parallel_run_combos(
 
     *is_llm* is a predicate ``(combo) -> bool`` that identifies LLM combos.
     When omitted, any combo containing an LLM scheduler name string qualifies.
+
+    *batch_fn*, when provided, is called ONCE with the full list of non-LLM
+    combos before individual ``run_fn`` calls.  Use this to run a single
+    ``saccade simulate --batch`` invocation that loads the rates trace once and
+    runs all combos in parallel threads, instead of N subprocesses each loading
+    their own copy.  After *batch_fn* returns, ``run_fn`` is still called per
+    combo to run evaluation (``saccade evaluate``) and return the result.
 
     Returns a list of ``(combo, result)`` pairs in completion order (not
     necessarily the same order as *combos*).
@@ -279,6 +334,10 @@ def parallel_run_combos(
     results: list[tuple] = []
 
     if non_llm:
+        if batch_fn is not None:
+            # Run all simulate calls in one saccade process (1× trace memory),
+            # then evaluate each output individually in parallel.
+            batch_fn(non_llm)
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
             futs = {ex.submit(run_fn, c): c for c in non_llm}
             for f in as_completed(futs):

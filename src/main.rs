@@ -1,6 +1,6 @@
 use clap::Parser;
 use saccade::cli::{Cli, Commands};
-use saccade::commands::{evaluate, generate, run, simulate, sweep};
+use saccade::commands::{batch_simulate, evaluate, generate, run, simulate, sweep};
 use saccade::config::{CliOverrides, load_config};
 
 /// Entry point: parses CLI arguments, initialises the tracing subscriber, and dispatches to the appropriate subcommand handler.
@@ -115,6 +115,8 @@ fn main() -> std::io::Result<()> {
             csv,
             trace,
             llm_latency_profile,
+            batch,
+            jobs,
         } => {
             let config = load_config(
                 config_path,
@@ -133,7 +135,12 @@ fn main() -> std::io::Result<()> {
                     llm_base_url,
                 },
             )?;
-            simulate(library, rates_trace, config, csv, trace, llm_latency_profile)?;
+            if let Some(batch_spec) = batch {
+                // 0 means "use all logical CPUs" — Rayon's default when passed 0.
+                batch_simulate(library, rates_trace, config, batch_spec, jobs, llm_latency_profile)?;
+            } else {
+                simulate(library, rates_trace, config, csv, trace, llm_latency_profile)?;
+            }
         }
     }
 

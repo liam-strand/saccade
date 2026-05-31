@@ -1,8 +1,8 @@
 //! Implementation of the `simulate` subcommand: replay a ground-truth Perfetto rate trace through the profiler pipeline without real hardware.
 
 use crate::commands::load_library;
-use crate::config::ResolvedConfig;
-use crate::event::EventRegistry;
+use crate::config::{EstimatorKind, ResolvedConfig, SchedulerKind};
+use crate::event::{EventId, EventRegistry};
 use crate::llm::LlmLatencyProfile;
 use crate::perfetto;
 use crate::profiler::ProfilerBuilder;
@@ -10,35 +10,52 @@ use crate::sink::csv::CsvSink;
 use crate::sink::perfetto::PerfettoSink;
 use crate::sink::{self, OutputSink};
 use crate::source::virtual_source::{TimeVaryingRates, VirtualSampleSource};
+use rayon::prelude::*;
+use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::debug;
 
-/// Drives the profiler against a `VirtualSampleSource` seeded from `rates_trace`, running for as many quanta as the trace spans, then writes output to a Perfetto file (and optionally a CSV).
-pub fn simulate(
-    library: PathBuf,
-    rates_trace: PathBuf,
-    config: ResolvedConfig,
-    csv: Option<PathBuf>,
-    trace: PathBuf,
-    llm_latency_profile: Option<PathBuf>,
-) -> std::io::Result<()> {
-    let lib = load_library(Some(library))?;
-    let registry = EventRegistry::new(lib);
-    let all_ids = registry.get_event_ids();
-    let event_names: Vec<String> = all_ids
-        .iter()
-        .map(|&id| registry.get_event_name(id).to_string())
-        .collect();
-    debug!("Loaded {} events.", all_ids.len());
+/// Accept both kebab-case ("round-robin") and snake_case ("round_robin") scheduler names in JSON.
+fn de_scheduler<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SchedulerKind, D::Error> {
+    let s = String::deserialize(d)?;
+    let normalized = s.replace('-', "_");
+    SchedulerKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&normalized))
+}
 
-    let latency_profile = llm_latency_profile
-        .map(|p| LlmLatencyProfile::load(&p, config.seed))
-        .transpose()?;
-    let scheduler = config.build_scheduler(&registry, true, latency_profile);
+/// Accept both kebab-case and snake_case estimator names in JSON.
+fn de_estimator<'de, D: serde::Deserializer<'de>>(d: D) -> Result<EstimatorKind, D::Error> {
+    let s = String::deserialize(d)?;
+    let normalized = s.replace('-', "_");
+    EstimatorKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&normalized))
+}
 
+/// One combo entry in a `--batch` spec JSON file.
+#[derive(serde::Deserialize)]
+pub struct BatchCombo {
+    #[serde(deserialize_with = "de_scheduler")]
+    pub scheduler: SchedulerKind,
+    #[serde(deserialize_with = "de_estimator")]
+    pub estimator: EstimatorKind,
+    /// Output Perfetto trace path for this combo.
+    pub trace: PathBuf,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub guidance: Option<String>,
+    /// Optional CSV output path for this combo.
+    #[serde(default)]
+    pub csv: Option<PathBuf>,
+}
+
+/// Load the rates trace, filter to known events, re-anchor to t=0, and return an Arc-wrapped TimeVaryingRates.
+fn load_rates(
+    rates_trace: &Path,
+    registry: &EventRegistry,
+) -> std::io::Result<(Arc<TimeVaryingRates>, u64)> {
     debug!("Loading rate time-series from {:?}", rates_trace);
-    let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
+    let timeseries = perfetto::read_rate_timeseries(rates_trace)?;
 
     let mut series_map: HashMap<(u32, u32), Vec<(u64, f64)>> = HashMap::new();
     for ((name, tid), data) in timeseries.series {
@@ -76,10 +93,100 @@ pub fn simulate(
         .filter_map(|pts| pts.last().map(|&(ts, _)| ts))
         .max()
         .unwrap_or(0);
+
+    Ok((Arc::new(TimeVaryingRates { series: series_map }), max_ts_ns))
+}
+
+/// Run a single simulation combo, writing output to the paths in `combo`.
+fn run_one_combo(
+    registry: &EventRegistry,
+    all_ids: &[EventId],
+    event_names: &[String],
+    rates: Arc<TimeVaryingRates>,
+    steps: u64,
+    base_config: &ResolvedConfig,
+    combo: &BatchCombo,
+    llm_latency_profile_path: Option<&Path>,
+) -> std::io::Result<()> {
+    let mut config = base_config.clone();
+    config.scheduler = combo.scheduler.clone();
+    config.estimator = combo.estimator.clone();
+    if let Some(seed) = combo.seed {
+        config.seed = Some(seed);
+    }
+    if let Some(guidance) = &combo.guidance {
+        config.llm.guidance = Some(guidance.clone());
+    }
+
+    let latency_profile = llm_latency_profile_path
+        .map(|p| LlmLatencyProfile::load(p, config.seed))
+        .transpose()?;
+    let scheduler = config.build_scheduler(registry, true, latency_profile);
+
+    let source = VirtualSampleSource::new(
+        rates,
+        config.noise_stddev,
+        config.q_schedule_ns,
+        config.q_sample_ns,
+        config.seed,
+        config.num_slots,
+    );
+
+    let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+    if let Some(csv_path) = &combo.csv {
+        sinks.push(Box::new(CsvSink::new(csv_path.clone())?));
+    }
+    sinks.push(Box::new(PerfettoSink::new(
+        combo.trace.clone(),
+        event_names.to_vec(),
+        config.q_output_ns,
+    )?));
+
+    let mut profiler = ProfilerBuilder::new()
+        .source(source)
+        .scheduler_boxed(scheduler, all_ids.to_vec())
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .estimator_boxed(config.build_estimator(registry))
+        .sinks(&mut sinks)
+        .build();
+
+    for _ in 0..steps {
+        profiler.step();
+    }
+
+    drop(profiler);
+    sink::finish_sinks(&mut sinks);
+    Ok(())
+}
+
+/// Drives the profiler against a `VirtualSampleSource` seeded from `rates_trace`, running for as many quanta as the trace spans, then writes output to a Perfetto file (and optionally a CSV).
+pub fn simulate(
+    library: PathBuf,
+    rates_trace: PathBuf,
+    config: ResolvedConfig,
+    csv: Option<PathBuf>,
+    trace: PathBuf,
+    llm_latency_profile: Option<PathBuf>,
+) -> std::io::Result<()> {
+    let lib = load_library(Some(library))?;
+    let registry = EventRegistry::new(lib);
+    let all_ids = registry.get_event_ids();
+    let event_names: Vec<String> = all_ids
+        .iter()
+        .map(|&id| registry.get_event_name(id).to_string())
+        .collect();
+    debug!("Loaded {} events.", all_ids.len());
+
+    let latency_profile = llm_latency_profile
+        .map(|p| LlmLatencyProfile::load(&p, config.seed))
+        .transpose()?;
+    let scheduler = config.build_scheduler(&registry, true, latency_profile);
+
+    let (rates, max_ts_ns) = load_rates(&rates_trace, &registry)?;
     let steps = max_ts_ns.div_ceil(config.q_schedule_ns.max(1));
 
     let source = VirtualSampleSource::new(
-        TimeVaryingRates { series: series_map },
+        rates,
         config.noise_stddev,
         config.q_schedule_ns,
         config.q_sample_ns,
@@ -136,4 +243,61 @@ pub fn simulate(
     tracing::info!("Simulation complete.");
 
     Ok(())
+}
+
+/// Load rates trace once, then run all combos in `batch_spec` in parallel using a Rayon thread pool capped at `jobs` threads.
+///
+/// All combos share the same `Arc<TimeVaryingRates>`; only per-combo state (estimator, scheduler, sinks) is allocated per thread.
+pub fn batch_simulate(
+    library: PathBuf,
+    rates_trace: PathBuf,
+    base_config: ResolvedConfig,
+    batch_spec: PathBuf,
+    jobs: usize,
+    llm_latency_profile: Option<PathBuf>,
+) -> std::io::Result<()> {
+    let lib = load_library(Some(library))?;
+    let registry = EventRegistry::new(lib);
+    let all_ids = registry.get_event_ids();
+    let event_names: Vec<String> = all_ids
+        .iter()
+        .map(|&id| registry.get_event_name(id).to_string())
+        .collect();
+    debug!("Loaded {} events.", all_ids.len());
+
+    let (rates, max_ts_ns) = load_rates(&rates_trace, &registry)?;
+    let steps = max_ts_ns.div_ceil(base_config.q_schedule_ns.max(1));
+
+    let combos: Vec<BatchCombo> = serde_json::from_str(
+        &std::fs::read_to_string(&batch_spec)?
+    )
+    .map_err(std::io::Error::other)?;
+
+    tracing::info!(
+        "Batch simulation: {} combos, {} steps each, {} Rayon threads",
+        combos.len(),
+        steps,
+        jobs,
+    );
+
+    let latency_path = llm_latency_profile.as_deref();
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .map_err(std::io::Error::other)?
+        .install(|| {
+            combos.par_iter().try_for_each(|combo| {
+                run_one_combo(
+                    &registry,
+                    &all_ids,
+                    &event_names,
+                    Arc::clone(&rates),
+                    steps,
+                    &base_config,
+                    combo,
+                    latency_path,
+                )
+            })
+        })
 }

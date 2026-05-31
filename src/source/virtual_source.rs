@@ -1,6 +1,7 @@
 //! Simulation-backed `SampleSource` that produces synthetic samples from pre-recorded rate profiles.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::event::EventId;
 use crate::sample::RawSample;
@@ -15,7 +16,8 @@ use rand_distr::{Distribution, Normal};
 /// (typically loaded from a sweep Perfetto trace). No hardware interaction.
 pub struct VirtualSampleSource {
     /// Time-varying per-(event, thread) rate data used to generate samples.
-    rates: TimeVaryingRates,
+    /// Wrapped in `Arc` so multiple parallel simulations can share the same read-only rates.
+    rates: Arc<TimeVaryingRates>,
     /// Fractional standard deviation of Gaussian noise added to each sample's count.
     noise_stddev: f64,
     /// Events currently enabled; updated by `apply_schedule`.
@@ -39,7 +41,7 @@ impl VirtualSampleSource {
     ///
     /// Pass `seed: Some(n)` for reproducible runs; `None` seeds from the OS.
     pub fn new(
-        rates: TimeVaryingRates,
+        rates: Arc<TimeVaryingRates>,
         noise_stddev: f64,
         quantum_ns: u64,
         sample_ns: u64,

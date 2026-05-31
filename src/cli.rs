@@ -192,5 +192,16 @@ pub enum Commands {
         /// JSON latency profile (from q7_llm_latency.py) — samples override measured LLM call latency
         #[arg(long)]
         llm_latency_profile: Option<PathBuf>,
+
+        /// JSON file listing combos to run in parallel (batch mode).
+        /// Each entry: {scheduler, estimator, trace, seed?, guidance?, csv?}.
+        /// When set, --scheduler/--estimator/--trace/--seed/--guidance are ignored.
+        #[arg(long)]
+        batch: Option<PathBuf>,
+
+        /// Number of Rayon threads for batch mode (0 = logical CPU count).
+        /// Mirrors the -j flag in the Python layer to keep peak memory bounded.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
     },
 }
