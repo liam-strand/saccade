@@ -106,6 +106,7 @@ fn main() -> std::io::Result<()> {
             num_slots,
             csv,
             trace,
+            llm_latency_profile,
         } => {
             let config = load_config(
                 config_path,
@@ -122,7 +123,7 @@ fn main() -> std::io::Result<()> {
                     guidance,
                 },
             )?;
-            simulate(library, rates_trace, config, csv, trace)?;
+            simulate(library, rates_trace, config, csv, trace, llm_latency_profile)?;
         }
     }
 

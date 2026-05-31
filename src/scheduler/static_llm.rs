@@ -2,7 +2,7 @@
 //! replays it indefinitely without further model calls.
 
 use crate::event::EventId;
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, LlmLatencyProfile};
 use crate::quantum::Quantum;
 use crate::scheduler::llm_common::{self, ScheduleStep};
 use crate::scheduler::{ScheduleDecision, Scheduler};
@@ -25,6 +25,8 @@ pub struct StaticLlmScheduler {
     num_slots: usize,
     /// Optional natural-language guidance forwarded to the LLM system message.
     guidance: Option<String>,
+    /// Optional latency profile for overriding measured LLM call latency in simulation.
+    latency_profile: Option<LlmLatencyProfile>,
 }
 
 impl StaticLlmScheduler {
@@ -33,6 +35,7 @@ impl StaticLlmScheduler {
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
         guidance: Option<String>,
+        latency_profile: Option<LlmLatencyProfile>,
     ) -> Self {
         Self {
             client,
@@ -42,6 +45,7 @@ impl StaticLlmScheduler {
             all_events: Vec::new(),
             num_slots: 0,
             guidance,
+            latency_profile,
         }
     }
 }
@@ -56,6 +60,7 @@ impl Scheduler for StaticLlmScheduler {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
+        let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("static_setup"));
         self.schedule = {
             let pb = llm_common::build_init_prompt(
                 &self.event_info,
@@ -67,7 +72,7 @@ impl Scheduler for StaticLlmScheduler {
             let client = &self.client;
             let all_events = &self.all_events;
             llm_common::chat_with_retry(
-                |m| client.chat(m),
+                |m| client.chat(m, "static_setup", sampled),
                 messages,
                 |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
                 2,
@@ -141,6 +146,7 @@ mod tests {
         let mut s = StaticLlmScheduler::new(
             vec![],
             LlmClient::new("http://localhost:0", "test-model"),
+            None,
             None,
         );
         s.all_events = vec![0, 1, 2];
@@ -221,12 +227,12 @@ mod tests {
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
 
         let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4");
-        let mut s = StaticLlmScheduler::new(event_info, client, None);
+        let mut s = StaticLlmScheduler::new(event_info, client, None, None);
         s.all_events = all_events.clone();
         s.num_slots = 4;
 
         let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots, None);
-        let response = s.client.chat(pb.build()).expect("LLM call should succeed");
+        let response = s.client.chat(pb.build(), "static_setup", None).expect("LLM call should succeed");
         eprintln!("LLM response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &all_events, s.num_slots)

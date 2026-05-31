@@ -172,5 +172,9 @@ pub enum Commands {
         /// Output Perfetto trace file for VCS state
         #[arg(long, default_value = "trace.perfetto")]
         trace: PathBuf,
+
+        /// JSON latency profile (from q7_llm_latency.py) — samples override measured LLM call latency
+        #[arg(long)]
+        llm_latency_profile: Option<PathBuf>,
     },
 }

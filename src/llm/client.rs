@@ -91,7 +91,17 @@ impl LlmClient {
     }
 
     /// Blocking chat round-trip to `POST /api/chat`. Returns the assistant's reply text.
-    pub fn chat(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
+    ///
+    /// `call_type` is logged with the latency for downstream analysis.
+    /// `latency_override_ms`, when `Some`, replaces the measured wall-clock latency in the log
+    /// so simulations can inject a pre-profiled distribution instead of live server timing.
+    pub fn chat(
+        &self,
+        messages: &[ChatMessage],
+        call_type: &str,
+        latency_override_ms: Option<u64>,
+    ) -> Result<String, LlmError> {
+        let t0 = std::time::Instant::now();
         let url = format!("{}/api/chat", self.base_url);
         let body = serde_json::to_vec(&ChatRequest {
             model: &self.model,
@@ -111,6 +121,15 @@ impl LlmClient {
             .body_mut()
             .read_to_string()
             .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
+
+        let actual_ms = t0.elapsed().as_millis() as u64;
+        let effective_ms = latency_override_ms.unwrap_or(actual_ms);
+        tracing::info!(
+            latency_ms = effective_ms,
+            model = ?self.model,
+            call_type = ?call_type,
+            "llm_call"
+        );
 
         serde_json::from_str::<ChatResponse>(&text)
             .map(|parsed| parsed.message.content)

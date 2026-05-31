@@ -6,7 +6,7 @@
 //! application consumes.
 
 use crate::event::{EventId, EventRegistry};
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, LlmLatencyProfile};
 use crate::scheduler::Scheduler;
 use crate::scheduler::max_uncertainty::MaxUncertaintyScheduler;
 use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
@@ -160,7 +160,13 @@ pub struct ResolvedConfig {
 impl ResolvedConfig {
     /// Constructs and returns the scheduler specified by `self.scheduler`, wired to the given event registry.
     /// `simulation` should be `true` when replaying a trace (no real-time sleep between quanta).
-    pub fn build_scheduler(&self, registry: &EventRegistry, simulation: bool) -> Box<dyn Scheduler> {
+    /// `latency_profile`, when `Some`, overrides measured LLM call latency with samples from the profile.
+    pub fn build_scheduler(
+        &self,
+        registry: &EventRegistry,
+        simulation: bool,
+        latency_profile: Option<LlmLatencyProfile>,
+    ) -> Box<dyn Scheduler> {
         match self.scheduler {
             SchedulerKind::Random => Box::new(RandomScheduler::default()),
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
@@ -179,6 +185,7 @@ impl ResolvedConfig {
                     event_info,
                     client,
                     self.llm.guidance.clone(),
+                    latency_profile,
                 ))
             }
             SchedulerKind::DynamicLlm => {
@@ -197,6 +204,7 @@ impl ResolvedConfig {
                     self.llm.update_interval,
                     self.llm.guidance.clone(),
                     simulation,
+                    latency_profile,
                 ))
             }
             SchedulerKind::WeightedRoundRobinLlm => {
@@ -213,6 +221,7 @@ impl ResolvedConfig {
                     event_info,
                     client,
                     self.llm.guidance.clone(),
+                    latency_profile,
                 ))
             }
             SchedulerKind::RateOfChange => Box::new(RateOfChangeScheduler::default()),

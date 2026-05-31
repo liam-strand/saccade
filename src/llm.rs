@@ -4,7 +4,9 @@
 //! sequence and send it to an Ollama-compatible inference server via [`crate::llm::client::LlmClient`].
 
 pub mod client;
+pub mod latency_profile;
 pub mod prompt;
 
 pub use client::{ChatMessage, LlmClient, LlmError};
+pub use latency_profile::LlmLatencyProfile;
 pub use prompt::PromptBuilder;

@@ -2,7 +2,7 @@
 //! in the background using live counter rate and uncertainty observations.
 
 use crate::event::EventId;
-use crate::llm::{ChatMessage, LlmClient, PromptBuilder};
+use crate::llm::{ChatMessage, LlmClient, LlmLatencyProfile, PromptBuilder};
 use crate::quantum::Quantum;
 use crate::scheduler::llm_common::{self, ScheduleStep};
 use crate::scheduler::{ScheduleDecision, Scheduler};
@@ -29,8 +29,8 @@ pub struct DynamicLlmScheduler {
     update_interval: u32,
     /// Counter tracking calls since the last refresh request was sent.
     steps_since_update: u32,
-    /// Channel to send a new prompt to the background worker thread.
-    request_tx: Option<mpsc::SyncSender<Vec<ChatMessage>>>,
+    /// Channel to send a new prompt (and optional latency override) to the background worker thread.
+    request_tx: Option<mpsc::SyncSender<(Vec<ChatMessage>, Option<u64>)>>,
     /// Channel on which the background worker delivers the updated schedule.
     result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
     /// Optional natural-language guidance forwarded to the LLM system message.
@@ -49,6 +49,10 @@ pub struct DynamicLlmScheduler {
     buffered_schedule: Option<Vec<ScheduleStep>>,
     /// The `step_count` at which `buffered_schedule` should be applied.
     buffered_release_step: u64,
+    /// Optional latency profile for overriding measured LLM call latency in simulation.
+    latency_profile: Option<LlmLatencyProfile>,
+    /// Pre-sampled latency override (ms) for the in-flight dynamic update, if a profile is active.
+    sampled_latency_ms: Option<u64>,
 }
 
 impl DynamicLlmScheduler {
@@ -61,6 +65,7 @@ impl DynamicLlmScheduler {
         update_interval: u32,
         guidance: Option<String>,
         simulation_mode: bool,
+        latency_profile: Option<LlmLatencyProfile>,
     ) -> Self {
         Self {
             client,
@@ -81,6 +86,8 @@ impl DynamicLlmScheduler {
             waiting_for_response: false,
             buffered_schedule: None,
             buffered_release_step: 0,
+            latency_profile,
+            sampled_latency_ms: None,
         }
     }
 
@@ -162,6 +169,7 @@ impl Scheduler for DynamicLlmScheduler {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
+        let sampled_init = self.latency_profile.as_mut().and_then(|p| p.sample("static_setup"));
         self.schedule = {
             let pb = llm_common::build_init_prompt(
                 &self.event_info,
@@ -173,7 +181,7 @@ impl Scheduler for DynamicLlmScheduler {
             let client = &self.client;
             let all_events = &self.all_events;
             llm_common::chat_with_retry(
-                |m| client.chat(m),
+                |m| client.chat(m, "static_setup", sampled_init),
                 messages,
                 |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
                 2,
@@ -186,16 +194,16 @@ impl Scheduler for DynamicLlmScheduler {
         );
 
         // Spawn a persistent worker thread for background schedule updates.
-        let (req_tx, req_rx) = mpsc::sync_channel::<Vec<ChatMessage>>(1);
+        let (req_tx, req_rx) = mpsc::sync_channel::<(Vec<ChatMessage>, Option<u64>)>(1);
         let (res_tx, res_rx) = mpsc::sync_channel(1);
 
         let client = self.client.clone();
         let all_events = self.all_events.clone();
         let num_slots = self.num_slots;
         std::thread::spawn(move || {
-            for messages in req_rx {
+            for (messages, override_ms) in req_rx {
                 let result = llm_common::chat_with_retry(
-                    |m| client.chat(m),
+                    |m| client.chat(m, "dynamic_update", override_ms),
                     messages,
                     |resp| llm_common::parse_schedule_response(resp, &all_events, num_slots),
                     2,
@@ -244,11 +252,14 @@ impl Scheduler for DynamicLlmScheduler {
             if let Some(rx) = &self.result_rx {
                 match rx.recv() {
                     Ok(Ok(steps)) => {
-                        let w = self
-                            .dispatch_instant
-                            .map(|t| t.elapsed())
-                            .unwrap_or_default();
-                        let k = (w.as_nanos() / quantum.elapsed_ns().max(1) as u128).max(1) as u64;
+                        let latency_ns = if let Some(ms) = self.sampled_latency_ms.take() {
+                            ms * 1_000_000
+                        } else {
+                            self.dispatch_instant
+                                .map(|t| t.elapsed().as_nanos() as u64)
+                                .unwrap_or(1)
+                        };
+                        let k = (latency_ns / quantum.elapsed_ns().max(1)).max(1);
                         tracing::info!(
                             "DynamicLlmScheduler: buffering update for release at step {} (K={})",
                             self.dispatch_step + k + 1,
@@ -293,9 +304,11 @@ impl Scheduler for DynamicLlmScheduler {
         self.steps_since_update += 1;
         if self.steps_since_update >= self.update_interval {
             let messages = self.build_update_prompt(estimator).build().to_vec();
+            let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("dynamic_update"));
             if let Some(tx) = &self.request_tx
-                && tx.try_send(messages).is_ok()
+                && tx.try_send((messages, sampled)).is_ok()
             {
+                self.sampled_latency_ms = sampled;
                 self.steps_since_update = 0;
                 if self.simulation_mode {
                     self.dispatch_step = self.step_count;
@@ -382,6 +395,7 @@ mod tests {
             update_interval,
             None,
             simulation_mode,
+            None,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -441,6 +455,7 @@ mod tests {
             0,
             None,
             false,
+            None,
         );
         let result = s.init(vec![], 2);
         assert!(result.is_err());
@@ -460,6 +475,7 @@ mod tests {
             1,
             None,
             false,
+            None,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -479,7 +495,7 @@ mod tests {
         est.add(0, 1, 3.0e-7, 0.2);
 
         let pb = s.build_update_prompt(&est);
-        let response = s.client.chat(pb.build()).expect("LLM call should succeed");
+        let response = s.client.chat(pb.build(), "dynamic_update", None).expect("LLM call should succeed");
         eprintln!("LLM update response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &s.all_events, s.num_slots)

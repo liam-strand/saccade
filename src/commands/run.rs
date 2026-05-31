@@ -34,7 +34,7 @@ pub fn run(
 
     // Initialize the scheduler before spawning the child so any blocking work
     // (e.g. LLM calls) completes before the child is held in ptrace-stop.
-    let mut scheduler = config.build_scheduler(&registry, false);
+    let mut scheduler = config.build_scheduler(&registry, false, None);
     scheduler
         .init(all_ids.clone(), MAX_COUNTERS)
         .map_err(|e| std::io::Error::other(e.to_string()))?;

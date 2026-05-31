@@ -3,6 +3,7 @@
 use crate::commands::load_library;
 use crate::config::ResolvedConfig;
 use crate::event::EventRegistry;
+use crate::llm::LlmLatencyProfile;
 use crate::perfetto;
 use crate::profiler::ProfilerBuilder;
 use crate::sink::csv::CsvSink;
@@ -20,6 +21,7 @@ pub fn simulate(
     config: ResolvedConfig,
     csv: Option<PathBuf>,
     trace: PathBuf,
+    llm_latency_profile: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let lib = load_library(Some(library))?;
     let registry = EventRegistry::new(lib);
@@ -30,7 +32,10 @@ pub fn simulate(
         .collect();
     debug!("Loaded {} events.", all_ids.len());
 
-    let scheduler = config.build_scheduler(&registry, true);
+    let latency_profile = llm_latency_profile
+        .map(|p| LlmLatencyProfile::load(&p, config.seed))
+        .transpose()?;
+    let scheduler = config.build_scheduler(&registry, true, latency_profile);
 
     debug!("Loading rate time-series from {:?}", rates_trace);
     let timeseries = perfetto::read_rate_timeseries(&rates_trace)?;
