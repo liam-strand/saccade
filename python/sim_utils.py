@@ -24,9 +24,17 @@ SCHEDULERS = [
     "static-llm",
     "dynamic-llm",
     "weighted-round-robin-llm",
+    "reasoning-static-llm",
+    "reasoning-dynamic-llm",
 ]
 ESTIMATORS = ["propagate", "ema", "kalman"]
-LLM_SCHEDULERS = frozenset({"static-llm", "dynamic-llm", "weighted-round-robin-llm"})
+LLM_SCHEDULERS = frozenset({
+    "static-llm",
+    "dynamic-llm",
+    "weighted-round-robin-llm",
+    "reasoning-static-llm",
+    "reasoning-dynamic-llm",
+})
 FIXED_NUM_SLOTS = 4
 
 
