@@ -807,7 +807,9 @@ mod tests {
     }
 
     #[test]
-    fn build_init_prompt_with_analysis_adds_extra_turn() {
+    fn build_init_prompt_with_analysis_swaps_closing_turn() {
+        // Both None and Some cases end with a user turn (same message count).
+        // The analysis case replaces the generic nudge with the prose-anchored request.
         let event_info = vec![(0u32, "cache-misses".to_string(), "Cache misses".to_string())];
         let without = build_init_prompt(&event_info, 1, None, None)
             .build()
@@ -815,8 +817,8 @@ mod tests {
         let with = build_init_prompt(&event_info, 1, None, Some("focus on cache"))
             .build()
             .to_vec();
-        // The analysis version should have one more message turn.
-        assert_eq!(with.len(), without.len() + 1 - 1); // same count since both end with a user turn
+        // Both should have the same number of turns (closing user turn is swapped, not appended).
+        assert_eq!(with.len(), without.len());
         // The last user message in the analysis version should reference the analysis.
         let last = with.last().unwrap();
         assert!(last.content.contains("focus on cache"));

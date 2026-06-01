@@ -214,3 +214,54 @@ impl LlmClient {
             .ok_or(LlmError::BadResponse(text))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_msg() -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+        }
+    }
+
+    #[test]
+    fn chat_request_with_schema_serializes_response_format() {
+        let schema = serde_json::json!({"type": "object"});
+        let req = ChatRequest {
+            model: "test-model",
+            messages: &[dummy_msg()],
+            stream: false,
+            response_format: Some(ResponseFormat {
+                kind: "json_schema",
+                json_schema: JsonSchemaBlock {
+                    name: "schedule",
+                    strict: true,
+                    schema: &schema,
+                },
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains("response_format"),
+            "structured call must include response_format"
+        );
+        assert!(json.contains("json_schema"));
+    }
+
+    #[test]
+    fn chat_request_without_schema_omits_response_format() {
+        let req = ChatRequest {
+            model: "test-model",
+            messages: &[dummy_msg()],
+            stream: false,
+            response_format: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            !json.contains("response_format"),
+            "freeform call must NOT include response_format; got: {json}"
+        );
+    }
+}
