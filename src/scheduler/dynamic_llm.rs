@@ -11,6 +11,11 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// Payload sent from the main thread to the background update worker.
+/// `(reasoning_prompt, schedule_prompt, latency_override_ms)` — the reasoning prompt is `None`
+/// when the scheduler is not in reasoning mode.
+type UpdateRequest = (Option<Vec<ChatMessage>>, Vec<ChatMessage>, Option<u64>);
+
 /// LLM-based scheduler that adapts its counter rotation schedule at runtime using profiler feedback.
 pub struct DynamicLlmScheduler {
     /// HTTP client used to call the LLM.
@@ -30,7 +35,9 @@ pub struct DynamicLlmScheduler {
     /// Counter tracking calls since the last refresh request was sent.
     steps_since_update: u32,
     /// Channel to send a new prompt (and optional latency override) to the background worker thread.
-    request_tx: Option<mpsc::SyncSender<(Vec<ChatMessage>, Option<u64>)>>,
+    /// The first element is an optional reasoning prompt (sent when `reasoning` is true),
+    /// the second is the structured schedule prompt, and the third is the latency override.
+    request_tx: Option<mpsc::SyncSender<UpdateRequest>>,
     /// Channel on which the background worker delivers the updated schedule.
     result_rx: Option<mpsc::Receiver<Result<Vec<ScheduleStep>, String>>>,
     /// Optional natural-language guidance forwarded to the LLM system message.
@@ -53,12 +60,15 @@ pub struct DynamicLlmScheduler {
     latency_profile: Option<LlmLatencyProfile>,
     /// Pre-sampled latency override (ms) for the in-flight dynamic update, if a profile is active.
     sampled_latency_ms: Option<u64>,
+    /// When `true`, performs a free-form reasoning pass before each schedule generation.
+    reasoning: bool,
 }
 
 impl DynamicLlmScheduler {
     /// Create a new scheduler; `init` must be called before `next_step` to populate the schedule.
     /// Set `simulation_mode` to `true` when replaying a trace (no real-time sleep between quanta)
     /// so that the scheduler blocks during LLM calls and replays the realistic delay afterwards.
+    /// Set `reasoning = true` to enable a free-form analysis pass before schedule generation.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
@@ -66,8 +76,8 @@ impl DynamicLlmScheduler {
         guidance: Option<String>,
         simulation_mode: bool,
         latency_profile: Option<LlmLatencyProfile>,
+        reasoning: bool,
     ) -> Self {
-
         Self {
             client,
             event_info,
@@ -89,12 +99,20 @@ impl DynamicLlmScheduler {
             buffered_release_step: 0,
             latency_profile,
             sampled_latency_ms: None,
+            reasoning,
         }
     }
 
     /// Build a prompt that includes current per-event rate and uncertainty observations so the LLM
     /// can reprioritize counters with high uncertainty or high event rate.
-    fn build_update_prompt(&self, estimator: &dyn StateEstimator) -> PromptBuilder {
+    ///
+    /// When `analysis` is `Some`, the prose reasoning text is appended as an extra user turn
+    /// so the model applies its prior free-form analysis to the structured output.
+    fn build_update_prompt(
+        &self,
+        estimator: &dyn StateEstimator,
+        analysis: Option<&str>,
+    ) -> PromptBuilder {
         let mut event_list = String::new();
         for (id, name, desc) in &self.event_info {
             event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
@@ -147,17 +165,34 @@ Current schedule (for reference):
 {current_schedule}
 
 Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
+INCREASE sampling (more repetitions, longer durations) for counters that have \
+high uncertainty or volatile rates — they need more observations. DECREASE \
+sampling for counters that are confident and stable. Bootstrap any \
+\"not yet observed\" counter soon — give it an early slot. Every counter must \
+still appear at least once across the full cycle. \
 Each step must have duration_ms (milliseconds) and events \
 (an array of exactly {num_slots} counter IDs). \
 Use each event ID at most once per step. \
 Use only event IDs from the list above."
         );
         let example = llm_common::build_schedule_example(&self.event_info, num_slots);
-        PromptBuilder::new()
+        let mut pb = PromptBuilder::new()
             .system(system)
             .user(user)
-            .assistant(example)
-            .user("Good. Now produce the COMPLETE updated schedule covering ALL the counters listed above — not just those in the example.")
+            .assistant(example);
+
+        if let Some(prose) = analysis {
+            pb = pb.user(format!(
+                "Here is your analysis:\n{prose}\n\n\
+                 Now produce the full updated schedule following that analysis."
+            ));
+        } else {
+            pb = pb.user(
+                "Good. Now produce the full updated schedule covering ALL \
+                 the counters listed above — not just those in the example.",
+            );
+        }
+        pb
     }
 }
 
@@ -176,25 +211,20 @@ impl Scheduler for DynamicLlmScheduler {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
-        let sampled_init = self.latency_profile.as_mut().and_then(|p| p.sample("static_setup"));
-        self.schedule = {
-            let pb = llm_common::build_init_prompt(
-                &self.event_info,
-                num_slots,
-                self.guidance.as_deref(),
-            );
-            tracing::debug!("DynamicLlm init system message:\n{}", pb.build()[0].content);
-            let messages = pb.build().to_vec();
-            let client = &self.client;
-            let all_events = &self.all_events;
-            let schema = llm_common::schedule_json_schema(num_slots, all_events);
-            llm_common::chat_with_retry(
-                |m| client.chat(m, "schedule", &schema, "static_setup", sampled_init),
-                messages,
-                |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
-                2,
-            )
-        }?;
+        let sampled_init = self
+            .latency_profile
+            .as_mut()
+            .and_then(|p| p.sample("static_setup"));
+        self.schedule = llm_common::generate_schedule(
+            &self.client,
+            &self.event_info,
+            &self.all_events,
+            num_slots,
+            self.guidance.as_deref(),
+            self.reasoning,
+            "static_setup",
+            sampled_init,
+        )?;
 
         tracing::info!(
             "DynamicLlmScheduler: {} steps in initial cycle",
@@ -202,7 +232,7 @@ impl Scheduler for DynamicLlmScheduler {
         );
 
         // Spawn a persistent worker thread for background schedule updates.
-        let (req_tx, req_rx) = mpsc::sync_channel::<(Vec<ChatMessage>, Option<u64>)>(1);
+        let (req_tx, req_rx) = mpsc::sync_channel::<UpdateRequest>(1);
         let (res_tx, res_rx) = mpsc::sync_channel(1);
 
         let client = self.client.clone();
@@ -210,10 +240,31 @@ impl Scheduler for DynamicLlmScheduler {
         let num_slots = self.num_slots;
         let schema = llm_common::schedule_json_schema(num_slots, &all_events);
         std::thread::spawn(move || {
-            for (messages, override_ms) in req_rx {
+            for (reasoning_msgs, mut schedule_msgs, override_ms) in req_rx {
+                // If a reasoning prompt was supplied, call the model freeform first and
+                // inject the analysis as an extra user turn into the schedule messages.
+                if let Some(r_msgs) = reasoning_msgs {
+                    match client.chat_freeform(&r_msgs, "dynamic_update_reason", None) {
+                        Ok(analysis) => {
+                            tracing::debug!("worker reasoning response:\n{analysis}");
+                            schedule_msgs.push(ChatMessage {
+                                role: "user".into(),
+                                content: format!(
+                                    "Here is your analysis:\n{analysis}\n\n\
+                                     Now produce the full updated schedule following that analysis."
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "worker reasoning call failed: {e}; proceeding without analysis"
+                            );
+                        }
+                    }
+                }
                 let result = llm_common::chat_with_retry(
                     |m| client.chat(m, "schedule", &schema, "dynamic_update", override_ms),
-                    messages,
+                    schedule_msgs,
                     |resp| llm_common::parse_schedule_response(resp, &all_events, num_slots),
                     2,
                 )
@@ -234,11 +285,7 @@ impl Scheduler for DynamicLlmScheduler {
     /// In production mode this polls the background worker non-blockingly.
     /// In simulation mode this blocks during the LLM call, then buffers the result and releases
     /// it K quanta later (K = wall-clock LLM latency / quantum duration) to mirror production.
-    fn next_step(
-        &mut self,
-        quantum: &Quantum,
-        estimator: &dyn StateEstimator,
-    ) -> ScheduleDecision {
+    fn next_step(&mut self, quantum: &Quantum, estimator: &dyn StateEstimator) -> ScheduleDecision {
         // 0. Advance the step counter.
         self.step_count += 1;
 
@@ -313,10 +360,29 @@ impl Scheduler for DynamicLlmScheduler {
         // leave the counter alone so we retry on the next step.
         self.steps_since_update += 1;
         if self.steps_since_update >= self.update_interval && self.buffered_schedule.is_none() {
-            let messages = self.build_update_prompt(estimator).build().to_vec();
-            let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("dynamic_update"));
+            let reasoning_msgs = if self.reasoning {
+                Some(
+                    llm_common::build_reasoning_prompt(
+                        &self.event_info,
+                        self.num_slots,
+                        self.guidance.as_deref(),
+                    )
+                    .build()
+                    .to_vec(),
+                )
+            } else {
+                None
+            };
+            // Build the schedule prompt without analysis (worker will append it after reasoning).
+            let schedule_msgs = self.build_update_prompt(estimator, None).build().to_vec();
+            let sampled = self
+                .latency_profile
+                .as_mut()
+                .and_then(|p| p.sample("dynamic_update"));
             if let Some(tx) = &self.request_tx
-                && tx.try_send((messages, sampled)).is_ok()
+                && tx
+                    .try_send((reasoning_msgs, schedule_msgs, sampled))
+                    .is_ok()
             {
                 self.sampled_latency_ms = sampled;
                 self.steps_since_update = 0;
@@ -406,6 +472,7 @@ mod tests {
             None,
             simulation_mode,
             None,
+            false,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -445,7 +512,7 @@ mod tests {
         est.add(0, 0, 1.5e-6, 0.2);
         est.add(0, 1, 3.0e-7, 0.8);
 
-        let pb = s.build_update_prompt(&est);
+        let pb = s.build_update_prompt(&est, None);
         let messages = pb.build();
         let user_content = &messages.iter().find(|m| m.role == "user").unwrap().content;
 
@@ -466,6 +533,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         let result = s.init(vec![], 2);
         assert!(result.is_err());
@@ -536,6 +604,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 2;
@@ -554,9 +623,12 @@ mod tests {
         est.add(0, 0, 1.5e-6, 0.9);
         est.add(0, 1, 3.0e-7, 0.2);
 
-        let pb = s.build_update_prompt(&est);
+        let pb = s.build_update_prompt(&est, None);
         let schema = llm_common::schedule_json_schema(s.num_slots, &s.all_events);
-        let response = s.client.chat(pb.build(), "schedule", &schema, "dynamic_update", None).expect("LLM call should succeed");
+        let response = s
+            .client
+            .chat(pb.build(), "schedule", &schema, "dynamic_update", None)
+            .expect("LLM call should succeed");
         eprintln!("LLM update response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &s.all_events, s.num_slots)

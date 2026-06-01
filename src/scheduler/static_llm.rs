@@ -27,15 +27,20 @@ pub struct StaticLlmScheduler {
     guidance: Option<String>,
     /// Optional latency profile for overriding measured LLM call latency in simulation.
     latency_profile: Option<LlmLatencyProfile>,
+    /// When `true`, performs a free-form reasoning pass before generating the schedule.
+    reasoning: bool,
 }
 
 impl StaticLlmScheduler {
     /// Create a new scheduler; `init` must be called before `next_step` to populate the schedule.
+    ///
+    /// Set `reasoning = true` to enable a free-form analysis pass before schedule generation.
     pub fn new(
         event_info: Vec<(EventId, String, String)>,
         client: LlmClient,
         guidance: Option<String>,
         latency_profile: Option<LlmLatencyProfile>,
+        reasoning: bool,
     ) -> Self {
         Self {
             client,
@@ -46,6 +51,7 @@ impl StaticLlmScheduler {
             num_slots: 0,
             guidance,
             latency_profile,
+            reasoning,
         }
     }
 }
@@ -60,25 +66,20 @@ impl Scheduler for StaticLlmScheduler {
         self.all_events = all_events;
         self.num_slots = num_slots;
 
-        let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("static_setup"));
-        self.schedule = {
-            let pb = llm_common::build_init_prompt(
-                &self.event_info,
-                num_slots,
-                self.guidance.as_deref(),
-            );
-            tracing::debug!("StaticLlm system message:\n{}", pb.build()[0].content);
-            let messages = pb.build().to_vec();
-            let client = &self.client;
-            let all_events = &self.all_events;
-            let schema = llm_common::schedule_json_schema(num_slots, all_events);
-            llm_common::chat_with_retry(
-                |m| client.chat(m, "schedule", &schema, "static_setup", sampled),
-                messages,
-                |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
-                2,
-            )
-        }?;
+        let sampled = self
+            .latency_profile
+            .as_mut()
+            .and_then(|p| p.sample("static_setup"));
+        self.schedule = llm_common::generate_schedule(
+            &self.client,
+            &self.event_info,
+            &self.all_events,
+            num_slots,
+            self.guidance.as_deref(),
+            self.reasoning,
+            "static_setup",
+            sampled,
+        )?;
 
         tracing::info!("StaticLlmScheduler: {} steps in cycle", self.schedule.len());
         Ok(())
@@ -149,6 +150,7 @@ mod tests {
             LlmClient::new("http://localhost:0", "test-model", None),
             None,
             None,
+            false,
         );
         s.all_events = vec![0, 1, 2];
         s.num_slots = 4;
@@ -228,13 +230,16 @@ mod tests {
         let all_events: Vec<u32> = event_info.iter().map(|(id, _, _)| *id).collect();
 
         let client = LlmClient::new("http://dubliner.cs.northwestern.edu:11434", "gemma4", None);
-        let mut s = StaticLlmScheduler::new(event_info, client, None, None);
+        let mut s = StaticLlmScheduler::new(event_info, client, None, None, false);
         s.all_events = all_events.clone();
         s.num_slots = 4;
 
-        let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots, None);
+        let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots, None, None);
         let schema = llm_common::schedule_json_schema(s.num_slots, &s.all_events);
-        let response = s.client.chat(pb.build(), "schedule", &schema, "static_setup", None).expect("LLM call should succeed");
+        let response = s
+            .client
+            .chat(pb.build(), "schedule", &schema, "static_setup", None)
+            .expect("LLM call should succeed");
         eprintln!("LLM response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &all_events, s.num_slots)
