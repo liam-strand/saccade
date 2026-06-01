@@ -34,6 +34,8 @@ pub struct PerfettoWriter {
     thread_uuids: HashMap<u32, u64>,
     /// Maps (tid, event_id) → UUID of the rate counter track for that pair.
     thread_counter_uuids: HashMap<(u32, u32), u64>,
+    /// Maps (tid, event_id) → UUID of the uncertainty counter track for that pair.
+    thread_uncertainty_uuids: HashMap<(u32, u32), u64>,
 }
 
 impl PerfettoWriter {
@@ -48,13 +50,18 @@ impl PerfettoWriter {
             process_uuids: HashMap::new(),
             thread_uuids: HashMap::new(),
             thread_counter_uuids: HashMap::new(),
+            thread_uncertainty_uuids: HashMap::new(),
         })
     }
 
-    /// Emit one counter packet per tracked (tid, event_id) pair using the
-    /// estimator's current rate. `thread_meta` maps tid → (tgid, task_name) and
-    /// is required to register process/thread tracks; (tid, event_id) pairs
-    /// whose tid is not yet in `thread_meta` are skipped.
+    /// Emit one rate counter packet and one uncertainty counter packet per tracked (tid, event_id)
+    /// pair using the estimator's current snapshot. `thread_meta` maps tid → (tgid, task_name)
+    /// and is required to register process/thread tracks; (tid, event_id) pairs whose tid is not
+    /// yet in `thread_meta` are skipped.
+    ///
+    /// The rate track is named `{event}/rate` and carries `est.rate` (events/ns).
+    /// The uncertainty track is named `{event}/uncertainty` and carries `est.uncertainty` ∈ [0, 1],
+    /// where 0 = fully confident and 1 = completely unknown.
     pub fn emit_estimator_snapshot(
         &mut self,
         timestamp_ns: u64,
@@ -69,6 +76,8 @@ impl PerfettoWriter {
             let thread_uuid = self.ensure_thread_track(tgid, tid, task)?;
             let rate_uuid = self.ensure_thread_counter_tracks(tid, event_id, thread_uuid)?;
             self.write_counter_packet(timestamp_ns, rate_uuid, est.rate)?;
+            let unc_uuid = self.ensure_thread_uncertainty_track(tid, event_id, thread_uuid)?;
+            self.write_counter_packet(timestamp_ns, unc_uuid, est.uncertainty)?;
         }
         Ok(())
     }
@@ -161,6 +170,40 @@ impl PerfettoWriter {
 
         self.write_track_descriptor_packet(desc)?;
         Ok(rate_uuid)
+    }
+
+    /// Lazily allocate a UUID for a per-thread uncertainty counter track (dimensionless, [0, 1]).
+    fn ensure_thread_uncertainty_track(
+        &mut self,
+        tid: u32,
+        event_id: u32,
+        thread_uuid: u64,
+    ) -> std::io::Result<u64> {
+        if let Some(&uuid) = self.thread_uncertainty_uuids.get(&(tid, event_id)) {
+            return Ok(uuid);
+        }
+        let unc_uuid = self.next_thread_uuid;
+        self.next_thread_uuid += 1;
+        self.thread_uncertainty_uuids
+            .insert((tid, event_id), unc_uuid);
+
+        let event_name = self
+            .event_names
+            .get(event_id as usize)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut counter = CounterDescriptor::new();
+        counter.set_unit_name("".to_string()); // dimensionless
+
+        let mut desc = TrackDescriptor::new();
+        desc.set_uuid(unc_uuid);
+        desc.set_name(format!("{}/uncertainty", event_name));
+        desc.set_parent_uuid(thread_uuid);
+        desc.counter = protobuf::MessageField::some(counter);
+
+        self.write_track_descriptor_packet(desc)?;
+        Ok(unc_uuid)
     }
 
     /// Wrap a `TrackDescriptor` in a `TracePacket` and write it to the output file.
@@ -279,10 +322,7 @@ pub(crate) fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
 ///
 /// Prefer this over `read_trace_packets` when you only need to extract a subset of fields —
 /// only one packet's heap allocation is live at a time instead of the entire file's worth.
-pub(crate) fn for_each_packet(
-    data: &[u8],
-    mut f: impl FnMut(TracePacket),
-) -> std::io::Result<()> {
+pub(crate) fn for_each_packet(data: &[u8], mut f: impl FnMut(TracePacket)) -> std::io::Result<()> {
     let mut pos = 0;
     while pos < data.len() {
         if data[pos] != 0x0A {
