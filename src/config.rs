@@ -8,8 +8,8 @@
 use crate::event::{EventId, EventRegistry};
 use crate::llm::{LlmClient, LlmLatencyProfile};
 use crate::scheduler::Scheduler;
-use crate::scheduler::max_uncertainty::MaxUncertaintyScheduler;
 use crate::scheduler::dynamic_llm::DynamicLlmScheduler;
+use crate::scheduler::max_uncertainty::MaxUncertaintyScheduler;
 use crate::scheduler::random::RandomScheduler;
 use crate::scheduler::rate_of_change::RateOfChangeScheduler;
 use crate::scheduler::round_robin::RoundRobinScheduler;
@@ -42,6 +42,10 @@ pub enum SchedulerKind {
     WeightedRoundRobinLlm,
     /// Prioritizes events with the highest rate-of-change (non-linearity) using Lim 2014 triangle cost.
     RateOfChange,
+    /// Like `StaticLlm` but performs a free-form reasoning pass before generating the schedule.
+    ReasoningStaticLlm,
+    /// Like `DynamicLlm` but performs a free-form reasoning pass before each schedule generation.
+    ReasoningDynamicLlm,
 }
 
 impl fmt::Display for SchedulerKind {
@@ -55,8 +59,22 @@ impl fmt::Display for SchedulerKind {
             SchedulerKind::DynamicLlm => write!(f, "dynamic_llm"),
             SchedulerKind::WeightedRoundRobinLlm => write!(f, "weighted_round_robin_llm"),
             SchedulerKind::RateOfChange => write!(f, "rate_of_change"),
+            SchedulerKind::ReasoningStaticLlm => write!(f, "reasoning_static_llm"),
+            SchedulerKind::ReasoningDynamicLlm => write!(f, "reasoning_dynamic_llm"),
         }
     }
+}
+
+/// Build event info tuples `(id, name, description)` from an event registry.
+fn event_info_from_registry(registry: &EventRegistry) -> Vec<(EventId, String, String)> {
+    registry
+        .get_event_ids()
+        .into_iter()
+        .map(|id| {
+            let ev = registry.get_event(id);
+            (id, ev.name.clone(), ev.desc.clone())
+        })
+        .collect()
 }
 
 /// LLM connection and behaviour settings shared by all LLM-backed schedulers.
@@ -179,32 +197,27 @@ impl ResolvedConfig {
             SchedulerKind::RoundRobin => Box::new(RoundRobinScheduler::default()),
             SchedulerKind::MaxUncertainty => Box::new(MaxUncertaintyScheduler::default()),
             SchedulerKind::StaticLlm => {
-                let event_info = registry
-                    .get_event_ids()
-                    .into_iter()
-                    .map(|id| {
-                        let ev = registry.get_event(id);
-                        (id, ev.name.clone(), ev.desc.clone())
-                    })
-                    .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
+                let event_info = event_info_from_registry(registry);
+                let client = LlmClient::new(
+                    &self.llm.base_url,
+                    &self.llm.model,
+                    self.llm.api_key.as_deref(),
+                );
                 Box::new(StaticLlmScheduler::new(
                     event_info,
                     client,
                     self.llm.guidance.clone(),
                     latency_profile,
+                    false,
                 ))
             }
             SchedulerKind::DynamicLlm => {
-                let event_info = registry
-                    .get_event_ids()
-                    .into_iter()
-                    .map(|id| {
-                        let ev = registry.get_event(id);
-                        (id, ev.name.clone(), ev.desc.clone())
-                    })
-                    .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
+                let event_info = event_info_from_registry(registry);
+                let client = LlmClient::new(
+                    &self.llm.base_url,
+                    &self.llm.model,
+                    self.llm.api_key.as_deref(),
+                );
                 Box::new(DynamicLlmScheduler::new(
                     event_info,
                     client,
@@ -212,23 +225,53 @@ impl ResolvedConfig {
                     self.llm.guidance.clone(),
                     simulation,
                     latency_profile,
+                    false,
                 ))
             }
             SchedulerKind::WeightedRoundRobinLlm => {
-                let event_info = registry
-                    .get_event_ids()
-                    .into_iter()
-                    .map(|id| {
-                        let ev = registry.get_event(id);
-                        (id, ev.name.clone(), ev.desc.clone())
-                    })
-                    .collect();
-                let client = LlmClient::new(&self.llm.base_url, &self.llm.model, self.llm.api_key.as_deref());
+                let event_info = event_info_from_registry(registry);
+                let client = LlmClient::new(
+                    &self.llm.base_url,
+                    &self.llm.model,
+                    self.llm.api_key.as_deref(),
+                );
                 Box::new(WeightedRoundRobinLlmScheduler::new(
                     event_info,
                     client,
                     self.llm.guidance.clone(),
                     latency_profile,
+                ))
+            }
+            SchedulerKind::ReasoningStaticLlm => {
+                let event_info = event_info_from_registry(registry);
+                let client = LlmClient::new(
+                    &self.llm.base_url,
+                    &self.llm.model,
+                    self.llm.api_key.as_deref(),
+                );
+                Box::new(StaticLlmScheduler::new(
+                    event_info,
+                    client,
+                    self.llm.guidance.clone(),
+                    latency_profile,
+                    true,
+                ))
+            }
+            SchedulerKind::ReasoningDynamicLlm => {
+                let event_info = event_info_from_registry(registry);
+                let client = LlmClient::new(
+                    &self.llm.base_url,
+                    &self.llm.model,
+                    self.llm.api_key.as_deref(),
+                );
+                Box::new(DynamicLlmScheduler::new(
+                    event_info,
+                    client,
+                    self.llm.update_interval,
+                    self.llm.guidance.clone(),
+                    simulation,
+                    latency_profile,
+                    true,
                 ))
             }
             SchedulerKind::RateOfChange => Box::new(RateOfChangeScheduler::default()),
@@ -450,5 +493,18 @@ mod tests {
         let cfg = load_config(Some(path.clone()), true, no_overrides()).unwrap();
         let _ = std::fs::remove_file(path);
         assert_eq!(cfg.llm.guidance, None);
+    }
+
+    #[test]
+    fn scheduler_kind_display_round_trip() {
+        let pairs = [
+            (SchedulerKind::ReasoningStaticLlm, "reasoning_static_llm"),
+            (SchedulerKind::ReasoningDynamicLlm, "reasoning_dynamic_llm"),
+            (SchedulerKind::StaticLlm, "static_llm"),
+            (SchedulerKind::DynamicLlm, "dynamic_llm"),
+        ];
+        for (kind, expected) in pairs {
+            assert_eq!(kind.to_string(), expected);
+        }
     }
 }
