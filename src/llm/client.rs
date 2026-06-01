@@ -41,7 +41,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
-    response_format: ResponseFormat<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat<'a>>,
 }
 
 #[derive(Serialize)]
@@ -128,22 +129,55 @@ impl LlmClient {
         call_type: &str,
         latency_override_ms: Option<u64>,
     ) -> Result<String, LlmError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
         let body = serde_json::to_vec(&ChatRequest {
             model: &self.model,
             messages,
             stream: false,
-            response_format: ResponseFormat {
+            response_format: Some(ResponseFormat {
                 kind: "json_schema",
                 json_schema: JsonSchemaBlock {
                     name: schema_name,
                     strict: true,
                     schema,
                 },
-            },
+            }),
         })
         .map_err(LlmError::Json)?;
 
+        self.post_and_log(body, call_type, latency_override_ms)
+    }
+
+    /// Blocking free-form chat round-trip to `POST /v1/chat/completions` with no response schema.
+    ///
+    /// Unlike [`chat`](Self::chat), this method omits `response_format` entirely, allowing the
+    /// model to reason freely in prose before a structured call is made.
+    /// `call_type` is logged with the latency for downstream analysis.
+    /// `latency_override_ms`, when `Some`, replaces the measured wall-clock latency in the log.
+    pub fn chat_freeform(
+        &self,
+        messages: &[ChatMessage],
+        call_type: &str,
+        latency_override_ms: Option<u64>,
+    ) -> Result<String, LlmError> {
+        let body = serde_json::to_vec(&ChatRequest {
+            model: &self.model,
+            messages,
+            stream: false,
+            response_format: None,
+        })
+        .map_err(LlmError::Json)?;
+
+        self.post_and_log(body, call_type, latency_override_ms)
+    }
+
+    /// Internal helper: POST a pre-serialized body, log latency, extract the reply text.
+    fn post_and_log(
+        &self,
+        body: Vec<u8>,
+        call_type: &str,
+        latency_override_ms: Option<u64>,
+    ) -> Result<String, LlmError> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
         let t0 = std::time::Instant::now();
 
         let mut req = self
