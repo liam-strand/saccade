@@ -275,9 +275,14 @@ pub(crate) fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-/// Parse a `.perfetto-trace` byte slice into `TracePacket`s by walking the `Trace` container wire format (tag `0x0A` + varint length + packet bytes per entry).
-pub(crate) fn read_trace_packets(data: &[u8]) -> std::io::Result<Vec<TracePacket>> {
-    let mut packets = Vec::new();
+/// Walk a `.perfetto-trace` byte slice and call `f` on each decoded `TracePacket`, dropping it before moving to the next.
+///
+/// Prefer this over `read_trace_packets` when you only need to extract a subset of fields —
+/// only one packet's heap allocation is live at a time instead of the entire file's worth.
+pub(crate) fn for_each_packet(
+    data: &[u8],
+    mut f: impl FnMut(TracePacket),
+) -> std::io::Result<()> {
     let mut pos = 0;
     while pos < data.len() {
         if data[pos] != 0x0A {
@@ -296,8 +301,8 @@ pub(crate) fn read_trace_packets(data: &[u8]) -> std::io::Result<Vec<TracePacket
         }
         let packet =
             TracePacket::parse_from_bytes(&data[pos..end]).map_err(std::io::Error::other)?;
-        packets.push(packet);
+        f(packet);
         pos = end;
     }
-    Ok(packets)
+    Ok(())
 }
