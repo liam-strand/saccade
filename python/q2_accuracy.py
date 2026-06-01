@@ -27,10 +27,13 @@ from sim_utils import (
     FIXED_NUM_SLOTS,
     LLM_SCHEDULERS,
     filter_traces_by_kind,
+    importance_weighted_nrmse,
     is_significant,
     load_noise_floor,
+    mean_calibration,
     mean_coverage,
     median_nrmse,
+    nrmse_distribution,
     run_batch_simulate,
     run_evaluate,
 )
@@ -276,6 +279,8 @@ def main() -> None:
                         "workload": workload, "scheduler": sched, "estimator": est,
                         "median_nrmse": "", "coverage": "",
                         "nrmse_mean": "", "nrmse_stddev": "",
+                        "nrmse_p90": "", "nrmse_max": "",
+                        "nrmse_weighted": "", "mean_calibration": "",
                     }
                     if noise_floor is not None:
                         row["significant"] = ""
@@ -283,18 +288,29 @@ def main() -> None:
             continue
 
         # Evaluate all output traces in parallel, then average LLM results.
+        # Each trial returns (median_nrmse, mean_coverage, p90, max, weighted, calibration).
+        # nrmse_mean/nrmse_stddev are trial-variability stats (across LLM trials);
+        # nrmse_p90/nrmse_max/nrmse_weighted are per-eval distribution stats aggregated
+        # across trials with the same scheme (median/mean respectively).
         def _eval_trial(args_tuple: tuple) -> tuple:
             sched, est, trial = args_tuple
             out_trace = _out_trace(workload, sched, est, trial)
             try:
                 ev = run_evaluate(args.saccade, trace, out_trace)
-                return sched, est, trial, median_nrmse(ev), mean_coverage(ev)
+                dist = nrmse_distribution(ev)
+                return (
+                    sched, est, trial,
+                    median_nrmse(ev), mean_coverage(ev),
+                    dist["p90"], dist["max"],
+                    importance_weighted_nrmse(ev),
+                    mean_calibration(ev),
+                )
             except subprocess.CalledProcessError as exc:
                 tqdm.write(
                     f"  ERROR evaluate {workload}/{sched}/{est} t{trial}: {exc}",
                     file=sys.stderr,
                 )
-                return sched, est, trial, None, None
+                return sched, est, trial, None, None, None, None, None, None
 
         n_trials = {sched: args.llm_trials if sched in LLM_SCHEDULERS else 1
                     for sched in schedulers}
@@ -307,21 +323,31 @@ def main() -> None:
         raw: dict[tuple, list] = defaultdict(list)
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
             for fut in as_completed(ex.submit(_eval_trial, w) for w in eval_work):
-                sched, est, _t, mn, mc = fut.result()
-                raw[(sched, est)].append((mn, mc))
+                sched, est, _t, mn, mc, p90, mx, wt, cal = fut.result()
+                raw[(sched, est)].append((mn, mc, p90, mx, wt, cal))
 
         for sched in schedulers:
             for est in ESTIMATORS:
                 results = raw[(sched, est)]
-                nrmse_vals = [mn for mn, _ in results if mn is not None]
-                cov_vals = [mc for _, mc in results if mc is not None]
+                nrmse_vals = [r[0] for r in results if r[0] is not None]
+                cov_vals = [r[1] for r in results if r[1] is not None]
+                p90_vals = [r[2] for r in results if r[2] is not None]
+                max_vals = [r[3] for r in results if r[3] is not None]
+                wt_vals = [r[4] for r in results if r[4] is not None]
+                cal_vals = [r[5] for r in results if r[5] is not None]
                 final_nrmse = float(np.median(nrmse_vals)) if nrmse_vals else None
                 final_cov = float(np.mean(cov_vals)) if cov_vals else None
+                # nrmse_mean/stddev: variability across LLM trials (same axis as before)
                 nrmse_mean = float(np.mean(nrmse_vals)) if nrmse_vals else None
                 nrmse_std = (
                     float(np.std(nrmse_vals, ddof=1))
                     if len(nrmse_vals) > 1 else None
                 )
+                # per-eval distribution stats aggregated across trials
+                final_p90 = float(np.median(p90_vals)) if p90_vals else None
+                final_max = float(np.median(max_vals)) if max_vals else None
+                final_wt = float(np.mean(wt_vals)) if wt_vals else None
+                final_cal = float(np.mean(cal_vals)) if cal_vals else None
                 sig = is_significant(final_nrmse, noise_floor)
                 row = {
                     "workload": workload, "scheduler": sched, "estimator": est,
@@ -329,6 +355,10 @@ def main() -> None:
                     "coverage": final_cov if final_cov is not None else "",
                     "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
                     "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
+                    "nrmse_p90": final_p90 if final_p90 is not None else "",
+                    "nrmse_max": final_max if final_max is not None else "",
+                    "nrmse_weighted": final_wt if final_wt is not None else "",
+                    "mean_calibration": final_cal if final_cal is not None else "",
                 }
                 if noise_floor is not None:
                     row["significant"] = "" if sig is None else str(sig).lower()
@@ -340,10 +370,14 @@ def main() -> None:
         "workload",
         "scheduler",
         "estimator",
-        "median_nrmse",
+        "median_nrmse",    # frozen primary metric
         "coverage",
-        "nrmse_mean",
-        "nrmse_stddev",
+        "nrmse_mean",      # trial-variability: mean of per-trial median_nrmse (LLM only)
+        "nrmse_stddev",    # trial-variability: stddev of per-trial median_nrmse (LLM only)
+        "nrmse_p90",       # per-eval distribution: 90th-percentile event nRMSE
+        "nrmse_max",       # per-eval distribution: worst-case event nRMSE
+        "nrmse_weighted",  # per-eval: importance_weighted_nrmse (secondary lens)
+        "mean_calibration",
     ]
     if noise_floor is not None:
         grid_fieldnames.append("significant")

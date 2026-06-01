@@ -351,6 +351,89 @@ def run_combo(
     return final_nrmse, final_cov, nrmse_mean, nrmse_std
 
 
+def run_combo_extended(
+    saccade: Path,
+    library: Path,
+    rates_trace: Path,
+    scheduler: str,
+    estimator: str,
+    num_slots: int,
+    q_schedule: int,
+    seed: int | None,
+    llm_trials: int,
+    tmp_dir: Path,
+    workload: str,
+    base_config: Path | None = None,
+    guidance: str | None = None,
+) -> dict:
+    """Like ``run_combo`` but returns a dict with all primary and secondary metrics.
+
+    LLM schedulers are run *llm_trials* times; all others run once.  The
+    returned dict includes:
+      - ``median_nrmse``: frozen primary metric
+      - ``coverage``: mean coverage across trials
+      - ``nrmse_mean``, ``nrmse_stddev``: trial-variability stats (LLM only)
+      - ``nrmse_p90``, ``nrmse_max``: tail of per-event distribution, median'd across trials
+      - ``nrmse_weighted``: importance-weighted nRMSE (secondary lens), mean'd across trials
+      - ``mean_calibration``: GT-anchored fraction-in-band, mean'd across trials (may be None)
+
+    All values are None when the underlying call produced no usable data.
+    """
+    n_trials = llm_trials if scheduler in LLM_SCHEDULERS else 1
+    nrmse_vals: list[float] = []
+    coverage_vals: list[float] = []
+    p90_vals: list[float] = []
+    max_vals: list[float] = []
+    wt_vals: list[float] = []
+    cal_vals: list[float] = []
+
+    for trial in range(n_trials):
+        eval_json = simulate_and_eval(
+            saccade, library, rates_trace, scheduler, estimator,
+            num_slots, q_schedule, seed, tmp_dir, workload, trial,
+            base_config, guidance,
+        )
+        mn = median_nrmse(eval_json)
+        mc = mean_coverage(eval_json)
+        dist = nrmse_distribution(eval_json)
+        wt = importance_weighted_nrmse(eval_json)
+        cal = mean_calibration(eval_json)
+
+        if mn is not None:
+            nrmse_vals.append(mn)
+        if mc is not None:
+            coverage_vals.append(mc)
+        if dist["p90"] is not None:
+            p90_vals.append(dist["p90"])
+        if dist["max"] is not None:
+            max_vals.append(dist["max"])
+        if wt is not None:
+            wt_vals.append(wt)
+        if cal is not None:
+            cal_vals.append(cal)
+
+    final_nrmse = float(np.median(nrmse_vals)) if nrmse_vals else None
+    final_cov = float(np.mean(coverage_vals)) if coverage_vals else None
+
+    if n_trials > 1 and nrmse_vals:
+        nrmse_mean = float(np.mean(nrmse_vals))
+        nrmse_std = float(np.std(nrmse_vals, ddof=1)) if len(nrmse_vals) > 1 else 0.0
+    else:
+        nrmse_mean = final_nrmse
+        nrmse_std = None
+
+    return {
+        "median_nrmse": final_nrmse,
+        "coverage": final_cov,
+        "nrmse_mean": nrmse_mean,
+        "nrmse_stddev": nrmse_std,
+        "nrmse_p90": float(np.median(p90_vals)) if p90_vals else None,
+        "nrmse_max": float(np.median(max_vals)) if max_vals else None,
+        "nrmse_weighted": float(np.mean(wt_vals)) if wt_vals else None,
+        "mean_calibration": float(np.mean(cal_vals)) if cal_vals else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Trace filtering
 # ---------------------------------------------------------------------------

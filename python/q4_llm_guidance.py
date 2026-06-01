@@ -24,7 +24,7 @@ from sim_utils import (
     filter_traces_by_kind,
     is_significant,
     load_noise_floor,
-    run_combo,
+    run_combo_extended,
 )
 
 DEFAULT_GUIDANCE = (
@@ -122,7 +122,14 @@ def main() -> None:
     fieldnames = [
         "workload", "scheduler", "estimator",
         "guidance_condition", "guidance_text",
-        "median_nrmse", "coverage", "nrmse_mean", "nrmse_stddev",
+        "median_nrmse",    # frozen primary metric
+        "coverage",
+        "nrmse_mean",      # trial-variability: mean of per-trial median_nrmse
+        "nrmse_stddev",    # trial-variability: stddev of per-trial median_nrmse
+        "nrmse_p90",       # per-eval distribution: 90th-percentile event nRMSE
+        "nrmse_max",       # per-eval distribution: worst-case event nRMSE
+        "nrmse_weighted",  # per-eval: importance_weighted_nrmse (secondary lens)
+        "mean_calibration",
     ]
     if noise_floor is not None:
         fieldnames.append("significant")
@@ -147,7 +154,7 @@ def main() -> None:
         bar.set_postfix_str(f"{workload}/{scheduler}/{cond_label}")
 
         try:
-            med_nrmse, cov, nrmse_mean, nrmse_std = run_combo(
+            metrics = run_combo_extended(
                 saccade=args.saccade,
                 library=args.library,
                 rates_trace=trace_path,
@@ -166,23 +173,37 @@ def main() -> None:
             tqdm.write(
                 f"  ERROR {workload}/{scheduler}/{cond_label}: {exc}", file=sys.stderr
             )
-            med_nrmse = cov = nrmse_mean = nrmse_std = None
+            metrics = {
+                "median_nrmse": None, "coverage": None,
+                "nrmse_mean": None, "nrmse_stddev": None,
+                "nrmse_p90": None, "nrmse_max": None,
+                "nrmse_weighted": None, "mean_calibration": None,
+            }
 
+        med_nrmse = metrics["median_nrmse"]
         sig = is_significant(med_nrmse, noise_floor)
         truncated_guidance = (
             "" if guidance_val is None
             else (guidance_val[:80] + "…" if len(guidance_val) > 80 else guidance_val)
         )
+
+        def _fmt(v: float | None) -> str:
+            return "" if v is None else str(v)
+
         row: dict = {
             "workload": workload,
             "scheduler": scheduler,
             "estimator": args.estimator,
             "guidance_condition": cond_label,
             "guidance_text": truncated_guidance,
-            "median_nrmse": med_nrmse if med_nrmse is not None else "",
-            "coverage": cov if cov is not None else "",
-            "nrmse_mean": nrmse_mean if nrmse_mean is not None else "",
-            "nrmse_stddev": nrmse_std if nrmse_std is not None else "",
+            "median_nrmse": _fmt(metrics["median_nrmse"]),
+            "coverage": _fmt(metrics["coverage"]),
+            "nrmse_mean": _fmt(metrics["nrmse_mean"]),
+            "nrmse_stddev": _fmt(metrics["nrmse_stddev"]),
+            "nrmse_p90": _fmt(metrics["nrmse_p90"]),
+            "nrmse_max": _fmt(metrics["nrmse_max"]),
+            "nrmse_weighted": _fmt(metrics["nrmse_weighted"]),
+            "mean_calibration": _fmt(metrics["mean_calibration"]),
         }
         if noise_floor is not None:
             row["significant"] = "" if sig is None else str(sig).lower()
