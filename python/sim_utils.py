@@ -5,6 +5,7 @@ from here rather than re-implementing these helpers.
 """
 
 import json
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -69,6 +70,10 @@ def run_simulate(
         "--trace", str(out_trace),
         "--num-slots", str(num_slots),
         "--q-schedule", str(q_schedule),
+        "--llm-model", "google/gemma-4-26b-a4b-it",
+        "--llm-base-url", "https://openrouter.ai/api",
+        "--llm-api-key", os.environ["LLM_API_KEY"],
+        "--llm-latency-profile", "./gemma4_8b_latency.json",
     ]
     if seed is not None:
         cmd += ["--seed", str(seed)]
@@ -120,6 +125,9 @@ def run_batch_simulate(
         "--q-schedule", str(q_schedule),
         "--batch", str(spec_path),
         "--jobs", str(max(1, jobs)),
+        "--llm-model", "google/gemma-4-26b-a4b-it",
+        "--llm-base-url", "https://openrouter.ai/api",
+        "--llm-api-key", os.environ["LLM_API_KEY"],
     ]
     subprocess.run(
         cmd,

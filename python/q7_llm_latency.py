@@ -19,12 +19,14 @@ to inject realistic LLM overhead without making live API calls.
 """
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import re
 import subprocess
 import sys
 import tempfile
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +64,10 @@ def run_simulate_capture_stderr(
         "--rates-trace", str(rates_trace),
         "--scheduler", scheduler,
         "--estimator", "propagate",
+        # "--llm-model", "gemma4",
+        "--llm-model", "google/gemma-4-26b-a4b-it",
+        "--llm-base-url", "https://openrouter.ai/api",
+        "--llm-api-key", os.environ["LLM_API_KEY"],
         "--trace", str(out_trace),
         "--num-slots", str(num_slots),
         "--q-schedule", str(q_schedule),
@@ -75,6 +81,7 @@ def run_simulate_capture_stderr(
         cwd=REPO_ROOT,
     )
     if result.returncode != 0:
+        print(f"ERROR!!\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
         raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result.stderr
 
@@ -117,6 +124,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--q-schedule", type=int, default=10_000_000)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--results-dir", type=Path, default=Path("./results"))
+    p.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of parallel simulation runs (default: 1)",
+    )
     return p
 
 
@@ -148,41 +162,54 @@ def main() -> None:
     run_dir = args.results_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    tasks = [
+        (scheduler, rep)
+        for scheduler in LLM_SCHEDULER_LIST
+        for rep in range(args.reps)
+    ]
+    total = len(tasks)
+    print(f"Running {total} simulations with -j {args.jobs} ...", file=sys.stderr)
+
     raw_rows: list[dict] = []
 
     with tempfile.TemporaryDirectory(prefix="q7_") as tmp:
         tmp_dir = Path(tmp)
-        for scheduler in LLM_SCHEDULER_LIST:
-            print(f"\n{scheduler} ({args.reps} reps) ...", file=sys.stderr)
-            for rep in range(args.reps):
-                out_trace = tmp_dir / f"{scheduler}_rep{rep}.perfetto"
-                try:
-                    stderr = run_simulate_capture_stderr(
-                        args.saccade, args.library, trace_path,
-                        scheduler, out_trace,
-                        FIXED_NUM_SLOTS, args.q_schedule, args.seed,
-                    )
-                except subprocess.CalledProcessError as exc:
-                    print(f"  rep {rep} failed: {exc}", file=sys.stderr)
-                    continue
 
-                calls = parse_llm_calls(stderr)
-                if not calls:
-                    print(
-                        f"  rep {rep}: no llm_call lines found in stderr. "
-                        "Is the binary built with the latest Rust changes?",
-                        file=sys.stderr,
-                    )
-                for i, call in enumerate(calls):
-                    raw_rows.append({
-                        "scheduler": scheduler,
-                        "rep": rep,
-                        "call_index": i,
-                        "call_type": call["call_type"],
-                        "latency_ms": call["latency_ms"],
-                        "model": call["model"],
-                    })
-                print(f"  rep {rep}: {len(calls)} call(s)", file=sys.stderr)
+        def run_task(task: tuple[str, int]) -> list[dict]:
+            scheduler, rep = task
+            out_trace = tmp_dir / f"{scheduler}_rep{rep}.perfetto"
+            try:
+                stderr = run_simulate_capture_stderr(
+                    args.saccade, args.library, trace_path,
+                    scheduler, out_trace,
+                    FIXED_NUM_SLOTS, args.q_schedule, args.seed,
+                )
+            except subprocess.CalledProcessError as exc:
+                print(f"  {scheduler} rep {rep} failed: {exc}", file=sys.stderr)
+                return []
+            calls = parse_llm_calls(stderr)
+            if not calls:
+                print(
+                    f"  {scheduler} rep {rep}: no llm_call lines found in stderr. "
+                    "Is the binary built with the latest Rust changes?",
+                    file=sys.stderr,
+                )
+            print(f"  {scheduler} rep {rep}: {len(calls)} call(s)", file=sys.stderr)
+            return [
+                {
+                    "scheduler": scheduler,
+                    "rep": rep,
+                    "call_index": i,
+                    "call_type": call["call_type"],
+                    "latency_ms": call["latency_ms"],
+                    "model": call["model"],
+                }
+                for i, call in enumerate(calls)
+            ]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            for rows in executor.map(run_task, tasks):
+                raw_rows.extend(rows)
 
     # -----------------------------------------------------------------------
     # Write raw CSV
