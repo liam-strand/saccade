@@ -16,6 +16,7 @@ fn main() -> std::io::Result<()> {
         .with_max_level(level)
         .with_writer(std::io::stderr)
         .without_time()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     let explicit = cli.config.is_some();
@@ -44,6 +45,7 @@ fn main() -> std::io::Result<()> {
             guidance,
             llm_model,
             llm_base_url,
+            llm_api_key,
             q_schedule,
             q_sample,
             q_output,
@@ -66,6 +68,7 @@ fn main() -> std::io::Result<()> {
                     guidance,
                     llm_model,
                     llm_base_url,
+                    llm_api_key,
                 },
             )?;
             run(library, config, trace, csv, target)?;
@@ -94,6 +97,7 @@ fn main() -> std::io::Result<()> {
                     guidance: None,
                     llm_model: None,
                     llm_base_url: None,
+                    llm_api_key: None,
                 },
             )?;
             sweep(library, config, trace, matrix, quiet, target)?;
@@ -106,6 +110,7 @@ fn main() -> std::io::Result<()> {
             guidance,
             llm_model,
             llm_base_url,
+            llm_api_key,
             q_schedule,
             q_output,
             q_sample,
@@ -133,6 +138,7 @@ fn main() -> std::io::Result<()> {
                     guidance,
                     llm_model,
                     llm_base_url,
+                    llm_api_key,
                 },
             )?;
             if let Some(batch_spec) = batch {

@@ -283,6 +283,8 @@ pub struct CliOverrides {
     pub llm_model: Option<String>,
     /// Overrides the LLM inference server base URL.
     pub llm_base_url: Option<String>,
+    /// Overrides the LLM API key (Bearer token).
+    pub llm_api_key: Option<String>,
 }
 
 /// Hard-coded baseline values serialized as the lowest-priority config layer.
@@ -355,6 +357,7 @@ fn build_config(
         .set_override_option("llm.guidance", ov.guidance)?
         .set_override_option("llm.model", ov.llm_model)?
         .set_override_option("llm.base_url", ov.llm_base_url)?
+        .set_override_option("llm.api_key", ov.llm_api_key)?
         .build()?
         .try_deserialize::<ResolvedConfig>()
 }
@@ -403,6 +406,7 @@ mod tests {
             guidance: None,
             llm_model: None,
             llm_base_url: None,
+            llm_api_key: None,
         }
     }
 

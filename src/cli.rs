@@ -54,6 +54,10 @@ pub enum Commands {
         #[arg(long)]
         llm_base_url: Option<String>,
 
+        /// LLM API key (Bearer token), overrides [llm] api_key in config file
+        #[arg(long)]
+        llm_api_key: Option<String>,
+
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]
         q_schedule: Option<u64>,
@@ -156,6 +160,10 @@ pub enum Commands {
         /// LLM inference server base URL, overrides [llm] base_url in config file
         #[arg(long)]
         llm_base_url: Option<String>,
+
+        /// LLM API key (Bearer token), overrides [llm] api_key in config file
+        #[arg(long)]
+        llm_api_key: Option<String>,
 
         /// q-schedule: scheduler quantum in nanoseconds
         #[arg(short = 'q', long = "q-schedule")]

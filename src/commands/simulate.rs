@@ -133,6 +133,7 @@ fn run_one_combo(
                 guidance: combo.guidance.clone().or_else(|| base_config.llm.guidance.clone()),
                 llm_model: Some(base_config.llm.model.clone()),
                 llm_base_url: Some(base_config.llm.base_url.clone()),
+                llm_api_key: base_config.llm.api_key.clone(),
             },
         )?
     } else {
