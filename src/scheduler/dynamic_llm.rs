@@ -146,12 +146,18 @@ Recent observations (rate in events/ns, uncertainty in [0=confident, 1=unknown])
 Current schedule (for reference):
 {current_schedule}
 
-Generate an updated cyclic schedule for the same {num_slots}-slot profiler.
-
-Your entire response must be a single JSON array. \
-No explanation, no prose, no markdown fences."
+Generate an updated cyclic schedule for the same {num_slots}-slot profiler. \
+Each step must have duration_ms (milliseconds) and events \
+(an array of exactly {num_slots} counter IDs). \
+Use each event ID at most once per step. \
+Use only event IDs from the list above."
         );
-        PromptBuilder::new().system(system).user(user)
+        let example = llm_common::build_schedule_example(&self.event_info, num_slots);
+        PromptBuilder::new()
+            .system(system)
+            .user(user)
+            .assistant(example)
+            .user("Good. Now produce the COMPLETE updated schedule covering ALL the counters listed above — not just those in the example.")
     }
 }
 
@@ -181,8 +187,9 @@ impl Scheduler for DynamicLlmScheduler {
             let messages = pb.build().to_vec();
             let client = &self.client;
             let all_events = &self.all_events;
+            let schema = llm_common::schedule_json_schema(num_slots, all_events);
             llm_common::chat_with_retry(
-                |m| client.chat(m, "static_setup", sampled_init),
+                |m| client.chat(m, "schedule", &schema, "static_setup", sampled_init),
                 messages,
                 |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
                 2,
@@ -201,10 +208,11 @@ impl Scheduler for DynamicLlmScheduler {
         let client = self.client.clone();
         let all_events = self.all_events.clone();
         let num_slots = self.num_slots;
+        let schema = llm_common::schedule_json_schema(num_slots, &all_events);
         std::thread::spawn(move || {
             for (messages, override_ms) in req_rx {
                 let result = llm_common::chat_with_retry(
-                    |m| client.chat(m, "dynamic_update", override_ms),
+                    |m| client.chat(m, "schedule", &schema, "dynamic_update", override_ms),
                     messages,
                     |resp| llm_common::parse_schedule_response(resp, &all_events, num_slots),
                     2,
@@ -547,7 +555,8 @@ mod tests {
         est.add(0, 1, 3.0e-7, 0.2);
 
         let pb = s.build_update_prompt(&est);
-        let response = s.client.chat(pb.build(), "dynamic_update", None).expect("LLM call should succeed");
+        let schema = llm_common::schedule_json_schema(s.num_slots, &s.all_events);
+        let response = s.client.chat(pb.build(), "schedule", &schema, "dynamic_update", None).expect("LLM call should succeed");
         eprintln!("LLM update response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &s.all_events, s.num_slots)

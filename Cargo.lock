@@ -1664,6 +1664,7 @@ dependencies = [
  "indicatif",
  "libbpf-cargo",
  "libbpf-rs",
+ "memmap2",
  "ndarray",
  "nom 8.0.0",
  "perf-event2",

@@ -27,6 +27,7 @@ protobuf = "3.7"
 ndarray = "0.16"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 ureq = "3"
+memmap2 = "0.9.10"
 
 [build-dependencies]
 bindgen = "0.72"

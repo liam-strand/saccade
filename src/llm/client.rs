@@ -41,6 +41,21 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    response_format: ResponseFormat<'a>,
+}
+
+#[derive(Serialize)]
+struct ResponseFormat<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    json_schema: JsonSchemaBlock<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonSchemaBlock<'a> {
+    name: &'a str,
+    strict: bool,
+    schema: &'a serde_json::Value,
 }
 
 /// Top-level wrapper in the `/v1/chat/completions` response body.
@@ -83,7 +98,7 @@ impl LlmClient {
     pub fn new(base_url: &str, model: &str, api_key: Option<&str>) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(120)))
+            .timeout_recv_response(Some(Duration::from_secs(600)))
             .build();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -98,14 +113,18 @@ impl LlmClient {
         &self.model
     }
 
-    /// Blocking chat round-trip to `POST /api/chat`. Returns the assistant's reply text.
+    /// Blocking chat round-trip to `POST /v1/chat/completions` with structured output enforcement.
     ///
+    /// `schema_name` and `schema` are forwarded as `response_format.json_schema` with `strict: true`
+    /// so the server guarantees the reply matches the schema.
     /// `call_type` is logged with the latency for downstream analysis.
     /// `latency_override_ms`, when `Some`, replaces the measured wall-clock latency in the log
     /// so simulations can inject a pre-profiled distribution instead of live server timing.
     pub fn chat(
         &self,
         messages: &[ChatMessage],
+        schema_name: &str,
+        schema: &serde_json::Value,
         call_type: &str,
         latency_override_ms: Option<u64>,
     ) -> Result<String, LlmError> {
@@ -114,6 +133,14 @@ impl LlmClient {
             model: &self.model,
             messages,
             stream: false,
+            response_format: ResponseFormat {
+                kind: "json_schema",
+                json_schema: JsonSchemaBlock {
+                    name: schema_name,
+                    strict: true,
+                    schema,
+                },
+            },
         })
         .map_err(LlmError::Json)?;
 

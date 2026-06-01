@@ -71,8 +71,9 @@ impl Scheduler for StaticLlmScheduler {
             let messages = pb.build().to_vec();
             let client = &self.client;
             let all_events = &self.all_events;
+            let schema = llm_common::schedule_json_schema(num_slots, all_events);
             llm_common::chat_with_retry(
-                |m| client.chat(m, "static_setup", sampled),
+                |m| client.chat(m, "schedule", &schema, "static_setup", sampled),
                 messages,
                 |resp| llm_common::parse_schedule_response(resp, all_events, num_slots),
                 2,
@@ -232,7 +233,8 @@ mod tests {
         s.num_slots = 4;
 
         let pb = llm_common::build_init_prompt(&s.event_info, s.num_slots, None);
-        let response = s.client.chat(pb.build(), "static_setup", None).expect("LLM call should succeed");
+        let schema = llm_common::schedule_json_schema(s.num_slots, &s.all_events);
+        let response = s.client.chat(pb.build(), "schedule", &schema, "static_setup", None).expect("LLM call should succeed");
         eprintln!("LLM response:\n{response}");
 
         let steps = llm_common::parse_schedule_response(&response, &all_events, s.num_slots)

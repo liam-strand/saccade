@@ -24,6 +24,115 @@ pub(super) struct EventWeight {
     pub(super) weight: u32,
 }
 
+/// JSON Schema for the structured-output schedule response: `{"steps": [{duration_ms, events}]}`.
+///
+/// `num_slots` is injected as `minItems`/`maxItems` on the `events` array and `valid_ids` as an
+/// `enum` on each item so Ollama's constrained-decoding grammar enforces both count and ID range.
+pub(super) fn schedule_json_schema(num_slots: usize, valid_ids: &[EventId]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "duration_ms": {"type": "integer"},
+                        "events": {
+                            "type": "array",
+                            "items": {"type": "integer", "enum": valid_ids},
+                            "minItems": num_slots,
+                            "maxItems": num_slots
+                        }
+                    },
+                    "required": ["duration_ms", "events"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["steps"],
+        "additionalProperties": false
+    })
+}
+
+/// JSON Schema for the structured-output weights response: `{"weights": [{event_id, weight}]}`.
+///
+/// `valid_ids` is injected as an `enum` on `event_id` so the model cannot hallucinate IDs.
+pub(super) fn weights_json_schema(valid_ids: &[EventId]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "weights": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "integer", "enum": valid_ids},
+                        "weight": {"type": "integer"}
+                    },
+                    "required": ["event_id", "weight"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["weights"],
+        "additionalProperties": false
+    })
+}
+
+#[derive(Deserialize)]
+struct ScheduleResponse {
+    steps: Vec<ScheduleStep>,
+}
+
+#[derive(Deserialize)]
+struct WeightsResponse {
+    weights: Vec<EventWeight>,
+}
+
+/// Build a compact few-shot schedule example using the first real event IDs.
+///
+/// Returns a pretty-printed `{"steps": [...]}` JSON string with up to 2 steps, each holding
+/// `num_slots` IDs drawn (with wrap-around) from the start of `event_info`.
+pub(super) fn build_schedule_example(
+    event_info: &[(EventId, String, String)],
+    num_slots: usize,
+) -> String {
+    if event_info.is_empty() || num_slots == 0 {
+        return r#"{"steps": []}"#.to_string();
+    }
+    let ids: Vec<EventId> = event_info.iter().map(|(id, _, _)| *id).collect();
+    let durations = [25u64, 50];
+    let steps: Vec<serde_json::Value> = (0..2)
+        .map(|i| {
+            let step_ids: Vec<EventId> = (0..num_slots)
+                .map(|j| ids[(i * num_slots + j) % ids.len()])
+                .collect();
+            serde_json::json!({"duration_ms": durations[i], "events": step_ids})
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({"steps": steps}))
+        .expect("static JSON serialization")
+}
+
+/// Build a compact few-shot weights example using the first three real event IDs.
+///
+/// Returns a pretty-printed `{"weights": [...]}` JSON string.
+pub(super) fn build_weights_example(event_info: &[(EventId, String, String)]) -> String {
+    if event_info.is_empty() {
+        return r#"{"weights": []}"#.to_string();
+    }
+    let example_weights = [8u32, 5, 3];
+    let weights: Vec<serde_json::Value> = event_info
+        .iter()
+        .take(3)
+        .zip(example_weights.iter())
+        .map(|((id, _, _), &w)| serde_json::json!({"event_id": id, "weight": w}))
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({"weights": weights}))
+        .expect("static JSON serialization")
+}
+
 /// Build the LLM system message describing the profiler's counter-rotation role and slot count.
 pub(super) fn system_message(num_slots: usize, guidance: Option<&str>) -> String {
     let guidance_suffix = guidance
@@ -49,19 +158,6 @@ pub(super) fn build_init_prompt(
     for (id, name, desc) in event_info {
         event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
     }
-    let ids: Vec<EventId> = event_info.iter().map(|(id, _, _)| *id).collect();
-    let durations = [25u64, 75, 50];
-    let example_steps: Vec<ScheduleStep> = ids
-        .chunks(num_slots.max(1))
-        .take(3)
-        .enumerate()
-        .map(|(i, chunk)| ScheduleStep {
-            duration_ms: durations[i % durations.len()],
-            events: chunk.to_vec(),
-        })
-        .collect();
-    let example = serde_json::to_string_pretty(&example_steps).expect("should serialize");
-
     let system = system_message(num_slots, guidance);
     let user = format!(
         "\
@@ -74,17 +170,21 @@ Prioritize counters that reveal common bottlenecks — cache misses, \
 TLB pressure, branch mispredictions, memory stalls — and ensure \
 every counter appears at least once across the full cycle.
 
-Example output (hypothetical IDs):
-{example}
-
 Produce the schedule for the counters listed above. \
-Your entire response must be a single JSON array. \
-No explanation, no prose, no markdown fences."
+Each step must have duration_ms (milliseconds) and events \
+(an array of exactly {num_slots} counter IDs). \
+Use each event ID at most once per step. \
+Use only event IDs from the list above."
     );
-    PromptBuilder::new().system(system).user(user)
+    let example = build_schedule_example(event_info, num_slots);
+    PromptBuilder::new()
+        .system(system)
+        .user(user)
+        .assistant(example)
+        .user("Good. Now produce the COMPLETE schedule covering ALL the counters listed above — not just those in the example.")
 }
 
-/// Parse and validate a JSON schedule array from an LLM response, filtering unknown event IDs,
+/// Parse and validate a structured-output schedule response, filtering unknown event IDs,
 /// deduplicating, truncating to `num_slots`, and clamping zero durations to 1 ms; returns `Err`
 /// when any step has fewer than `num_slots` valid unique events after filtering (the retry loop
 /// in `chat_with_retry` feeds this error back to the model for correction).
@@ -93,18 +193,9 @@ pub(super) fn parse_schedule_response(
     all_events: &[EventId],
     num_slots: usize,
 ) -> Result<Vec<ScheduleStep>, String> {
-    let start = response
-        .find('[')
-        .ok_or_else(|| format!("no JSON array found in LLM response:\n{response}"))?;
-    let end = response
-        .rfind(']')
-        .ok_or_else(|| format!("JSON array is not closed in LLM response:\n{response}"))?;
-    if end < start {
-        return Err(format!("malformed JSON array in LLM response:\n{response}"));
-    }
-
-    let steps: Vec<ScheduleStep> = serde_json::from_str(&response[start..=end])
-        .map_err(|e| format!("failed to parse LLM schedule JSON: {e}\nresponse:\n{response}"))?;
+    let steps = serde_json::from_str::<ScheduleResponse>(response)
+        .map_err(|e| format!("failed to parse schedule JSON: {e}"))?
+        .steps;
 
     if steps.is_empty() {
         return Err("LLM returned an empty schedule".to_string());
@@ -114,10 +205,33 @@ pub(super) fn parse_schedule_response(
     let mut steps_out: Vec<ScheduleStep> = Vec::with_capacity(steps.len());
     for (i, mut step) in steps.into_iter().enumerate() {
         step.events.retain(|id| valid_ids.contains(id));
+        let valid_count = step.events.len();
         step.events.sort_unstable();
         step.events.dedup();
         step.events.truncate(num_slots);
         step.duration_ms = step.duration_ms.max(1);
+
+        // If duplicates in an otherwise-sufficient event list reduced the unique count below
+        // num_slots, pad with unused valid events rather than retrying.
+        if valid_count >= num_slots && step.events.len() < num_slots {
+            let step_set: HashSet<EventId> = step.events.iter().copied().collect();
+            let needed = num_slots - step.events.len();
+            tracing::warn!(
+                step = i,
+                needed,
+                "LLM step contained duplicate IDs; padding with unused events"
+            );
+            for &id in all_events.iter() {
+                if step.events.len() == num_slots {
+                    break;
+                }
+                if !step_set.contains(&id) {
+                    step.events.push(id);
+                }
+            }
+            step.events.sort_unstable();
+        }
+
         if step.events.len() != num_slots {
             return Err(format!(
                 "step {i} has {} valid unique event IDs, need exactly {num_slots}",
@@ -140,12 +254,6 @@ pub(super) fn build_weights_prompt(
     for (id, name, desc) in event_info {
         event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
     }
-    let example_weights: Vec<EventWeight> = [8u32, 5, 3]
-        .iter()
-        .zip(event_info.iter().take(3))
-        .map(|(&weight, (event_id, _, _))| EventWeight { event_id: *event_id, weight })
-        .collect();
-    let example = serde_json::to_string_pretty(&example_weights).expect("should serialize");
     let system = system_message(num_slots, guidance);
     let user = format!(
         "Available performance counters (format — ID: name: description):
@@ -154,36 +262,26 @@ Assign a priority weight (integer 1–10) to each counter. \
 A higher weight means the counter should be sampled more often. \
 Prioritize counters that reveal common bottlenecks — cache misses, \
 TLB pressure, branch mispredictions, memory stalls. \
-Every counter must appear exactly once in your response.
-
-Example output (hypothetical IDs):
-{example}
-
-Your entire response must be a single JSON array of objects with \
-\"event_id\" (integer) and \"weight\" (integer 1–10) fields. \
-No explanation, no prose, no markdown fences."
+Every counter must appear exactly once in your response. \
+Use only event IDs from the list above."
     );
-    PromptBuilder::new().system(system).user(user)
+    let example = build_weights_example(event_info);
+    PromptBuilder::new()
+        .system(system)
+        .user(user)
+        .assistant(example)
+        .user("Good. Now produce the COMPLETE weights list for ALL the counters listed above.")
 }
 
-/// Parse a JSON weight array from an LLM response, clamping values to 1–10, deduplicating by
+/// Parse a structured-output weights response, clamping values to 1–10, deduplicating by
 /// keeping the maximum weight, and filling any missing events with weight 1.
 pub(super) fn parse_weights_response(
     response: &str,
     all_events: &[EventId],
 ) -> Result<Vec<EventWeight>, String> {
-    let start = response
-        .find('[')
-        .ok_or_else(|| format!("no JSON array in response:\n{response}"))?;
-    let end = response
-        .rfind(']')
-        .ok_or_else(|| format!("JSON array not closed:\n{response}"))?;
-    if end < start {
-        return Err(format!("malformed JSON array:\n{response}"));
-    }
-
-    let parsed: Vec<EventWeight> = serde_json::from_str(&response[start..=end])
-        .map_err(|e| format!("failed to parse weights JSON: {e}\nresponse:\n{response}"))?;
+    let parsed = serde_json::from_str::<WeightsResponse>(response)
+        .map_err(|e| format!("failed to parse weights JSON: {e}"))?
+        .weights;
 
     let valid_ids: HashSet<EventId> = all_events.iter().copied().collect();
     let mut by_id: HashMap<EventId, u32> = HashMap::new();
@@ -210,11 +308,8 @@ pub(super) fn parse_weights_response(
         .collect())
 }
 
-/// Strip appended raw response text from parse error messages before echoing back to the LLM.
+/// Strip trailing newline-separated context from parse error messages before echoing to the LLM.
 fn error_reason(err: &str) -> &str {
-    if let Some(i) = err.find("\nresponse:\n") {
-        return &err[..i];
-    }
     if let Some(i) = err.find(":\n") {
         return &err[..i];
     }
@@ -250,16 +345,20 @@ pub(super) fn chat_with_retry<T>(
                 if attempt == max_retries {
                     return Err(Box::new(std::io::Error::other(err)));
                 }
-                messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: response,
-                });
+                // Only include the bad response as an assistant turn when it is non-empty.
+                // An empty assistant turn confuses instruction-tuned models and can cause them
+                // to return empty output on subsequent attempts.
+                if !response.is_empty() {
+                    messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: response,
+                    });
+                }
                 messages.push(ChatMessage {
                     role: "user".into(),
                     content: format!(
-                        "Your response could not be parsed. Error: {reason}\n\
-                         Respond with only a valid JSON array. \
-                         No explanation, no prose, no markdown fences."
+                        "Your response contained an error: {reason}\n\
+                         Fix the error and respond again."
                     ),
                 });
             }
@@ -288,7 +387,7 @@ mod tests {
 
     #[test]
     fn retry_succeeds_on_first_attempt() {
-        let json = r#"[{"duration_ms": 10, "events": [0]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 10, "events": [0]}]}"#;
         let mut calls = 0usize;
         let result = chat_with_retry(
             |_m| {
@@ -307,7 +406,7 @@ mod tests {
     fn retry_feeds_back_and_succeeds_on_second_attempt() {
         let responses = std::cell::RefCell::new(vec![
             "not json at all".to_string(),
-            r#"[{"duration_ms": 10, "events": [0]}]"#.to_string(),
+            r#"{"steps": [{"duration_ms": 10, "events": [0]}]}"#.to_string(),
         ]);
         let mut calls = 0usize;
         let result = chat_with_retry(
@@ -317,7 +416,7 @@ mod tests {
                     // Second call should include the bad assistant turn and correction prompt.
                     assert!(m.iter().any(|msg| msg.role == "assistant"));
                     assert!(m.iter().any(
-                        |msg| msg.role == "user" && msg.content.contains("could not be parsed")
+                        |msg| msg.role == "user" && msg.content.contains("contained an error")
                     ));
                 }
                 Ok(responses.borrow_mut().remove(0))
@@ -333,7 +432,7 @@ mod tests {
     #[test]
     fn retry_exhausted_returns_err() {
         let result: Result<Vec<ScheduleStep>, _> = chat_with_retry(
-            |_m| Ok("still not json".to_string()),
+            |_m| Ok(r#"{"steps": []}"#.to_string()),
             vec![user_msg("go")],
             |resp| parse_schedule_response(resp, &[0], 4),
             2,
@@ -358,15 +457,14 @@ mod tests {
     }
 
     #[test]
-    fn error_reason_strips_response_body() {
-        let err = "no JSON array found in LLM response:\n[{bad}]";
-        assert_eq!(error_reason(err), "no JSON array found in LLM response");
+    fn error_reason_strips_trailing_context() {
+        // Strips context after ":\n" (e.g. a multi-line serde_json error).
+        let err = "outer reason:\ninner detail";
+        assert_eq!(error_reason(err), "outer reason");
 
-        let err2 = "failed to parse LLM schedule JSON: bad syntax\nresponse:\n[garbage]";
-        assert_eq!(
-            error_reason(err2),
-            "failed to parse LLM schedule JSON: bad syntax"
-        );
+        // Passes through errors without ":\n" unchanged.
+        let err2 = "step 0 has 1 valid unique event IDs, need exactly 4";
+        assert_eq!(error_reason(err2), err2);
 
         let err3 = "LLM returned an empty schedule";
         assert_eq!(error_reason(err3), "LLM returned an empty schedule");
@@ -386,10 +484,10 @@ mod tests {
 
     #[test]
     fn parse_valid_schedule() {
-        let json = r#"[
+        let json = r#"{"steps": [
             {"duration_ms": 25, "events": [0, 1, 2, 3]},
             {"duration_ms": 30, "events": [1, 2, 3, 4]}
-        ]"#;
+        ]}"#;
         let steps = parse_schedule_response(json, &events(), 4).unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].duration_ms, 25);
@@ -398,27 +496,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_no_array() {
+    fn parse_invalid_json_errors() {
         let err = parse_schedule_response("the model just said hello", &events(), 4).unwrap_err();
-        assert!(err.contains("no JSON array found"));
+        assert!(err.contains("failed to parse schedule JSON"), "got: {err}");
     }
 
     #[test]
-    fn parse_empty_array() {
-        let err = parse_schedule_response("[]", &events(), 4).unwrap_err();
+    fn parse_empty_steps_errors() {
+        let err = parse_schedule_response(r#"{"steps": []}"#, &events(), 4).unwrap_err();
         assert!(err.contains("empty"));
     }
 
     #[test]
     fn parse_filters_invalid_ids() {
-        let json = r#"[{"duration_ms": 20, "events": [0, 99]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 20, "events": [0, 99]}]}"#;
         let steps = parse_schedule_response(json, &[0, 1], 1).unwrap();
         assert_eq!(steps[0].events, vec![0]);
     }
 
     #[test]
     fn parse_all_invalid_ids_errors() {
-        let json = r#"[{"duration_ms": 20, "events": [99, 100]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 20, "events": [99, 100]}]}"#;
         let err = parse_schedule_response(json, &[0, 1], 4).unwrap_err();
         assert!(err.contains("0 valid unique event IDs"), "got: {err}");
     }
@@ -426,31 +524,31 @@ mod tests {
     #[test]
     fn parse_bad_step_causes_err() {
         // A step with no valid IDs triggers Err immediately; the retry loop handles correction.
-        let json = r#"[
+        let json = r#"{"steps": [
             {"duration_ms": 20, "events": [99, 100]},
             {"duration_ms": 30, "events": [0, 1]}
-        ]"#;
+        ]}"#;
         let err = parse_schedule_response(json, &[0, 1], 2).unwrap_err();
         assert!(err.contains("step 0"), "got: {err}");
     }
 
     #[test]
     fn parse_clamps_zero_duration() {
-        let json = r#"[{"duration_ms": 0, "events": [0]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 0, "events": [0]}]}"#;
         let steps = parse_schedule_response(json, &[0], 1).unwrap();
         assert_eq!(steps[0].duration_ms, 1);
     }
 
     #[test]
     fn parse_truncates_to_num_slots() {
-        let json = r#"[{"duration_ms": 10, "events": [0, 1, 2, 3, 4]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 10, "events": [0, 1, 2, 3, 4]}]}"#;
         let steps = parse_schedule_response(json, &events(), 2).unwrap();
         assert_eq!(steps[0].events.len(), 2);
     }
 
     #[test]
     fn parse_valid_weights() {
-        let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 1, "weight": 2}]"#;
+        let json = r#"{"weights": [{"event_id": 0, "weight": 5}, {"event_id": 1, "weight": 2}]}"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -462,7 +560,7 @@ mod tests {
 
     #[test]
     fn parse_weights_fills_missing_events() {
-        let json = r#"[{"event_id": 0, "weight": 5}]"#;
+        let json = r#"{"weights": [{"event_id": 0, "weight": 5}]}"#;
         let weights = parse_weights_response(json, &[0, 1, 2]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -475,7 +573,8 @@ mod tests {
 
     #[test]
     fn parse_weights_clamps_out_of_range() {
-        let json = r#"[{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]"#;
+        let json =
+            r#"{"weights": [{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]}"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -487,7 +586,8 @@ mod tests {
 
     #[test]
     fn parse_weights_filters_unknown_ids() {
-        let json = r#"[{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]"#;
+        let json =
+            r#"{"weights": [{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]}"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -500,7 +600,7 @@ mod tests {
 
     #[test]
     fn parse_weights_deduplicates_keeps_max() {
-        let json = r#"[{"event_id": 0, "weight": 3}, {"event_id": 0, "weight": 7}]"#;
+        let json = r#"{"weights": [{"event_id": 0, "weight": 3}, {"event_id": 0, "weight": 7}]}"#;
         let weights = parse_weights_response(json, &[0]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -510,33 +610,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_weights_no_array() {
+    fn parse_weights_invalid_json_errors() {
         let err = parse_weights_response("hello world", &[0]).unwrap_err();
-        assert!(err.contains("no JSON array"));
+        assert!(err.contains("failed to parse weights JSON"), "got: {err}");
     }
 
     #[test]
     fn parse_step_too_short_returns_err() {
-        // Issue 1: a step with fewer valid IDs than num_slots must return Err (triggers retry).
-        let json = r#"[{"duration_ms": 20, "events": [0, 99]}]"#;
+        let json = r#"{"steps": [{"duration_ms": 20, "events": [0, 99]}]}"#;
         let err = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap_err();
         assert!(err.contains("step 0"), "got: {err}");
         assert!(err.contains("1 valid unique event IDs"), "got: {err}");
     }
 
     #[test]
-    fn parse_duplicates_cause_err_when_unique_count_too_low() {
-        // Issue 4: duplicate IDs are deduped; if the unique count < num_slots the step is invalid.
-        let json = r#"[{"duration_ms": 10, "events": [0, 0, 1, 2]}]"#;
-        let err = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap_err();
-        assert!(err.contains("step 0"), "got: {err}");
-        assert!(err.contains("3 valid unique event IDs"), "got: {err}");
+    fn parse_pads_duplicates_when_enough_valid_ids() {
+        // [0,0,1,2] has 4 valid IDs before dedup but only 3 unique; padding fills the 4th slot.
+        let json = r#"{"steps": [{"duration_ms": 10, "events": [0, 0, 1, 2]}]}"#;
+        let steps = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap();
+        assert_eq!(steps[0].events.len(), 4);
+        // Must still be sorted and contain only valid IDs.
+        assert!(steps[0].events.windows(2).all(|w| w[0] < w[1]));
+        for id in &steps[0].events {
+            assert!([0u32, 1, 2, 3].contains(id));
+        }
     }
 
     #[test]
     fn parse_duplicates_removed_when_unique_count_matches() {
-        // Issue 4: duplicates removed and result has exactly num_slots unique events → Ok.
-        let json = r#"[{"duration_ms": 10, "events": [0, 0, 1, 2, 3]}]"#;
+        // Duplicates removed and result has exactly num_slots unique events → Ok.
+        let json = r#"{"steps": [{"duration_ms": 10, "events": [0, 0, 1, 2, 3]}]}"#;
         let steps = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap();
         assert_eq!(steps[0].events, vec![0, 1, 2, 3]);
     }
