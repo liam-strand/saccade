@@ -14,6 +14,7 @@ from typing import Callable
 import numpy as np
 
 REPO_ROOT = Path(__file__).parent.parent
+LATENCY_PROFILE = Path(__file__).parent / "gemma4_8b_latency.json"
 
 SCHEDULERS = [
     "round-robin",
@@ -43,6 +44,7 @@ def run_simulate(
     out_trace: Path,
     num_slots: int,
     q_schedule: int,
+    llm_model: str,
     seed: int | None,
     base_config: Path | None = None,
     guidance: str | None = None,
@@ -70,10 +72,10 @@ def run_simulate(
         "--trace", str(out_trace),
         "--num-slots", str(num_slots),
         "--q-schedule", str(q_schedule),
-        "--llm-model", "google/gemma-4-26b-a4b-it",
+        "--llm-model", llm_model,
         "--llm-base-url", "https://openrouter.ai/api",
         "--llm-api-key", os.environ["LLM_API_KEY"],
-        "--llm-latency-profile", "./gemma4_8b_latency.json",
+        "--llm-latency-profile", str(LATENCY_PROFILE),
     ]
     if seed is not None:
         cmd += ["--seed", str(seed)]
@@ -97,6 +99,7 @@ def run_batch_simulate(
     q_schedule: int,
     jobs: int,
     tmp_dir: Path,
+    llm_model: str,
     base_config: Path | None = None,
 ) -> None:
     """Run multiple simulate combos sharing one ``saccade simulate --batch`` process.
@@ -125,9 +128,10 @@ def run_batch_simulate(
         "--q-schedule", str(q_schedule),
         "--batch", str(spec_path),
         "--jobs", str(max(1, jobs)),
-        "--llm-model", "google/gemma-4-26b-a4b-it",
+        "--llm-model", llm_model,
         "--llm-base-url", "https://openrouter.ai/api",
         "--llm-api-key", os.environ["LLM_API_KEY"],
+        "--llm-latency-profile", str(LATENCY_PROFILE),
     ]
     subprocess.run(
         cmd,

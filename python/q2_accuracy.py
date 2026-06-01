@@ -104,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--llm-model",
+        type=str,
+        default="google/gemma-4-26b-a4b-it",
+        help="Model name for LLM-driven models; uses OpenRouter unless sim_utils is customized.",
+    )
+    parser.add_argument(
         "--workload",
         type=str,
         default=None,
@@ -253,7 +259,7 @@ def main() -> None:
                 run_batch_simulate(
                     args.saccade, args.library, trace, spec,
                     FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
-                    traces_out_dir, args.base_config,
+                    traces_out_dir, args.llm_model, args.base_config,
                 )
             except subprocess.CalledProcessError as exc:
                 tqdm.write(
