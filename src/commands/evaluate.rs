@@ -11,12 +11,28 @@ struct EventMetrics {
     event_name: String,
     /// Thread ID the metrics apply to.
     tid: u32,
-    /// Normalised RMSE between estimated and ground-truth rate series; `None` when the ground-truth mean rate is zero.
+    /// Normalised RMSE between estimated and ground-truth rate series; `None` when the ground-truth
+    /// mean rate is zero, or when the estimator has no bins for this event (never observed).
+    /// Only GT bins at or after the estimator's first observed bin are scored — pre-first-observation
+    /// GT bins are excluded from both the sum and the denominator to avoid penalising round-robin
+    /// schedulers for the latency-to-first-sample, which is a scheduling-policy artifact rather
+    /// than a measure of predictive skill.
     nrmse: Option<f64>,
     /// Fraction of ground-truth time bins for which an estimated value exists (0.0–1.0).
+    /// Coverage is always computed over ALL GT bins (not clipped), so it captures the full
+    /// scheduling lag on an independent axis from nRMSE.
     coverage: f64,
     /// Mean ground-truth event rate in events per nanosecond, used to normalise the RMSE.
     mean_gt_rate_events_per_ns: f64,
+    /// GT-anchored calibration score: fraction of scored nRMSE bins where the GT rate falls
+    /// within the estimator's predicted band `[est_rate * (1 - uncertainty), est_rate * (1 + uncertainty)]`.
+    /// `None` when there are no scored bins (same condition as `nrmse == None`) or when
+    /// no uncertainty series is available for this event.
+    calibration: Option<f64>,
+    /// Coefficient of variation of the GT rate series (stddev / mean) over all GT bins.
+    /// Measures how dynamic/hard the event is; useful for importance-weighting in downstream analysis.
+    /// `None` when mean_gt == 0.
+    gt_cv: Option<f64>,
 }
 
 /// Computes per-event nRMSE and coverage by binning both traces at `bin_ms` width, then prints results as text or JSON.
@@ -35,6 +51,9 @@ pub fn evaluate(
     // misses in est_bins and RMSE is computed against imputed zeros throughout.
     normalize_timestamps(&mut gt.series);
     normalize_timestamps(&mut est.series);
+    // Uncertainty shares timestamps with rate (both emitted per snapshot); apply
+    // the same normalization so bin indices align with the rate bins.
+    normalize_timestamps(&mut est.uncertainty);
 
     let bin_width_ns = bin_ms * 1_000_000;
 
@@ -69,34 +88,102 @@ pub fn evaluate(
             .get(&(event_name.clone(), *tid))
             .map(|pts| bin_avg(pts, bin_width_ns))
             .unwrap_or_default();
+        let unc_bins = est
+            .uncertainty
+            .get(&(event_name.clone(), *tid))
+            .map(|pts| bin_avg(pts, bin_width_ns))
+            .unwrap_or_default();
 
         let n_gt = gt_bins.len();
         if n_gt == 0 {
             continue;
         }
 
-        let mean_gt = gt_bins.values().sum::<f64>() / n_gt as f64;
-        let mut nrmse_sq_sum = 0.0f64;
-        let mut covered = 0usize;
-        for (&bin, &gt_rate) in &gt_bins {
-            let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
-            if mean_gt > 0.0 {
-                let rel_err = (est_rate - gt_rate) / mean_gt;
-                nrmse_sq_sum += rel_err * rel_err;
-            }
-            if est_bins.contains_key(&bin) {
-                covered += 1;
-            }
-        }
+        // Determine the first bin index at which the estimator has made an observation.
+        // GT bins before this point are excluded from nRMSE to avoid penalising scheduling
+        // lag (a round-robin artifact) rather than predictive accuracy.
+        let first_est_bin: Option<u64> = est_bins.keys().copied().min();
 
+        let mean_gt = gt_bins.values().sum::<f64>() / n_gt as f64;
+
+        // Coverage: fraction of ALL GT bins that have a corresponding estimated bin
+        // (unchanged — measures scheduling lag on an independent axis).
+        let covered = gt_bins.keys().filter(|b| est_bins.contains_key(b)).count();
         let coverage = covered as f64 / n_gt as f64;
-        // nrmse is None when mean_gt == 0 (event never fires in GT — comparing
-        // schedulers against it is meaningless, and including a dimensional value
-        // in the macro-average would corrupt the headline score).
+
+        // nRMSE: scored only over GT bins at/after first_est_bin.
+        // If est_bins is empty (never observed) → nrmse = None.
+        // If mean_gt == 0 → nrmse = None (event never fires in GT).
         let nrmse = if mean_gt > 0.0 {
-            Some((nrmse_sq_sum / n_gt as f64).sqrt())
+            if let Some(first_bin) = first_est_bin {
+                let mut sq_sum = 0.0f64;
+                let mut n_scored = 0usize;
+                for (&bin, &gt_rate) in &gt_bins {
+                    if bin < first_bin {
+                        continue;
+                    }
+                    let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
+                    let rel_err = (est_rate - gt_rate) / mean_gt;
+                    sq_sum += rel_err * rel_err;
+                    n_scored += 1;
+                }
+                if n_scored > 0 {
+                    Some((sq_sum / n_scored as f64).sqrt())
+                } else {
+                    None
+                }
+            } else {
+                // No estimated bins at all — estimator never observed this event.
+                None
+            }
         } else {
             None
+        };
+
+        // GT coefficient of variation (stddev / mean) — measures signal dynamics.
+        let gt_cv = if mean_gt > 0.0 {
+            let variance = gt_bins
+                .values()
+                .map(|&v| (v - mean_gt).powi(2))
+                .sum::<f64>()
+                / n_gt as f64;
+            Some(variance.sqrt() / mean_gt)
+        } else {
+            None
+        };
+
+        // GT-anchored calibration: fraction of scored bins where GT rate falls inside
+        // the estimator's predicted band.  Band definition:
+        //   lower = est_rate * (1 - uncertainty)
+        //   upper = est_rate * (1 + uncertainty)
+        // where `uncertainty` ∈ [0, 1].  When est_rate == 0 the band is [0, 0] and
+        // calibration credit is given only when gt_rate is also 0 (exact match).
+        // Scored over the same at/after-first-observation window as nRMSE.
+        // `None` when there are no scored bins or no uncertainty data for this event.
+        let calibration = match (unc_bins.is_empty(), first_est_bin) {
+            (false, Some(first_bin)) => {
+                let mut in_band = 0usize;
+                let mut n_scored = 0usize;
+                for (&bin, &gt_rate) in &gt_bins {
+                    if bin < first_bin {
+                        continue;
+                    }
+                    let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
+                    let unc = unc_bins.get(&bin).copied().unwrap_or(1.0);
+                    let lower = est_rate * (1.0 - unc);
+                    let upper = est_rate * (1.0 + unc);
+                    if gt_rate >= lower && gt_rate <= upper {
+                        in_band += 1;
+                    }
+                    n_scored += 1;
+                }
+                if n_scored > 0 {
+                    Some(in_band as f64 / n_scored as f64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
 
         results.push(EventMetrics {
@@ -105,6 +192,8 @@ pub fn evaluate(
             nrmse,
             coverage,
             mean_gt_rate_events_per_ns: mean_gt,
+            calibration,
+            gt_cv,
         });
     }
 
@@ -120,6 +209,12 @@ pub fn evaluate(
     } else {
         Some(results.iter().map(|r| r.coverage).sum::<f64>() / results.len() as f64)
     };
+    let cal_vals: Vec<f64> = results.iter().filter_map(|r| r.calibration).collect();
+    let mean_calibration = if cal_vals.is_empty() {
+        None
+    } else {
+        Some(cal_vals.iter().sum::<f64>() / cal_vals.len() as f64)
+    };
 
     if json {
         print_json(
@@ -130,6 +225,7 @@ pub fn evaluate(
             mean_nrmse,
             zero_coverage_count,
             mean_coverage,
+            mean_calibration,
         );
     } else {
         print_text(
@@ -140,6 +236,7 @@ pub fn evaluate(
             mean_nrmse,
             zero_coverage_count,
             mean_coverage,
+            mean_calibration,
         );
     }
 
@@ -195,6 +292,7 @@ fn print_text(
     mean_nrmse: Option<f64>,
     zero_coverage_count: usize,
     mean_coverage: Option<f64>,
+    mean_calibration: Option<f64>,
 ) {
     println!("Evaluation Report");
     println!("=================");
@@ -203,22 +301,32 @@ fn print_text(
     println!("Bin width:    {bin_ms} ms");
     println!();
     println!(
-        "{:<32} {:>5}  {:<12}  {:<16}  Coverage",
+        "{:<32} {:>5}  {:<12}  {:<16}  Coverage  Calibration  GT-CV",
         "Event", "TID", "nRMSE", "Mean GT (ev/ns)"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(100));
     for r in results {
         let nrmse_str = match r.nrmse {
             Some(v) => format!("{v:.3e}"),
             None => "—".to_string(),
         };
+        let cal_str = match r.calibration {
+            Some(v) => format!("{:.1}%", v * 100.0),
+            None => "—".to_string(),
+        };
+        let cv_str = match r.gt_cv {
+            Some(v) => format!("{v:.3e}"),
+            None => "—".to_string(),
+        };
         println!(
-            "{:<32} {:>5}  {:<12}  {:<16.3e}  {:.1}%",
+            "{:<32} {:>5}  {:<12}  {:<16.3e}  {:.1}%      {:<13}  {:<10}",
             r.event_name,
             r.tid,
             nrmse_str,
             r.mean_gt_rate_events_per_ns,
-            r.coverage * 100.0
+            r.coverage * 100.0,
+            cal_str,
+            cv_str,
         );
     }
     println!();
@@ -241,10 +349,16 @@ fn print_text(
             "Mean coverage:                 {}",
             mean_coverage
                 .map(|v| format!("{:.1}%", v * 100.0))
-                .unwrap_or(na)
+                .unwrap_or(na.clone())
         )
     };
     println!("{cov_label}");
+    println!(
+        "Mean calibration:              {}",
+        mean_calibration
+            .map(|v| format!("{:.1}%", v * 100.0))
+            .unwrap_or(na)
+    );
 }
 
 /// Prints evaluation results as a single JSON object to stdout.
@@ -257,6 +371,7 @@ fn print_json(
     mean_nrmse: Option<f64>,
     zero_coverage_count: usize,
     mean_coverage: Option<f64>,
+    mean_calibration: Option<f64>,
 ) {
     let mut per_event_parts: Vec<String> = Vec::new();
     for r in results {
@@ -264,13 +379,23 @@ fn print_json(
             Some(v) => f64_to_json(v),
             None => "null".to_string(),
         };
+        let cal_str = match r.calibration {
+            Some(v) => f64_to_json(v),
+            None => "null".to_string(),
+        };
+        let cv_str = match r.gt_cv {
+            Some(v) => f64_to_json(v),
+            None => "null".to_string(),
+        };
         per_event_parts.push(format!(
-            "    {{\"event\": {:?}, \"tid\": {}, \"nrmse\": {}, \"coverage\": {}, \"mean_gt_rate_events_per_ns\": {}}}",
+            "    {{\"event\": {:?}, \"tid\": {}, \"nrmse\": {}, \"coverage\": {}, \"mean_gt_rate_events_per_ns\": {}, \"calibration\": {}, \"gt_cv\": {}}}",
             r.event_name,
             r.tid,
             nrmse_str,
             f64_to_json(r.coverage),
             f64_to_json(r.mean_gt_rate_events_per_ns),
+            cal_str,
+            cv_str,
         ));
     }
     let mean_nrmse_str = mean_nrmse
@@ -279,8 +404,11 @@ fn print_json(
     let cov_str = mean_coverage
         .map(f64_to_json)
         .unwrap_or_else(|| "null".to_string());
+    let cal_mean_str = mean_calibration
+        .map(f64_to_json)
+        .unwrap_or_else(|| "null".to_string());
     println!(
-        "{{\n  \"ground_truth\": {:?},\n  \"estimated\": {:?},\n  \"bin_width_ms\": {},\n  \"per_event\": [\n{}\n  ],\n  \"mean_nrmse\": {},\n  \"events_with_zero_coverage\": {},\n  \"mean_coverage\": {}\n}}",
+        "{{\n  \"ground_truth\": {:?},\n  \"estimated\": {:?},\n  \"bin_width_ms\": {},\n  \"per_event\": [\n{}\n  ],\n  \"mean_nrmse\": {},\n  \"events_with_zero_coverage\": {},\n  \"mean_coverage\": {},\n  \"mean_calibration\": {}\n}}",
         ground_truth.display().to_string(),
         estimated.display().to_string(),
         bin_ms,
@@ -288,6 +416,7 @@ fn print_json(
         mean_nrmse_str,
         zero_coverage_count,
         cov_str,
+        cal_mean_str,
     );
 }
 
@@ -331,21 +460,41 @@ mod tests {
     }
 
     #[test]
-    fn coverage_zero_nrmse_is_one_for_flat_gt() {
-        // With no coverage (est=0 imputed everywhere) and flat GT rate of 1.0,
-        // rel_err = (0 - 1.0) / 1.0 = -1.0 for every bin → nrmse = 1.0.
+    fn coverage_zero_nrmse_is_none_when_no_est_bins() {
+        // With no estimated bins at all, nrmse is None (estimator never observed this event).
+        // Pre-first-observation bins are excluded; when there are NO estimated bins, the
+        // scored window is empty and nrmse is undefined.
         let bw = 100_000_000u64;
         let gt_pts = single_series(1.0, &[0, 1, 2], bw);
         let gt_bins = bin_avg(&gt_pts, bw);
         let est_bins: HashMap<u64, f64> = HashMap::new();
-        let mean_gt = 1.0f64;
-        let n_gt = gt_bins.len();
-        let nrmse_sq_sum: f64 = gt_bins
-            .values()
-            .map(|&r| ((est_bins.get(&0).copied().unwrap_or(0.0) - r) / mean_gt).powi(2))
-            .sum();
-        let nrmse = (nrmse_sq_sum / n_gt as f64).sqrt();
-        assert!((nrmse - 1.0).abs() < 1e-12);
+        let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
+
+        // No first_est_bin → nrmse = None.
+        let first_est_bin: Option<u64> = est_bins.keys().copied().min();
+        assert!(first_est_bin.is_none(), "est_bins should be empty");
+        // Verify the scoring loop would produce None.
+        let nrmse: Option<f64> = if mean_gt > 0.0 {
+            first_est_bin.and_then(|first_bin| {
+                let mut sq_sum = 0.0f64;
+                let mut n = 0usize;
+                for (&bin, &gt_rate) in &gt_bins {
+                    if bin < first_bin {
+                        continue;
+                    }
+                    let er = (est_bins.get(&bin).copied().unwrap_or(0.0) - gt_rate) / mean_gt;
+                    sq_sum += er * er;
+                    n += 1;
+                }
+                (n > 0).then(|| (sq_sum / n as f64).sqrt())
+            })
+        } else {
+            None
+        };
+        assert!(
+            nrmse.is_none(),
+            "nrmse should be None when est_bins is empty"
+        );
     }
 
     #[test]
@@ -368,26 +517,73 @@ mod tests {
     }
 
     #[test]
-    fn nrmse_penalizes_uncovered_bins() {
-        // GT: 2 bins at rate 1.0, estimated covers only bin 0.
-        // Bin 0: rel_err = (1-1)/1 = 0. Bin 1: rel_err = (0-1)/1 = -1.
-        // nRMSE = sqrt((0 + 1) / 2) = sqrt(0.5).
+    fn nrmse_excludes_pre_first_observation_bins() {
+        // GT: bins [0, 1, 2] at rate 1.0. Est: covers bins [1, 2] only (first observation = bin 1).
+        // Scoring window: bins >= 1, so bins 1 and 2 are scored; bin 0 is excluded.
+        // Bin 1: est=1, gt=1 → rel_err = 0. Bin 2: est=1, gt=1 → rel_err = 0.
+        // nRMSE = 0 (perfect match within the scored window).
+        // Coverage = 2/3 (bins 1,2 covered out of 3 GT bins).
         let bw = 100_000_000u64;
-        let gt_pts = single_series(1.0, &[0, 1], bw);
-        let est_pts = single_series(1.0, &[0], bw);
+        let gt_pts = single_series(1.0, &[0, 1, 2], bw);
+        let est_pts = single_series(1.0, &[1, 2], bw);
         let gt_bins = bin_avg(&gt_pts, bw);
         let est_bins = bin_avg(&est_pts, bw);
         let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
-        let nrmse_sq_sum: f64 = gt_bins
-            .iter()
-            .map(|(b, &gt_rate)| {
-                let est_rate = est_bins.get(b).copied().unwrap_or(0.0);
-                let rel_err = (est_rate - gt_rate) / mean_gt;
-                rel_err * rel_err
-            })
-            .sum();
-        let nrmse = (nrmse_sq_sum / gt_bins.len() as f64).sqrt();
-        assert!((nrmse - 0.5f64.sqrt()).abs() < 1e-10);
+        let first_est_bin = est_bins.keys().copied().min().unwrap();
+        assert_eq!(first_est_bin, 1, "first estimated bin should be 1");
+
+        let mut sq_sum = 0.0f64;
+        let mut n_scored = 0usize;
+        let mut covered = 0usize;
+        for (&bin, &gt_rate) in &gt_bins {
+            if est_bins.contains_key(&bin) {
+                covered += 1;
+            }
+            if bin < first_est_bin {
+                continue;
+            }
+            let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
+            let rel_err = (est_rate - gt_rate) / mean_gt;
+            sq_sum += rel_err * rel_err;
+            n_scored += 1;
+        }
+        let nrmse = (sq_sum / n_scored as f64).sqrt();
+        let coverage = covered as f64 / gt_bins.len() as f64;
+
+        assert!(
+            nrmse < 1e-12,
+            "nrmse should be 0 for exact match within scored window"
+        );
+        assert!((coverage - 2.0 / 3.0).abs() < 1e-12, "coverage=2/3");
+    }
+
+    #[test]
+    fn nrmse_penalizes_uncovered_bins_within_scored_window() {
+        // GT: bins [0, 1, 2] at rate 1.0. Est: covers bins [1] only (first observation = bin 1).
+        // Scoring window: bins >= 1 → bins 1 and 2 are scored.
+        // Bin 1: est=1, gt=1 → rel_err = 0. Bin 2: est=0 (missing), gt=1 → rel_err = -1.
+        // nRMSE over 2 scored bins = sqrt((0 + 1) / 2) = sqrt(0.5).
+        let bw = 100_000_000u64;
+        let gt_pts = single_series(1.0, &[0, 1, 2], bw);
+        let est_pts = single_series(1.0, &[1], bw);
+        let gt_bins = bin_avg(&gt_pts, bw);
+        let est_bins = bin_avg(&est_pts, bw);
+        let mean_gt = gt_bins.values().sum::<f64>() / gt_bins.len() as f64;
+        let first_est_bin = est_bins.keys().copied().min().unwrap();
+
+        let mut sq_sum = 0.0f64;
+        let mut n_scored = 0usize;
+        for (&bin, &gt_rate) in &gt_bins {
+            if bin < first_est_bin {
+                continue;
+            }
+            let est_rate = est_bins.get(&bin).copied().unwrap_or(0.0);
+            let rel_err = (est_rate - gt_rate) / mean_gt;
+            sq_sum += rel_err * rel_err;
+            n_scored += 1;
+        }
+        let nrmse = (sq_sum / n_scored as f64).sqrt();
+        assert!((nrmse - 0.5f64.sqrt()).abs() < 1e-10, "nrmse={nrmse}");
     }
 
     #[test]
