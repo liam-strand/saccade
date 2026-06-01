@@ -179,7 +179,7 @@ def run_evaluate(
 
 def median_nrmse(eval_json: dict) -> float | None:
     """Median per-event nRMSE, filtering null entries (zero GT mean)."""
-    vals = [e["nrmse"] for e in eval_json["per_event"] if e["nrmse"] is not None]
+    vals = [e["nrmse"] for e in eval_json.get("per_event", []) if e["nrmse"] is not None]
     if not vals:
         return None
     return float(np.median(vals))
@@ -188,6 +188,63 @@ def median_nrmse(eval_json: dict) -> float | None:
 def mean_coverage(eval_json: dict) -> float | None:
     """Return the pre-computed mean coverage from an evaluate JSON dict."""
     return eval_json.get("mean_coverage")
+
+
+def nrmse_distribution(eval_json: dict) -> dict:
+    """Distribution of per-event nRMSE values (mean, p50, p90, max).
+
+    Surfaces the tail of hard-to-reconstruct events that the median alone hides.
+    Returns ``{"mean": ..., "p50": ..., "p90": ..., "max": ...}``, with all
+    values set to None if there are no non-null nRMSE entries.
+    """
+    vals = [e["nrmse"] for e in eval_json.get("per_event", []) if e["nrmse"] is not None]
+    if not vals:
+        return {"mean": None, "p50": None, "p90": None, "max": None}
+    arr = np.array(vals, dtype=float)
+    return {
+        "mean": float(np.mean(arr)),
+        "p50": float(np.percentile(arr, 50)),
+        "p90": float(np.percentile(arr, 90)),
+        "max": float(np.max(arr)),
+    }
+
+
+def importance_weighted_nrmse(eval_json: dict) -> float | None:
+    """Per-event nRMSE weighted by each event's gt_cv (coefficient of variation).
+
+    The weight is the *measured* GT signal variability (stddev/mean of the
+    ground-truth rate series), not a hand-picked importance label.  Events
+    with a high gt_cv are genuinely harder targets, so their reconstruction
+    error matters more.
+
+    Events with null nrmse or null/zero gt_cv are skipped entirely.
+
+    This is a SECONDARY diagnostic lens — it is NOT the frozen primary metric.
+    Use ``median_nrmse`` for head-to-head comparisons across runs.
+    """
+    weights = []
+    weighted_nrmse = []
+    for e in eval_json.get("per_event", []):
+        nrmse = e.get("nrmse")
+        gt_cv = e.get("gt_cv")
+        if nrmse is None or gt_cv is None or gt_cv == 0.0:
+            continue
+        weights.append(gt_cv)
+        weighted_nrmse.append(nrmse * gt_cv)
+    if not weights:
+        return None
+    total_weight = sum(weights)
+    return float(sum(weighted_nrmse) / total_weight)
+
+
+def mean_calibration(eval_json: dict) -> float | None:
+    """Return the pre-computed mean calibration from an evaluate JSON dict.
+
+    Calibration is the GT-anchored fraction-in-band: fraction of time the
+    true rate falls within the estimator's uncertainty interval.  Returns None
+    for older traces that have no uncertainty track.
+    """
+    return eval_json.get("mean_calibration")
 
 
 def load_noise_floor(path: Path | None) -> float | None:
