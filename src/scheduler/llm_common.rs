@@ -2,7 +2,7 @@
 //! and a retry loop that feeds malformed responses back to the model for correction.
 
 use crate::event::EventId;
-use crate::llm::{ChatMessage, LlmError, PromptBuilder};
+use crate::llm::{ChatMessage, LlmClient, LlmError, PromptBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -92,8 +92,10 @@ struct WeightsResponse {
 
 /// Build a compact few-shot schedule example using the first real event IDs.
 ///
-/// Returns a pretty-printed `{"steps": [...]}` JSON string with up to 2 steps, each holding
-/// `num_slots` IDs drawn (with wrap-around) from the start of `event_info`.
+/// Returns a pretty-printed `{"steps": [...]}` JSON string with 3 steps that deliberately
+/// demonstrate a NON-uniform, tilted schedule: the first event (high-priority) recurs across
+/// multiple steps with varying durations, while distinct counters fill the remaining slots.
+/// The model imitates this shape rather than a flat round-robin.
 pub(super) fn build_schedule_example(
     event_info: &[(EventId, String, String)],
     num_slots: usize,
@@ -102,12 +104,33 @@ pub(super) fn build_schedule_example(
         return r#"{"steps": []}"#.to_string();
     }
     let ids: Vec<EventId> = event_info.iter().map(|(id, _, _)| *id).collect();
-    let durations = [25u64, 50];
-    let steps: Vec<serde_json::Value> = (0..2)
+
+    // Three steps with deliberately varied durations — high-priority counter (ids[0]) recurs.
+    // Step durations vary to illustrate that important counters warrant longer observation windows.
+    let durations = [100u64, 25, 75];
+    let steps: Vec<serde_json::Value> = (0..3)
         .map(|i| {
-            let step_ids: Vec<EventId> = (0..num_slots)
-                .map(|j| ids[(i * num_slots + j) % ids.len()])
-                .collect();
+            let mut step_ids: Vec<EventId> = Vec::with_capacity(num_slots);
+            // Always include the first event (simulating a "high-value" counter that recurs).
+            step_ids.push(ids[0]);
+            // Fill remaining slots with different events, advancing offset per step.
+            let offset = 1 + i * (num_slots.saturating_sub(1));
+            for k in 0..num_slots.saturating_sub(1) {
+                let idx = (offset + k) % ids.len();
+                let candidate = ids[idx];
+                // Avoid duplicating ids[0] if the wrap brings us back to it.
+                if candidate == ids[0] && num_slots > 1 {
+                    step_ids.push(ids[(offset + k + 1) % ids.len()]);
+                } else {
+                    step_ids.push(candidate);
+                }
+            }
+            step_ids.dedup();
+            step_ids.truncate(num_slots);
+            // Pad if needed (edge case: very few events).
+            while step_ids.len() < num_slots {
+                step_ids.push(ids[step_ids.len() % ids.len()]);
+            }
             serde_json::json!({"duration_ms": durations[i], "events": step_ids})
         })
         .collect();
@@ -115,17 +138,19 @@ pub(super) fn build_schedule_example(
         .expect("static JSON serialization")
 }
 
-/// Build a compact few-shot weights example using the first three real event IDs.
+/// Build a compact few-shot weights example using the first four real event IDs.
 ///
-/// Returns a pretty-printed `{"weights": [...]}` JSON string.
+/// Demonstrates the FULL 1–10 range including a low weight so the model learns to spread
+/// weights broadly rather than clustering near one value (which produces round-robin behavior).
 pub(super) fn build_weights_example(event_info: &[(EventId, String, String)]) -> String {
     if event_info.is_empty() {
         return r#"{"weights": []}"#.to_string();
     }
-    let example_weights = [8u32, 5, 3];
+    // Spread across low–high to discourage flat clustering: 9, 6, 3, 1.
+    let example_weights = [9u32, 6, 3, 1];
     let weights: Vec<serde_json::Value> = event_info
         .iter()
-        .take(3)
+        .take(4)
         .zip(example_weights.iter())
         .map(|((id, _, _), &w)| serde_json::json!({"event_id": id, "weight": w}))
         .collect();
@@ -149,10 +174,15 @@ pub(super) fn system_message(num_slots: usize, guidance: Option<&str>) -> String
 }
 
 /// Construct the initial prompt asking the LLM to generate a full cyclic counter schedule.
+///
+/// When `analysis` is `Some`, the prose reasoning text is appended as an extra user turn
+/// ("Here is your analysis: … Now produce the schedule following it.") so the model applies
+/// its prior reasoning to the structured output.  Existing callers pass `None` → no change.
 pub(super) fn build_init_prompt(
     event_info: &[(EventId, String, String)],
     num_slots: usize,
     guidance: Option<&str>,
+    analysis: Option<&str>,
 ) -> PromptBuilder {
     let mut event_list = String::new();
     for (id, name, desc) in event_info {
@@ -163,25 +193,41 @@ pub(super) fn build_init_prompt(
         "\
 Available performance counters (format — ID: name: description):
 {event_list}
-Generate a cyclic measurement schedule that covers all of the \
-counters above. Each step activates {num_slots} counters \
-and runs for a specified duration (aim for 10–1000 ms per step). \
-Prioritize counters that reveal common bottlenecks — cache misses, \
-TLB pressure, branch mispredictions, memory stalls — and ensure \
-every counter appears at least once across the full cycle.
+Generate a cyclic measurement schedule. Every counter must appear at least \
+once across the full cycle — this coverage floor is mandatory. Within that \
+constraint, bias the marginal budget (extra repetitions, longer durations) \
+toward counters that reveal bottlenecks or are expected to be bursty, \
+high-rate, or high-variance: cache misses, TLB pressure, branch \
+mispredictions, memory stalls, and ratio denominators such as \
+instructions and cpu-cycles. Important counters SHOULD recur across \
+multiple steps. Uniform allocation is NOT required and is generally \
+suboptimal — deliberately tilt the schedule.
 
-Produce the schedule for the counters listed above. \
-Each step must have duration_ms (milliseconds) and events \
-(an array of exactly {num_slots} counter IDs). \
-Use each event ID at most once per step. \
+Each step activates {num_slots} counters and runs for a specified \
+duration (aim for 10–1000 ms per step; vary durations to give more \
+observation time to high-priority steps). Each step must have \
+duration_ms (milliseconds) and events (an array of exactly \
+{num_slots} counter IDs). Use each event ID at most once per step. \
 Use only event IDs from the list above."
     );
     let example = build_schedule_example(event_info, num_slots);
-    PromptBuilder::new()
+    let mut pb = PromptBuilder::new()
         .system(system)
         .user(user)
-        .assistant(example)
-        .user("Good. Now produce the COMPLETE schedule covering ALL the counters listed above — not just those in the example.")
+        .assistant(example);
+
+    if let Some(prose) = analysis {
+        pb = pb.user(format!(
+            "Here is your analysis:\n{prose}\n\n\
+             Now produce the full, deliberately-tilted schedule following that analysis."
+        ));
+    } else {
+        pb = pb.user(
+            "Good. Now produce the full, deliberately-tilted schedule covering ALL \
+             the counters listed above — not just those in the example.",
+        );
+    }
+    pb
 }
 
 /// Parse and validate a structured-output schedule response, filtering unknown event IDs,
@@ -258,11 +304,14 @@ pub(super) fn build_weights_prompt(
     let user = format!(
         "Available performance counters (format — ID: name: description):
 {event_list}
-Assign a priority weight (integer 1–10) to each counter. \
-A higher weight means the counter should be sampled more often. \
-Prioritize counters that reveal common bottlenecks — cache misses, \
-TLB pressure, branch mispredictions, memory stalls. \
-Every counter must appear exactly once in your response. \
+Assign a priority weight (integer 1–10) to each counter based on its \
+expected information value. Use the FULL 1–10 range — do NOT cluster \
+all counters near one value, as that degrades to round-robin sampling. \
+Rank higher (8–10) counters that are bursty, high-variance, or form \
+critical ratio denominators — cpu-cycles, instructions, cache misses, \
+branch mispredictions, TLB misses, and memory stalls. Rank lower (1–3) \
+counters that are stable, low-rate, or redundant given others already \
+measured. Every counter must appear exactly once in your response. \
 Use only event IDs from the list above."
     );
     let example = build_weights_example(event_info);
@@ -270,7 +319,10 @@ Use only event IDs from the list above."
         .system(system)
         .user(user)
         .assistant(example)
-        .user("Good. Now produce the COMPLETE weights list for ALL the counters listed above.")
+        .user(
+            "Good. Now produce the COMPLETE weights list for ALL the counters listed above, \
+             using the full 1–10 range with meaningful differentiation.",
+        )
 }
 
 /// Parse a structured-output weights response, clamping values to 1–10, deduplicating by
@@ -306,6 +358,101 @@ pub(super) fn parse_weights_response(
         .into_iter()
         .map(|(event_id, weight)| EventWeight { event_id, weight })
         .collect())
+}
+
+/// Construct a free-form (no JSON schema) prompt asking the model to analyze which counters
+/// matter and why, as a prelude to structured schedule generation.
+///
+/// The returned `PromptBuilder` should be sent via [`LlmClient::chat_freeform`]; the resulting
+/// prose is then passed as `analysis` to [`build_init_prompt`] or [`build_update_prompt`].
+pub(super) fn build_reasoning_prompt(
+    event_info: &[(EventId, String, String)],
+    num_slots: usize,
+    guidance: Option<&str>,
+) -> PromptBuilder {
+    let mut event_list = String::new();
+    for (id, name, desc) in event_info {
+        event_list.push_str(&format!("  {id}: {name} — {desc}\n"));
+    }
+    let system = system_message(num_slots, guidance);
+    let user = format!(
+        "\
+Available performance counters (format — ID: name: description):
+{event_list}
+Before generating a schedule, analyze these counters in prose. Consider:
+1. Which counters are likely bursty or high-variance (spiky event rates)?
+2. Which counters form meaningful pairs or ratios (e.g. misses/references, \
+   instructions/cycles) that must be co-sampled to be interpretable?
+3. Which counters are ratio denominators (cpu-cycles, instructions, \
+   cache-references) and therefore especially important to sample frequently?
+4. Which counters are stable, low-rate, or redundant given others?
+5. Given {num_slots} simultaneous slots, what allocation strategy would \
+   maximize information gain — which counters deserve to recur, and which \
+   are lower priority?
+
+Do NOT produce JSON. Reason freely in prose; the schedule will be generated \
+in the next step based on your analysis."
+    );
+    PromptBuilder::new().system(system).user(user)
+}
+
+/// Generate a counter-rotation schedule via LLM, optionally preceded by a free-form reasoning call.
+#[allow(clippy::too_many_arguments)]
+///
+/// When `reasoning` is `true`, first calls [`LlmClient::chat_freeform`] with
+/// [`build_reasoning_prompt`] to obtain a prose analysis, then weaves that analysis into
+/// [`build_init_prompt`] as an extra user turn before the structured call.
+/// When `reasoning` is `false`, calls [`build_init_prompt`] directly with `analysis = None`.
+///
+/// `call_type` labels the structured chat call in latency logs; the freeform reasoning call is
+/// logged as `"{call_type}_reason"`. `sampled_latency_ms` applies only to the structured call
+/// (simulation latency accounting does not cover the reasoning call).
+pub(super) fn generate_schedule(
+    client: &LlmClient,
+    event_info: &[(EventId, String, String)],
+    all_events: &[EventId],
+    num_slots: usize,
+    guidance: Option<&str>,
+    reasoning: bool,
+    call_type: &str,
+    sampled_latency_ms: Option<u64>,
+) -> Result<Vec<ScheduleStep>, Box<dyn std::error::Error>> {
+    let analysis: Option<String> = if reasoning {
+        let reason_type = format!("{call_type}_reason");
+        let pb = build_reasoning_prompt(event_info, num_slots, guidance);
+        tracing::debug!(
+            "generate_schedule reasoning prompt:\n{}",
+            pb.build()[0].content
+        );
+        match client.chat_freeform(pb.build(), &reason_type, None) {
+            Ok(text) => {
+                tracing::debug!("generate_schedule reasoning response:\n{text}");
+                Some(text)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "generate_schedule reasoning call failed: {e}; proceeding without analysis"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let pb = build_init_prompt(event_info, num_slots, guidance, analysis.as_deref());
+    tracing::debug!(
+        "generate_schedule system message:\n{}",
+        pb.build()[0].content
+    );
+    let messages = pb.build().to_vec();
+    let schema = schedule_json_schema(num_slots, all_events);
+    chat_with_retry(
+        |m| client.chat(m, "schedule", &schema, call_type, sampled_latency_ms),
+        messages,
+        |resp| parse_schedule_response(resp, all_events, num_slots),
+        2,
+    )
 }
 
 /// Strip trailing newline-separated context from parse error messages before echoing to the LLM.
@@ -573,8 +720,7 @@ mod tests {
 
     #[test]
     fn parse_weights_clamps_out_of_range() {
-        let json =
-            r#"{"weights": [{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]}"#;
+        let json = r#"{"weights": [{"event_id": 0, "weight": 0}, {"event_id": 1, "weight": 15}]}"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -586,8 +732,7 @@ mod tests {
 
     #[test]
     fn parse_weights_filters_unknown_ids() {
-        let json =
-            r#"{"weights": [{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]}"#;
+        let json = r#"{"weights": [{"event_id": 0, "weight": 5}, {"event_id": 99, "weight": 8}]}"#;
         let weights = parse_weights_response(json, &[0, 1]).unwrap();
         let map: HashMap<EventId, u32> = weights
             .into_iter()
@@ -642,5 +787,57 @@ mod tests {
         let json = r#"{"steps": [{"duration_ms": 10, "events": [0, 0, 1, 2, 3]}]}"#;
         let steps = parse_schedule_response(json, &[0, 1, 2, 3], 4).unwrap();
         assert_eq!(steps[0].events, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn build_reasoning_prompt_contains_analysis_keys() {
+        let event_info = vec![
+            (0u32, "cache-misses".to_string(), "Cache misses".to_string()),
+            (1u32, "cpu-cycles".to_string(), "CPU cycles".to_string()),
+        ];
+        let pb = build_reasoning_prompt(&event_info, 2, None);
+        let messages = pb.build();
+        // Should have a system message and a user message.
+        assert!(messages.len() >= 2);
+        let user = messages.iter().find(|m| m.role == "user").unwrap();
+        // Prompt should ask for prose analysis and mention burstiness, ratios, etc.
+        assert!(user.content.contains("bursty"));
+        assert!(user.content.contains("JSON"));
+        assert!(user.content.contains("cache-misses"));
+    }
+
+    #[test]
+    fn build_init_prompt_with_analysis_adds_extra_turn() {
+        let event_info = vec![(0u32, "cache-misses".to_string(), "Cache misses".to_string())];
+        let without = build_init_prompt(&event_info, 1, None, None)
+            .build()
+            .to_vec();
+        let with = build_init_prompt(&event_info, 1, None, Some("focus on cache"))
+            .build()
+            .to_vec();
+        // The analysis version should have one more message turn.
+        assert_eq!(with.len(), without.len() + 1 - 1); // same count since both end with a user turn
+        // The last user message in the analysis version should reference the analysis.
+        let last = with.last().unwrap();
+        assert!(last.content.contains("focus on cache"));
+        assert!(last.content.contains("analysis"));
+    }
+
+    #[test]
+    fn build_schedule_example_first_id_recurs() {
+        // With multiple events and num_slots=2, ids[0] should appear in every step.
+        let event_info: Vec<(EventId, String, String)> = (0u32..5)
+            .map(|i| (i, format!("event-{i}"), "desc".to_string()))
+            .collect();
+        let example = build_schedule_example(&event_info, 2);
+        let parsed: serde_json::Value = serde_json::from_str(&example).unwrap();
+        let steps = parsed["steps"].as_array().unwrap();
+        assert!(!steps.is_empty());
+        // ids[0] = 0 should appear in every step.
+        for step in steps {
+            let events = step["events"].as_array().unwrap();
+            let has_first = events.iter().any(|v| v.as_u64() == Some(0));
+            assert!(has_first, "step missing recurrent counter 0: {step}");
+        }
     }
 }
