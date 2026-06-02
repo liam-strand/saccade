@@ -106,8 +106,9 @@ impl DynamicLlmScheduler {
     /// Build a prompt that includes current per-event rate and uncertainty observations so the LLM
     /// can reprioritize counters with high uncertainty or high event rate.
     ///
-    /// When `analysis` is `Some`, the prose reasoning text is appended as an extra user turn
-    /// so the model applies its prior free-form analysis to the structured output.
+    /// When `analysis` is `Some`, the prose reasoning is replayed as an assistant turn (it was the
+    /// model's own output), bracketed by user turns, so the model treats it as its own
+    /// chain-of-thought rather than an external instruction.
     fn build_update_prompt(
         &self,
         estimator: &dyn StateEstimator,
@@ -182,10 +183,18 @@ Use only event IDs from the list above."
             .assistant(example);
 
         if let Some(prose) = analysis {
-            pb = pb.user(format!(
-                "Here is your analysis:\n{prose}\n\n\
-                 Now produce the full updated schedule following that analysis."
-            ));
+            // Replay the reasoning as an assistant turn (it was the model's own output), with a
+            // user turn on either side to keep roles alternating.
+            pb = pb
+                .user(
+                    "Good. First, reason through which counters need more sampling and which \
+                     can be sampled less, given the observations above.",
+                )
+                .assistant(prose.to_string())
+                .user(
+                    "Now produce the full updated schedule as JSON, following your reasoning \
+                     above and covering ALL the counters listed.",
+                );
         } else {
             pb = pb.user(
                 "Good. Now produce the full updated schedule covering ALL \
@@ -241,18 +250,24 @@ impl Scheduler for DynamicLlmScheduler {
         let schema = llm_common::schedule_json_schema(num_slots, &all_events);
         std::thread::spawn(move || {
             for (reasoning_msgs, mut schedule_msgs, override_ms) in req_rx {
-                // If a reasoning prompt was supplied, call the model freeform first and
-                // inject the analysis as an extra user turn into the schedule messages.
+                // If a reasoning prompt was supplied, call the model freeform first and append the
+                // analysis. The schedule messages already end with a user turn ("…produce the
+                // updated schedule"), so push the analysis as an ASSISTANT turn (it is the model's
+                // own reasoning) followed by a user turn — keeping roles alternating.
                 if let Some(r_msgs) = reasoning_msgs {
                     match client.chat_freeform(&r_msgs, "dynamic_update_reason", None) {
                         Ok(analysis) => {
                             tracing::debug!("worker reasoning response:\n{analysis}");
                             schedule_msgs.push(ChatMessage {
+                                role: "assistant".into(),
+                                content: analysis,
+                            });
+                            schedule_msgs.push(ChatMessage {
                                 role: "user".into(),
-                                content: format!(
-                                    "Here is your analysis:\n{analysis}\n\n\
-                                     Now produce the full updated schedule following that analysis."
-                                ),
+                                content: "Now produce the full updated schedule as JSON, \
+                                          following your reasoning above and covering ALL \
+                                          the counters listed."
+                                    .into(),
                             });
                         }
                         Err(e) => {

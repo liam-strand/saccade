@@ -108,6 +108,7 @@ fn load_rates(
 }
 
 /// Run a single simulation combo, writing output to the paths in `combo`.
+#[allow(clippy::too_many_arguments)]
 fn run_one_combo(
     registry: &EventRegistry,
     all_ids: &[EventId],

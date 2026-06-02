@@ -175,9 +175,10 @@ pub(super) fn system_message(num_slots: usize, guidance: Option<&str>) -> String
 
 /// Construct the initial prompt asking the LLM to generate a full cyclic counter schedule.
 ///
-/// When `analysis` is `Some`, the prose reasoning text is appended as an extra user turn
-/// ("Here is your analysis: … Now produce the schedule following it.") so the model applies
-/// its prior reasoning to the structured output.  Existing callers pass `None` → no change.
+/// When `analysis` is `Some`, the prose reasoning is replayed as an assistant turn (it was the
+/// model's own output), bracketed by user turns that invite the reasoning and then request the
+/// structured schedule, so the model treats it as its own chain-of-thought rather than an external
+/// instruction. Existing callers pass `None` → no change.
 pub(super) fn build_init_prompt(
     event_info: &[(EventId, String, String)],
     num_slots: usize,
@@ -217,10 +218,19 @@ Use only event IDs from the list above."
         .assistant(example);
 
     if let Some(prose) = analysis {
-        pb = pb.user(format!(
-            "Here is your analysis:\n{prose}\n\n\
-             Now produce the full, deliberately-tilted schedule following that analysis."
-        ));
+        // `prose` was produced by the assistant in the preceding reasoning call, so replay it as
+        // an assistant turn — not a user turn — so the model treats it as its own chain-of-thought
+        // rather than an external instruction. A user turn on either side preserves role alternation.
+        pb = pb
+            .user(
+                "Good. First, reason through which counters matter most and how to allocate the \
+                 sampling budget across the cycle.",
+            )
+            .assistant(prose.to_string())
+            .user(
+                "Now produce the full, deliberately-tilted schedule as JSON, following your \
+                 reasoning above and covering ALL the counters listed.",
+            );
     } else {
         pb = pb.user(
             "Good. Now produce the full, deliberately-tilted schedule covering ALL \
@@ -807,22 +817,39 @@ mod tests {
     }
 
     #[test]
-    fn build_init_prompt_with_analysis_swaps_closing_turn() {
-        // Both None and Some cases end with a user turn (same message count).
-        // The analysis case replaces the generic nudge with the prose-anchored request.
+    fn build_init_prompt_replays_analysis_as_assistant_turn() {
+        // The reasoning prose must appear as an ASSISTANT turn (it was the model's own output),
+        // not be quoted back as user text, and the final turn must be a user request for the
+        // schedule that does NOT contain the prose.
         let event_info = vec![(0u32, "cache-misses".to_string(), "Cache misses".to_string())];
-        let without = build_init_prompt(&event_info, 1, None, None)
-            .build()
-            .to_vec();
         let with = build_init_prompt(&event_info, 1, None, Some("focus on cache"))
             .build()
             .to_vec();
-        // Both should have the same number of turns (closing user turn is swapped, not appended).
-        assert_eq!(with.len(), without.len());
-        // The last user message in the analysis version should reference the analysis.
+
+        // The prose lives in an assistant turn, never in a user turn.
+        let in_assistant = with
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.contains("focus on cache"));
+        assert!(in_assistant, "analysis prose should be an assistant turn");
+        assert!(
+            !with
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("focus on cache")),
+            "analysis prose must not appear in any user turn"
+        );
+
+        // Final turn is a user request for the schedule that references the prior reasoning.
         let last = with.last().unwrap();
-        assert!(last.content.contains("focus on cache"));
-        assert!(last.content.contains("analysis"));
+        assert_eq!(last.role, "user");
+        assert!(last.content.contains("reasoning"));
+        assert!(!last.content.contains("focus on cache"));
+
+        // Roles alternate (no two consecutive turns share a role).
+        assert!(
+            with.windows(2).all(|w| w[0].role != w[1].role),
+            "roles must alternate: {:?}",
+            with.iter().map(|m| &m.role).collect::<Vec<_>>()
+        );
     }
 
     #[test]
