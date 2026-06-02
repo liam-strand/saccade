@@ -21,11 +21,15 @@ from tqdm import tqdm
 
 import numpy as np
 
+import shlex
+
 from sim_utils import (
     SCHEDULERS,
     ESTIMATORS,
     FIXED_NUM_SLOTS,
     LLM_SCHEDULERS,
+    build_batch_simulate_cmd,
+    build_evaluate_cmd,
     filter_traces_by_kind,
     importance_weighted_nrmse,
     is_significant,
@@ -150,7 +154,98 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Rayon threads for each per-workload batch call (default: 1)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print the planned grid (workloads × schedulers × estimators) and the "
+            "output directory, then exit without running any simulations."
+        ),
+    )
     return parser
+
+
+def _print_dry_run(args: argparse.Namespace, traces: list[Path], schedulers: list[str]) -> None:
+    """Print the planned grid and every saccade command that would run, then return.
+
+    Reconstructs the same batch-simulate and evaluate invocations as the real
+    run (one batch per workload-trial, one evaluate per output trace) using the
+    shared command builders, so the printed commands stay in sync with reality.
+    The LLM API key is shown as a literal ``$LLM_API_KEY`` placeholder rather
+    than reading the real secret from the environment.
+    """
+    llm_scheds = [s for s in schedulers if s in LLM_SCHEDULERS]
+    grid_combos = [
+        (t.stem, sched, est)
+        for t in traces
+        for sched in schedulers
+        for est in ESTIMATORS
+    ]
+
+    print(
+        f"[dry-run] {len(traces)} workload(s) × {len(schedulers)} scheduler(s) "
+        f"× {len(ESTIMATORS)} estimator(s) = {len(grid_combos)} combination(s).",
+        file=sys.stderr,
+    )
+    print(f"[dry-run] Workloads:  {[t.stem for t in traces]}", file=sys.stderr)
+    print(f"[dry-run] Schedulers: {schedulers}", file=sys.stderr)
+    print(f"[dry-run] Estimators: {ESTIMATORS}", file=sys.stderr)
+    if llm_scheds:
+        print(
+            f"[dry-run] LLM schedulers (model={args.llm_model}, "
+            f"trials={args.llm_trials}): {llm_scheds}",
+            file=sys.stderr,
+        )
+    if args.exclude_schedulers:
+        print(f"[dry-run] Excluded: {args.exclude_schedulers}", file=sys.stderr)
+
+    # Placeholder output layout (no directories are created in a dry run).
+    run_dir = args.results_dir / "<timestamp>"
+    traces_out_dir = run_dir / "traces"
+    print(
+        f"[dry-run] Would write results under {run_dir}/.\n"
+        f"[dry-run] Commands that would run (API key shown as $LLM_API_KEY):\n",
+        file=sys.stderr,
+    )
+
+    def _out_trace(workload: str, sched: str, est: str, trial: int) -> Path:
+        return traces_out_dir / (
+            f"est_{workload}_{sched}_{est}_slots{FIXED_NUM_SLOTS}_t{trial}.perfetto"
+        )
+
+    for trace in traces:
+        workload = trace.stem
+        # Trial 0 batches all schedulers; trials 1..N-1 batch LLM schedulers only.
+        trial_sched_lists = [(0, schedulers)]
+        for trial in range(1, args.llm_trials):
+            if llm_scheds:
+                trial_sched_lists.append((trial, llm_scheds))
+
+        for trial, sched_list in trial_sched_lists:
+            spec_path = traces_out_dir / f"batch_spec_{workload}.json"
+            cmd = build_batch_simulate_cmd(
+                args.saccade, args.library, trace, spec_path,
+                FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
+                args.llm_model, args.base_config, api_key="$LLM_API_KEY",
+            )
+            combos = len(sched_list) * len(ESTIMATORS)
+            print(
+                f"# {workload} trial {trial}: batch of {combos} combo(s) "
+                f"({len(sched_list)} sched × {len(ESTIMATORS)} est)",
+                file=sys.stderr,
+            )
+            print(shlex.join(cmd), file=sys.stderr)
+
+        for sched in schedulers:
+            n_trials = args.llm_trials if sched in LLM_SCHEDULERS else 1
+            for est in ESTIMATORS:
+                for trial in range(n_trials):
+                    cmd = build_evaluate_cmd(
+                        args.saccade, trace, _out_trace(workload, sched, est, trial)
+                    )
+                    print(shlex.join(cmd), file=sys.stderr)
+
+    print("\n[dry-run] No simulations run.", file=sys.stderr)
 
 
 def main() -> None:
@@ -196,6 +291,10 @@ def main() -> None:
     schedulers = [s for s in SCHEDULERS if s not in args.exclude_schedulers]
     if not schedulers:
         parser.error("All schedulers have been excluded.")
+
+    if args.dry_run:
+        _print_dry_run(args, traces, schedulers)
+        return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = args.results_dir / timestamp

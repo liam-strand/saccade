@@ -98,6 +98,45 @@ def run_simulate(
     )
 
 
+def build_batch_simulate_cmd(
+    saccade: Path,
+    library: Path,
+    rates_trace: Path,
+    spec_path: Path,
+    num_slots: int,
+    q_schedule: int,
+    jobs: int,
+    llm_model: str,
+    base_config: Path | None = None,
+    api_key: str | None = None,
+) -> list[str]:
+    """Build the ``saccade simulate --batch`` argv list.
+
+    *api_key* defaults to the ``LLM_API_KEY`` environment variable; pass an
+    explicit placeholder (e.g. ``"$LLM_API_KEY"``) to avoid reading/leaking the
+    real secret when only printing the command (dry runs).
+    """
+    if api_key is None:
+        api_key = os.environ["LLM_API_KEY"]
+    cmd = [str(saccade)]
+    if base_config is not None:
+        cmd += ["--config", str(base_config)]
+    cmd += [
+        "simulate",
+        "--library", str(library),
+        "--rates-trace", str(rates_trace),
+        "--num-slots", str(num_slots),
+        "--q-schedule", str(q_schedule),
+        "--batch", str(spec_path),
+        "--jobs", str(max(1, jobs)),
+        "--llm-model", llm_model,
+        "--llm-base-url", "https://openrouter.ai/api",
+        "--llm-api-key", api_key,
+        "--llm-latency-profile", str(LATENCY_PROFILE),
+    ]
+    return cmd
+
+
 def run_batch_simulate(
     saccade: Path,
     library: Path,
@@ -125,22 +164,10 @@ def run_batch_simulate(
     """
     spec_path = tmp_dir / f"batch_spec_{rates_trace.stem}.json"
     spec_path.write_text(json.dumps(combos))
-    cmd = [str(saccade)]
-    if base_config is not None:
-        cmd += ["--config", str(base_config)]
-    cmd += [
-        "simulate",
-        "--library", str(library),
-        "--rates-trace", str(rates_trace),
-        "--num-slots", str(num_slots),
-        "--q-schedule", str(q_schedule),
-        "--batch", str(spec_path),
-        "--jobs", str(max(1, jobs)),
-        "--llm-model", llm_model,
-        "--llm-base-url", "https://openrouter.ai/api",
-        "--llm-api-key", os.environ["LLM_API_KEY"],
-        "--llm-latency-profile", str(LATENCY_PROFILE),
-    ]
+    cmd = build_batch_simulate_cmd(
+        saccade, library, rates_trace, spec_path,
+        num_slots, q_schedule, jobs, llm_model, base_config,
+    )
     subprocess.run(
         cmd,
         check=True,
@@ -150,6 +177,21 @@ def run_batch_simulate(
     )
 
 
+def build_evaluate_cmd(
+    saccade: Path,
+    ground_truth: Path,
+    estimated: Path,
+) -> list[str]:
+    """Build the ``saccade evaluate --json`` argv list."""
+    return [
+        str(saccade),
+        "evaluate",
+        "--ground-truth", str(ground_truth),
+        "--estimated", str(estimated),
+        "--json",
+    ]
+
+
 def run_evaluate(
     saccade: Path,
     ground_truth: Path,
@@ -157,13 +199,7 @@ def run_evaluate(
 ) -> dict:
     """Invoke ``saccade evaluate --json`` and return the parsed result dict."""
     result = subprocess.run(
-        [
-            str(saccade),
-            "evaluate",
-            "--ground-truth", str(ground_truth),
-            "--estimated", str(estimated),
-            "--json",
-        ],
+        build_evaluate_cmd(saccade, ground_truth, estimated),
         check=True,
         capture_output=True,
         text=True,
