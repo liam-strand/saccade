@@ -11,10 +11,29 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Payload sent from the main thread to the background update worker.
-/// `(reasoning_prompt, schedule_prompt, latency_override_ms)` — the reasoning prompt is `None`
-/// when the scheduler is not in reasoning mode.
-type UpdateRequest = (Option<Vec<ChatMessage>>, Vec<ChatMessage>, Option<u64>);
+/// Payload sent from the main thread to the background update worker:
+/// `(reasoning, schedule_prompt, schedule_latency_override_ms)`.
+///
+/// `reasoning` is `Some((reasoning_prompt, reasoning_latency_override_ms))` only in reasoning
+/// mode; the bundled override is the pre-sampled latency for the free-form reasoning call so it is
+/// logged consistently with the structured call. `schedule_latency_override_ms` applies to the
+/// structured schedule call.
+type UpdateRequest = (
+    Option<(Vec<ChatMessage>, Option<u64>)>,
+    Vec<ChatMessage>,
+    Option<u64>,
+);
+
+/// Combine the structured-call and optional reasoning-call latency samples into the total
+/// round-trip latency used to time the buffered update release (K quanta). Returns `None` only
+/// when neither sample is available (i.e. no active latency profile).
+fn combined_update_latency(struct_ms: Option<u64>, reason_ms: Option<u64>) -> Option<u64> {
+    match (struct_ms, reason_ms) {
+        (Some(s), Some(r)) => Some(s + r),
+        (s, None) => s,
+        (None, r) => r,
+    }
+}
 
 /// LLM-based scheduler that adapts its counter rotation schedule at runtime using profiler feedback.
 pub struct DynamicLlmScheduler {
@@ -58,7 +77,9 @@ pub struct DynamicLlmScheduler {
     buffered_release_step: u64,
     /// Optional latency profile for overriding measured LLM call latency in simulation.
     latency_profile: Option<LlmLatencyProfile>,
-    /// Pre-sampled latency override (ms) for the in-flight dynamic update, if a profile is active.
+    /// Pre-sampled total latency (ms) for the in-flight dynamic update, if a profile is active.
+    /// In reasoning mode this is the sum of the reasoning-call and schedule-call samples, so the
+    /// buffered-release delay (K quanta) reflects the full two-call round trip.
     sampled_latency_ms: Option<u64>,
     /// When `true`, performs a free-form reasoning pass before each schedule generation.
     reasoning: bool,
@@ -224,6 +245,13 @@ impl Scheduler for DynamicLlmScheduler {
             .latency_profile
             .as_mut()
             .and_then(|p| p.sample("static_setup"));
+        let reason_init = if self.reasoning {
+            self.latency_profile
+                .as_mut()
+                .and_then(|p| p.sample("static_setup_reason"))
+        } else {
+            None
+        };
         self.schedule = llm_common::generate_schedule(
             &self.client,
             &self.event_info,
@@ -233,6 +261,7 @@ impl Scheduler for DynamicLlmScheduler {
             self.reasoning,
             "static_setup",
             sampled_init,
+            reason_init,
         )?;
 
         tracing::info!(
@@ -249,13 +278,14 @@ impl Scheduler for DynamicLlmScheduler {
         let num_slots = self.num_slots;
         let schema = llm_common::schedule_json_schema(num_slots, &all_events);
         std::thread::spawn(move || {
-            for (reasoning_msgs, mut schedule_msgs, override_ms) in req_rx {
+            for (reasoning, mut schedule_msgs, override_ms) in req_rx {
                 // If a reasoning prompt was supplied, call the model freeform first and append the
                 // analysis. The schedule messages already end with a user turn ("…produce the
                 // updated schedule"), so push the analysis as an ASSISTANT turn (it is the model's
-                // own reasoning) followed by a user turn — keeping roles alternating.
-                if let Some(r_msgs) = reasoning_msgs {
-                    match client.chat_freeform(&r_msgs, "dynamic_update_reason", None) {
+                // own reasoning) followed by a user turn — keeping roles alternating. The bundled
+                // `reason_override` replays the profiled reasoning-call latency in the log.
+                if let Some((r_msgs, reason_override)) = reasoning {
+                    match client.chat_freeform(&r_msgs, "dynamic_update_reason", reason_override) {
                         Ok(analysis) => {
                             tracing::debug!("worker reasoning response:\n{analysis}");
                             schedule_msgs.push(ChatMessage {
@@ -375,31 +405,40 @@ impl Scheduler for DynamicLlmScheduler {
         // leave the counter alone so we retry on the next step.
         self.steps_since_update += 1;
         if self.steps_since_update >= self.update_interval && self.buffered_schedule.is_none() {
-            let reasoning_msgs = if self.reasoning {
-                Some(
-                    llm_common::build_reasoning_prompt(
-                        &self.event_info,
-                        self.num_slots,
-                        self.guidance.as_deref(),
-                    )
-                    .build()
-                    .to_vec(),
+            // Sample the structured schedule-call latency, and (in reasoning mode) the
+            // reasoning-call latency, so the simulated round trip accounts for both calls.
+            let struct_sample = self
+                .latency_profile
+                .as_mut()
+                .and_then(|p| p.sample("dynamic_update"));
+            let reasoning = if self.reasoning {
+                let msgs = llm_common::build_reasoning_prompt(
+                    &self.event_info,
+                    self.num_slots,
+                    self.guidance.as_deref(),
                 )
+                .build()
+                .to_vec();
+                let reason_sample = self
+                    .latency_profile
+                    .as_mut()
+                    .and_then(|p| p.sample("dynamic_update_reason"));
+                Some((msgs, reason_sample))
             } else {
                 None
             };
             // Build the schedule prompt without analysis (worker will append it after reasoning).
             let schedule_msgs = self.build_update_prompt(estimator, None).build().to_vec();
-            let sampled = self
-                .latency_profile
-                .as_mut()
-                .and_then(|p| p.sample("dynamic_update"));
+            // K (the buffered-release delay) is derived from the *total* round-trip latency: when
+            // reasoning is enabled that is two calls, so sum both samples.
+            let combined_latency =
+                combined_update_latency(struct_sample, reasoning.as_ref().and_then(|(_, r)| *r));
             if let Some(tx) = &self.request_tx
                 && tx
-                    .try_send((reasoning_msgs, schedule_msgs, sampled))
+                    .try_send((reasoning, schedule_msgs, struct_sample))
                     .is_ok()
             {
-                self.sampled_latency_ms = sampled;
+                self.sampled_latency_ms = combined_latency;
                 self.steps_since_update = 0;
                 if self.simulation_mode {
                     self.dispatch_step = self.step_count;
@@ -502,6 +541,18 @@ mod tests {
             },
         ];
         s
+    }
+
+    #[test]
+    fn combined_update_latency_sums_both_calls() {
+        // Reasoning enabled with a profile: both samples present → summed.
+        assert_eq!(combined_update_latency(Some(100), Some(40)), Some(140));
+        // No reasoning (or reason call type absent): structured sample passes through.
+        assert_eq!(combined_update_latency(Some(100), None), Some(100));
+        // Structured absent but reason present: reason passes through.
+        assert_eq!(combined_update_latency(None, Some(40)), Some(40));
+        // No profile at all: nothing to override (falls back to measured wall-clock).
+        assert_eq!(combined_update_latency(None, None), None);
     }
 
     #[test]

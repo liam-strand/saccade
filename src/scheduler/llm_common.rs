@@ -410,13 +410,14 @@ in the next step based on your analysis."
 #[allow(clippy::too_many_arguments)]
 ///
 /// When `reasoning` is `true`, first calls [`LlmClient::chat_freeform`] with
-/// [`build_reasoning_prompt`] to obtain a prose analysis, then weaves that analysis into
-/// [`build_init_prompt`] as an extra user turn before the structured call.
+/// [`build_reasoning_prompt`] to obtain a prose analysis, then replays that analysis into
+/// [`build_init_prompt`] as an assistant turn before the structured call.
 /// When `reasoning` is `false`, calls [`build_init_prompt`] directly with `analysis = None`.
 ///
 /// `call_type` labels the structured chat call in latency logs; the freeform reasoning call is
-/// logged as `"{call_type}_reason"`. `sampled_latency_ms` applies only to the structured call
-/// (simulation latency accounting does not cover the reasoning call).
+/// logged as `"{call_type}_reason"`. `sampled_latency_ms` is the latency override for the
+/// structured call and `reason_latency_ms` for the reasoning call (both `None` outside simulation
+/// or when the call type is absent from the profile).
 pub(super) fn generate_schedule(
     client: &LlmClient,
     event_info: &[(EventId, String, String)],
@@ -426,6 +427,7 @@ pub(super) fn generate_schedule(
     reasoning: bool,
     call_type: &str,
     sampled_latency_ms: Option<u64>,
+    reason_latency_ms: Option<u64>,
 ) -> Result<Vec<ScheduleStep>, Box<dyn std::error::Error>> {
     let analysis: Option<String> = if reasoning {
         let reason_type = format!("{call_type}_reason");
@@ -434,7 +436,7 @@ pub(super) fn generate_schedule(
             "generate_schedule reasoning prompt:\n{}",
             pb.build()[0].content
         );
-        match client.chat_freeform(pb.build(), &reason_type, None) {
+        match client.chat_freeform(pb.build(), &reason_type, reason_latency_ms) {
             Ok(text) => {
                 tracing::debug!("generate_schedule reasoning response:\n{text}");
                 Some(text)

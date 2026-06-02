@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Profile LLM call latency distributions for the three LLM scheduler call types.
+"""Profile LLM call latency distributions for every LLM scheduler call type.
 
 Runs each LLM scheduler on a representative trace (repeated --reps times) and
 parses ``llm_call`` lines from stderr to collect per-call latency samples.
 
-The three call types:
-  static_setup   -- static-llm and dynamic-llm initial scheduling call
-  dynamic_update -- dynamic-llm periodic rescheduling call
-  wrr_setup      -- weighted-round-robin-llm weight assignment call
+The call types:
+  static_setup          -- static-llm and dynamic-llm initial scheduling call
+  dynamic_update        -- dynamic-llm periodic rescheduling call
+  wrr_setup             -- weighted-round-robin-llm weight assignment call
+  static_setup_reason   -- free-form reasoning call before the initial schedule
+                           (reasoning-static-llm / reasoning-dynamic-llm)
+  dynamic_update_reason -- free-form reasoning call before each periodic update
+                           (reasoning-dynamic-llm)
+
+Call types are grouped dynamically from the ``call_type`` field of each
+``llm_call`` log line, so running the reasoning schedulers below is all that is
+needed for the ``*_reason`` distributions to appear in the profile.
 
 Output:
   llm_latency_profile.json  -- distribution JSON suitable for --llm-latency-profile
@@ -43,7 +51,14 @@ LLM_CALL_PATTERN = re.compile(
     r'llm_call latency_ms=(\d+) model="([^"]+)" call_type="([^"]+)"'
 )
 
-LLM_SCHEDULER_LIST = ["static-llm", "dynamic-llm", "weighted-round-robin-llm"]
+LLM_SCHEDULER_LIST = [
+    "static-llm",
+    "dynamic-llm",
+    "weighted-round-robin-llm",
+    # Reasoning variants emit the additional `*_reason` call types we need to profile.
+    "reasoning-static-llm",
+    "reasoning-dynamic-llm",
+]
 
 
 def run_simulate_capture_stderr(
@@ -100,7 +115,7 @@ def parse_llm_calls(stderr: str) -> list[dict]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Profile LLM call latency distributions for all three LLM schedulers."
+        description="Profile LLM call latency distributions for all LLM schedulers."
     )
     p.add_argument("--saccade", type=Path, default=Path("../target/release/saccade"))
     p.add_argument("--library", type=Path, default=Path("../event_lib.json"))

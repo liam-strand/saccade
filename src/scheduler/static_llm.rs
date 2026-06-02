@@ -70,6 +70,13 @@ impl Scheduler for StaticLlmScheduler {
             .latency_profile
             .as_mut()
             .and_then(|p| p.sample("static_setup"));
+        let reason_sampled = if self.reasoning {
+            self.latency_profile
+                .as_mut()
+                .and_then(|p| p.sample("static_setup_reason"))
+        } else {
+            None
+        };
         self.schedule = llm_common::generate_schedule(
             &self.client,
             &self.event_info,
@@ -79,6 +86,7 @@ impl Scheduler for StaticLlmScheduler {
             self.reasoning,
             "static_setup",
             sampled,
+            reason_sampled,
         )?;
 
         tracing::info!("StaticLlmScheduler: {} steps in cycle", self.schedule.len());
