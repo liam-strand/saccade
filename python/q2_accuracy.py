@@ -132,6 +132,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit traces to SPEC (spec_*), NPB (npb_*), or all (default: all)",
     )
     parser.add_argument(
+        "--scheduler",
+        action="append",
+        dest="schedulers",
+        choices=SCHEDULERS,
+        metavar="SCHEDULER",
+        default=[],
+        help=(
+            "Run only the given scheduler(s) (repeatable). "
+            f"Choices: {', '.join(SCHEDULERS)}. Default: all. "
+            "Applied before --exclude-scheduler."
+        ),
+    )
+    parser.add_argument(
         "--exclude-scheduler",
         action="append",
         dest="exclude_schedulers",
@@ -153,6 +166,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Rayon threads for each per-workload batch call (default: 1)",
+    )
+    parser.add_argument(
+        "--estimator",
+        action="append",
+        dest="estimators",
+        choices=ESTIMATORS,
+        metavar="ESTIMATOR",
+        default=[],
+        help=(
+            "Run only the given estimator(s) (repeatable). "
+            f"Choices: {', '.join(ESTIMATORS)}. Default: all."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -249,8 +274,13 @@ def _print_dry_run(args: argparse.Namespace, traces: list[Path], schedulers: lis
 
 
 def main() -> None:
+    global ESTIMATORS
     parser = build_parser()
     args = parser.parse_args()
+
+    # Narrow the estimator grid if the user selected a subset (dedupe, keep order).
+    if args.estimators:
+        ESTIMATORS = list(dict.fromkeys(args.estimators))
 
     args.saccade = args.saccade.resolve()
     args.library = args.library.resolve()
@@ -288,9 +318,14 @@ def main() -> None:
             f"No traces matched --workload-kind={args.workload_kind} in {args.traces_dir}"
         )
 
-    schedulers = [s for s in SCHEDULERS if s not in args.exclude_schedulers]
+    # Narrow to the requested scheduler(s) if given, then drop any excluded.
+    # Iterate SCHEDULERS so grid order stays canonical regardless of CLI order.
+    include = set(args.schedulers) if args.schedulers else set(SCHEDULERS)
+    schedulers = [
+        s for s in SCHEDULERS if s in include and s not in args.exclude_schedulers
+    ]
     if not schedulers:
-        parser.error("All schedulers have been excluded.")
+        parser.error("No schedulers selected (check --scheduler / --exclude-scheduler).")
 
     if args.dry_run:
         _print_dry_run(args, traces, schedulers)
@@ -368,6 +403,11 @@ def main() -> None:
                     f"  ERROR batch-simulate {workload} trial {trial}: {exc}",
                     file=sys.stderr,
                 )
+                if exc.stderr:
+                    tqdm.write(
+                        f"    saccade stderr:\n{exc.stderr}",
+                        file=sys.stderr,
+                    )
                 failed = True
                 break
 

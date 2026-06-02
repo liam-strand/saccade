@@ -46,7 +46,9 @@ impl Scheduler for MaxUncertaintyScheduler {
         _quantum: &Quantum,
         estimator: &dyn StateEstimator,
     ) -> ScheduleDecision {
-        let mut res: Vec<_> = estimator
+        // Mean uncertainty per event across threads, for events the estimator
+        // has already observed.
+        let mean_uncertainty: HashMap<u32, f64> = estimator
             .all_estimates()
             .iter()
             .map(|((_tid, event_id), v)| (*event_id, v))
@@ -64,14 +66,31 @@ impl Scheduler for MaxUncertaintyScheduler {
             })
             .collect();
 
-        res.sort_by(|(_k1, avg1), (_k2, avg2)| avg1.total_cmp(avg2));
+        // Rank the full candidate universe — not just observed events — so that
+        // never-measured events (treated as maximally uncertain) are scheduled
+        // first. Iterating only `all_estimates()` would deadlock at cold-start:
+        // with no estimates yet, nothing is selected, nothing gets measured, and
+        // the estimate map stays empty forever.
+        let mut scored: Vec<(EventId, f64)> = self
+            .events
+            .iter()
+            .map(|&ev| {
+                (
+                    ev,
+                    mean_uncertainty.get(&ev).copied().unwrap_or(f64::INFINITY),
+                )
+            })
+            .collect();
+
+        // Sort by uncertainty descending, tiebroken by event_id ascending so
+        // cold-start selection (all ties at +inf) is deterministic across seeds.
+        scored.sort_by(|(id1, u1), (id2, u2)| u2.total_cmp(u1).then(id1.cmp(id2)));
 
         ScheduleDecision {
-            active_events: res
+            active_events: scored
                 .into_iter()
-                .rev()
                 .take(self.num_slots)
-                .map(|(id, _avg)| id)
+                .map(|(id, _u)| id)
                 .collect(),
             duration: None,
         }
@@ -175,13 +194,35 @@ mod tests {
     }
 
     #[test]
-    fn empty_estimator_returns_empty() {
+    fn cold_start_bootstraps_all_events() {
+        // With no estimates yet, every event is maximally uncertain, so the
+        // scheduler must still activate candidates to bootstrap measurement
+        // rather than returning nothing (which would deadlock the sampler).
         let mut sched = MaxUncertaintyScheduler::default();
         sched.init(vec![1, 2, 3], 4).unwrap();
 
         let decision = sched.next_step(&empty_quantum(), &MockEstimator::new());
 
-        assert!(decision.active_events.is_empty());
+        let mut active = decision.active_events.clone();
+        active.sort_unstable();
+        assert_eq!(active, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn unmeasured_events_outrank_measured_ones() {
+        // Event 2 has a recorded (finite) uncertainty; events 1 and 3 are
+        // unmeasured (treated as +inf) and must be scheduled ahead of it.
+        let mut sched = MaxUncertaintyScheduler::default();
+        sched.init(vec![1, 2, 3], 2).unwrap();
+
+        let mut est = MockEstimator::new();
+        est.add(1, 2, 0.9);
+
+        let decision = sched.next_step(&empty_quantum(), &est);
+
+        let mut active = decision.active_events.clone();
+        active.sort_unstable();
+        assert_eq!(active, vec![1, 3]);
     }
 
     #[test]
