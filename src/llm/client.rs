@@ -1,7 +1,26 @@
 //! Blocking HTTP client for OpenAI-compatible chat endpoints (Ollama, OpenRouter, etc.).
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+/// Total attempts (initial + retries) for a single LLM round-trip before giving up.
+const MAX_ATTEMPTS: u32 = 4;
+/// Base backoff before the first retry; doubles each subsequent attempt.
+const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(2);
+/// Upper bound on a single backoff sleep (before jitter).
+const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+/// Returns `true` when a `ureq` transport error is worth retrying: timeouts, transient
+/// connection/IO failures, HTTP 429 (rate limit), and 5xx server errors. Deterministic
+/// failures (4xx other than 429, malformed URI, DNS, …) return `false`.
+fn is_retryable(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Timeout(_) | ureq::Error::Io(_) | ureq::Error::ConnectionFailed => true,
+        ureq::Error::StatusCode(code) => *code == 429 || *code >= 500,
+        _ => false,
+    }
+}
 
 /// Errors that can arise when sending a request to the inference server.
 #[derive(Debug)]
@@ -170,7 +189,26 @@ impl LlmClient {
         self.post_and_log(body, call_type, latency_override_ms)
     }
 
+    /// Send the request body once and return the raw response text, surfacing the underlying
+    /// `ureq::Error` so the caller can decide whether the failure is retryable.
+    fn send_once(&self, url: &str, body: &[u8]) -> Result<String, ureq::Error> {
+        let mut req = self
+            .agent
+            .post(url)
+            .header("Content-Type", "application/json");
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut response = req.send(body)?;
+        response.body_mut().read_to_string()
+    }
+
     /// Internal helper: POST a pre-serialized body, log latency, extract the reply text.
+    ///
+    /// Transient transport failures (timeouts, connection drops, 429, 5xx) are retried with
+    /// exponential backoff and jitter up to [`MAX_ATTEMPTS`] times; deterministic failures and a
+    /// final exhausted retry surface as [`LlmError::Http`]. Retrying here, below `chat`/
+    /// `chat_freeform`, keeps the parse-level retry loop in `llm_common` unaware of transport.
     fn post_and_log(
         &self,
         body: Vec<u8>,
@@ -178,41 +216,55 @@ impl LlmClient {
         latency_override_ms: Option<u64>,
     ) -> Result<String, LlmError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let t0 = std::time::Instant::now();
 
-        let mut req = self
-            .agent
-            .post(&url)
-            .header("Content-Type", "application/json");
+        for attempt in 1..=MAX_ATTEMPTS {
+            let t0 = std::time::Instant::now();
+            match self.send_once(&url, &body) {
+                Ok(text) => {
+                    let actual_ms = t0.elapsed().as_millis() as u64;
+                    let effective_ms = latency_override_ms.unwrap_or(actual_ms);
+                    tracing::info!(
+                        latency_ms = effective_ms,
+                        model = ?self.model,
+                        call_type = ?call_type,
+                        "llm_call"
+                    );
 
-        if let Some(key) = &self.api_key {
-            req = req.header("Authorization", &format!("Bearer {key}"));
+                    return serde_json::from_str::<ChatResponse>(&text)
+                        .ok()
+                        .and_then(|r| r.choices.into_iter().next())
+                        .map(|c| c.message.content)
+                        .ok_or(LlmError::BadResponse(text));
+                }
+                Err(e) => {
+                    if attempt < MAX_ATTEMPTS && is_retryable(&e) {
+                        let backoff = retry_backoff(attempt);
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = MAX_ATTEMPTS,
+                            call_type,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "LLM call failed, retrying: {e}"
+                        );
+                        std::thread::sleep(backoff);
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            }
         }
-
-        let mut response = req
-            .send(body)
-            .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
-
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e: ureq::Error| LlmError::Http(e.to_string()))?;
-
-        let actual_ms = t0.elapsed().as_millis() as u64;
-        let effective_ms = latency_override_ms.unwrap_or(actual_ms);
-        tracing::info!(
-            latency_ms = effective_ms,
-            model = ?self.model,
-            call_type = ?call_type,
-            "llm_call"
-        );
-
-        serde_json::from_str::<ChatResponse>(&text)
-            .ok()
-            .and_then(|r| r.choices.into_iter().next())
-            .map(|c| c.message.content)
-            .ok_or(LlmError::BadResponse(text))
+        unreachable!("loop returns on the final attempt")
     }
+}
+
+/// Exponential backoff for retry `attempt` (1-based): `base * 2^(attempt-1)`, capped, plus up to
+/// 25% random jitter to avoid synchronized retries across concurrent batch combos.
+fn retry_backoff(attempt: u32) -> Duration {
+    let scaled = RETRY_BACKOFF_BASE
+        .saturating_mul(1u32 << (attempt - 1))
+        .min(RETRY_BACKOFF_CAP);
+    let jitter = rand::rng().random_range(0.0..0.25) * scaled.as_secs_f64();
+    scaled + Duration::from_secs_f64(jitter)
 }
 
 #[cfg(test)]
@@ -223,6 +275,27 @@ mod tests {
         ChatMessage {
             role: "user".into(),
             content: "hi".into(),
+        }
+    }
+
+    #[test]
+    fn is_retryable_classifies_status_codes() {
+        assert!(is_retryable(&ureq::Error::StatusCode(429)));
+        assert!(is_retryable(&ureq::Error::StatusCode(500)));
+        assert!(is_retryable(&ureq::Error::StatusCode(503)));
+        assert!(!is_retryable(&ureq::Error::StatusCode(404)));
+        assert!(!is_retryable(&ureq::Error::StatusCode(400)));
+        assert!(!is_retryable(&ureq::Error::HostNotFound));
+    }
+
+    #[test]
+    fn retry_backoff_grows_and_caps() {
+        // Lower bound (no jitter) doubles per attempt and never exceeds cap + 25% jitter.
+        assert!(retry_backoff(1) >= RETRY_BACKOFF_BASE);
+        assert!(retry_backoff(2) >= RETRY_BACKOFF_BASE * 2);
+        let max = RETRY_BACKOFF_CAP.as_secs_f64() * 1.25;
+        for attempt in 1..=8 {
+            assert!(retry_backoff(attempt).as_secs_f64() <= max);
         }
     }
 
