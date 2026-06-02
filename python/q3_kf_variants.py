@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Compare Kalman filter variants with the rate-of-change scheduler.
+"""Compare Kalman filter variants across estimator-independent schedulers.
 
-Fixed scheduler: rate-of-change.
+Schedulers tested: round-robin and rate-of-change. Both ignore the estimator
+when picking counters, so all four estimator variants below see an identical
+measurement schedule -- the only thing that changes is the correlation config.
 Four estimator variants tested:
 
   ema          -- exponential moving average (non-KF baseline)
@@ -34,7 +36,7 @@ from sim_utils import (
     REPO_ROOT,
 )
 
-FIXED_SCHEDULER = "rate-of-change"
+SCHEDULERS = ["round-robin", "rate-of-change"]
 
 KF_VARIANTS = [
     {"label": "ema",           "estimator": "ema",    "config": None},
@@ -42,6 +44,10 @@ KF_VARIANTS = [
     {"label": "kf_analytical", "estimator": "kalman", "config": "config/kf_analytical.toml"},
     {"label": "kf_expert",     "estimator": "kalman", "config": "config/kf_expert.toml"},
 ]
+
+# Full cross product run as a single batch per workload: every (scheduler,
+# estimator-variant) combo shares the same rates trace, loaded once.
+COMBOS = [{"scheduler": s, **v} for s in SCHEDULERS for v in KF_VARIANTS]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,8 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--jobs",
         type=int,
-        default=4,
-        help="Rayon threads for the per-workload batch call (default: 4 = one per KF variant)",
+        default=8,
+        help="Rayon threads for the per-workload batch call (default: 8 = one per scheduler x KF variant combo)",
     )
     return p
 
@@ -129,26 +135,27 @@ def main() -> None:
 
     rows: list[dict] = []
 
-    # For each workload, batch all 4 KF variants in a single saccade process so
-    # the rates trace is loaded only once.  Each variant carries its own config
-    # file (or None for ema) via the per-combo "config" key.
+    # One batch per workload: all (scheduler x KF variant) combos run in a single
+    # saccade process so the rates trace is loaded only once.  Both schedulers
+    # are estimator-independent, so the four variants share an identical
+    # measurement schedule within each scheduler.
     for trace_path in tqdm(traces, desc="kf_variants", unit="workload"):
         workload = trace_path.stem
 
-        def _out_trace(label: str) -> Path:
-            return tmp_dir / f"est_{workload}_{FIXED_SCHEDULER}_{label}_slots{FIXED_NUM_SLOTS}_t0.perfetto"
+        def _out_trace(scheduler: str, label: str) -> Path:
+            return tmp_dir / f"est_{workload}_{scheduler}_{label}_slots{FIXED_NUM_SLOTS}_t0.perfetto"
 
         batch_spec = []
-        for variant in KF_VARIANTS:
+        for combo in COMBOS:
             entry: dict = {
-                "scheduler": FIXED_SCHEDULER,
-                "estimator": variant["estimator"],
-                "trace": str(_out_trace(variant["label"])),
+                "scheduler": combo["scheduler"],
+                "estimator": combo["estimator"],
+                "trace": str(_out_trace(combo["scheduler"], combo["label"])),
             }
             if args.seed is not None:
                 entry["seed"] = args.seed
-            if variant["config"] is not None:
-                entry["config"] = str(config_dir / Path(variant["config"]).name)
+            if combo["config"] is not None:
+                entry["config"] = str(config_dir / Path(combo["config"]).name)
             batch_spec.append(entry)
 
         try:
@@ -160,13 +167,12 @@ def main() -> None:
             )
         except subprocess.CalledProcessError as exc:
             tqdm.write(f"  ERROR batch-simulate {workload}: {exc}", file=sys.stderr)
-            for variant in KF_VARIANTS:
-                sig = is_significant(None, noise_floor)
+            for combo in COMBOS:
                 row: dict = {
                     "workload": workload,
-                    "scheduler": FIXED_SCHEDULER,
-                    "kf_variant": variant["label"],
-                    "estimator": variant["estimator"],
+                    "scheduler": combo["scheduler"],
+                    "kf_variant": combo["label"],
+                    "estimator": combo["estimator"],
                     "median_nrmse": "", "coverage": "",
                     "nrmse_mean": "", "nrmse_stddev": "",
                 }
@@ -175,22 +181,23 @@ def main() -> None:
                 rows.append(row)
             continue
 
-        def _eval_variant(variant: dict) -> dict:
-            label = variant["label"]
-            out_trace = _out_trace(label)
+        def _eval_combo(combo: dict) -> dict:
+            scheduler = combo["scheduler"]
+            label = combo["label"]
+            out_trace = _out_trace(scheduler, label)
             try:
                 ev = run_evaluate(args.saccade, trace_path, out_trace)
                 mn = median_nrmse(ev)
                 mc = mean_coverage(ev)
             except subprocess.CalledProcessError as exc:
-                tqdm.write(f"  ERROR evaluate {workload}/{label}: {exc}", file=sys.stderr)
+                tqdm.write(f"  ERROR evaluate {workload}/{scheduler}/{label}: {exc}", file=sys.stderr)
                 mn = mc = None
             sig = is_significant(mn, noise_floor)
             r: dict = {
                 "workload": workload,
-                "scheduler": FIXED_SCHEDULER,
+                "scheduler": scheduler,
                 "kf_variant": label,
-                "estimator": variant["estimator"],
+                "estimator": combo["estimator"],
                 "median_nrmse": mn if mn is not None else "",
                 "coverage": mc if mc is not None else "",
                 "nrmse_mean": mn if mn is not None else "",
@@ -200,9 +207,9 @@ def main() -> None:
                 r["significant"] = "" if sig is None else str(sig).lower()
             return r
 
-        with ThreadPoolExecutor(max_workers=len(KF_VARIANTS)) as ex:
-            variant_rows = list(ex.map(_eval_variant, KF_VARIANTS))
-        rows.extend(variant_rows)
+        with ThreadPoolExecutor(max_workers=len(COMBOS)) as ex:
+            combo_rows = list(ex.map(_eval_combo, COMBOS))
+        rows.extend(combo_rows)
 
     with out_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
