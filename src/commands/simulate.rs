@@ -319,22 +319,54 @@ pub fn batch_simulate(
 
     let latency_path = llm_latency_profile.as_deref();
 
-    rayon::ThreadPoolBuilder::new()
+    // Run every combo and collect results rather than short-circuiting: a single combo's
+    // failure (e.g. a transient LLM timeout that survives the client's retries) must not
+    // discard the other combos that completed successfully.
+    let results: Vec<(&BatchCombo, std::io::Result<()>)> = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
         .build()
         .map_err(std::io::Error::other)?
         .install(|| {
-            combos.par_iter().try_for_each(|combo| {
-                run_one_combo(
-                    &registry,
-                    &all_ids,
-                    &event_names,
-                    Arc::clone(&rates),
-                    steps,
-                    &base_config,
-                    combo,
-                    latency_path,
-                )
-            })
-        })
+            combos
+                .par_iter()
+                .map(|combo| {
+                    let r = run_one_combo(
+                        &registry,
+                        &all_ids,
+                        &event_names,
+                        Arc::clone(&rates),
+                        steps,
+                        &base_config,
+                        combo,
+                        latency_path,
+                    );
+                    (combo, r)
+                })
+                .collect()
+        });
+
+    let mut failures = 0usize;
+    for (combo, result) in &results {
+        if let Err(e) = result {
+            failures += 1;
+            tracing::error!(
+                scheduler = %combo.scheduler,
+                estimator = %combo.estimator,
+                trace = ?combo.trace,
+                "batch combo failed: {e}"
+            );
+        }
+    }
+    let total = results.len();
+    let succeeded = total - failures;
+    tracing::info!("batch: {succeeded}/{total} combos succeeded");
+
+    // Keep partial results: only fail the process if nothing succeeded (or there was nothing
+    // to do). Surviving combos' traces are written and remain usable downstream.
+    if succeeded == 0 && total > 0 {
+        return Err(std::io::Error::other(format!(
+            "all {total} batch combos failed"
+        )));
+    }
+    Ok(())
 }
