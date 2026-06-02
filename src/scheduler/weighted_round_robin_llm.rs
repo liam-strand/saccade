@@ -97,7 +97,10 @@ impl Scheduler for WeightedRoundRobinLlmScheduler {
             )
             .into());
         }
-        let sampled = self.latency_profile.as_mut().and_then(|p| p.sample("wrr_setup"));
+        let sampled = self
+            .latency_profile
+            .as_mut()
+            .and_then(|p| p.sample("wrr_setup"));
         let pb =
             llm_common::build_weights_prompt(&self.event_info, num_slots, self.guidance.as_deref());
         tracing::debug!(
@@ -383,7 +386,9 @@ mod tests {
 
         let pb = llm_common::build_weights_prompt(&event_info, 2, None);
         let schema = llm_common::weights_json_schema(&all_events);
-        let response = client.chat(pb.build(), "weights", &schema, "wrr_setup", None).expect("LLM call should succeed");
+        let response = client
+            .chat(pb.build(), "weights", &schema, "wrr_setup", None)
+            .expect("LLM call should succeed");
         eprintln!("LLM weights response:\n{response}");
 
         let weights = llm_common::parse_weights_response(&response, &all_events)

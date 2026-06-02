@@ -21,14 +21,18 @@ use tracing::debug;
 fn de_scheduler<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SchedulerKind, D::Error> {
     let s = String::deserialize(d)?;
     let normalized = s.replace('-', "_");
-    SchedulerKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&normalized))
+    SchedulerKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(
+        &normalized,
+    ))
 }
 
 /// Accept both kebab-case and snake_case estimator names in JSON.
 fn de_estimator<'de, D: serde::Deserializer<'de>>(d: D) -> Result<EstimatorKind, D::Error> {
     let s = String::deserialize(d)?;
     let normalized = s.replace('-', "_");
-    EstimatorKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&normalized))
+    EstimatorKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(
+        &normalized,
+    ))
 }
 
 /// One combo entry in a `--batch` spec JSON file.
@@ -130,7 +134,10 @@ fn run_one_combo(
                 noise_stddev: Some(base_config.noise_stddev),
                 seed: combo.seed.or(base_config.seed),
                 num_slots: Some(base_config.num_slots),
-                guidance: combo.guidance.clone().or_else(|| base_config.llm.guidance.clone()),
+                guidance: combo
+                    .guidance
+                    .clone()
+                    .or_else(|| base_config.llm.guidance.clone()),
                 llm_model: Some(base_config.llm.model.clone()),
                 llm_base_url: Some(base_config.llm.base_url.clone()),
                 llm_api_key: base_config.llm.api_key.clone(),
@@ -299,10 +306,8 @@ pub fn batch_simulate(
     let (rates, max_ts_ns) = load_rates(&rates_trace, &registry)?;
     let steps = max_ts_ns.div_ceil(base_config.q_schedule_ns.max(1));
 
-    let combos: Vec<BatchCombo> = serde_json::from_str(
-        &std::fs::read_to_string(&batch_spec)?
-    )
-    .map_err(std::io::Error::other)?;
+    let combos: Vec<BatchCombo> = serde_json::from_str(&std::fs::read_to_string(&batch_spec)?)
+        .map_err(std::io::Error::other)?;
 
     tracing::info!(
         "Batch simulation: {} combos, {} steps each, {} Rayon threads",

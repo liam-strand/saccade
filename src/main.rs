@@ -143,9 +143,23 @@ fn main() -> std::io::Result<()> {
             )?;
             if let Some(batch_spec) = batch {
                 // 0 means "use all logical CPUs" — Rayon's default when passed 0.
-                batch_simulate(library, rates_trace, config, batch_spec, jobs, llm_latency_profile)?;
+                batch_simulate(
+                    library,
+                    rates_trace,
+                    config,
+                    batch_spec,
+                    jobs,
+                    llm_latency_profile,
+                )?;
             } else {
-                simulate(library, rates_trace, config, csv, trace, llm_latency_profile)?;
+                simulate(
+                    library,
+                    rates_trace,
+                    config,
+                    csv,
+                    trace,
+                    llm_latency_profile,
+                )?;
             }
         }
     }

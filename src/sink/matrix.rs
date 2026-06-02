@@ -123,17 +123,16 @@ impl OutputSink for MatrixSink {
         // In sweep mode, build a (cpu_id, timestamp_ns, tid) → anchor_count lookup so
         // each sample can be normalized by the co-measured instruction count.
         // Samples from the same BPF wire event share identical (cpu_id, timestamp_ns, tid).
-        let anchor_counts: HashMap<(u32, u64, u32), u64> =
-            if let Some(anchor_id) = self.anchor_id {
-                quantum
-                    .samples()
-                    .iter()
-                    .filter(|s| s.event_id == anchor_id && s.duration_ns > 0)
-                    .map(|s| ((s.cpu_id, s.timestamp_ns, s.tid), s.count))
-                    .collect()
-            } else {
-                HashMap::new()
-            };
+        let anchor_counts: HashMap<(u32, u64, u32), u64> = if let Some(anchor_id) = self.anchor_id {
+            quantum
+                .samples()
+                .iter()
+                .filter(|s| s.event_id == anchor_id && s.duration_ns > 0)
+                .map(|s| ((s.cpu_id, s.timestamp_ns, s.tid), s.count))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         for s in quantum.samples() {
             if s.duration_ns == 0 {

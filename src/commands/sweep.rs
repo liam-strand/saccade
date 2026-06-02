@@ -81,14 +81,19 @@ impl OutputSink for TidCollectorSink {
         _active_set: &[EventId],
     ) -> io::Result<()> {
         let mut maps = self.maps.borrow_mut();
-        let map = maps.last_mut().expect("begin_batch must be called before emit");
+        let map = maps
+            .last_mut()
+            .expect("begin_batch must be called before emit");
         for s in quantum.samples() {
             if s.tid == 0 {
                 continue;
             }
             map.entry(s.tid).or_insert_with(|| {
                 let task_len = s.task.iter().position(|&c| c == 0).unwrap_or(TASK_COMM_LEN);
-                (s.pid, String::from_utf8_lossy(&s.task[..task_len]).into_owned())
+                (
+                    s.pid,
+                    String::from_utf8_lossy(&s.task[..task_len]).into_owned(),
+                )
             });
         }
         Ok(())
@@ -139,7 +144,10 @@ fn remap_sweep_tids(
     for (batch_idx, map) in batch_maps.iter().enumerate() {
         let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
         for (&real_tid, (_, task_name)) in map {
-            by_name.entry(task_name.as_str()).or_default().push(real_tid);
+            by_name
+                .entry(task_name.as_str())
+                .or_default()
+                .push(real_tid);
         }
         for tids in by_name.values_mut() {
             tids.sort_unstable();
@@ -244,7 +252,11 @@ pub fn sweep(
         .collect();
     let batches: Vec<Vec<u32>> = user_ids
         .chunks(3)
-        .map(|c| std::iter::once(anchor_id).chain(c.iter().copied()).collect())
+        .map(|c| {
+            std::iter::once(anchor_id)
+                .chain(c.iter().copied())
+                .collect()
+        })
         .collect();
     let num_batches = batches.len();
     tracing::info!(
@@ -370,7 +382,13 @@ pub fn sweep(
     drop(sinks);
 
     let batch_maps = Rc::try_unwrap(shared_maps).unwrap().into_inner();
-    remap_sweep_tids(&trace, &batch_maps, &event_names, anchor_name, global_ref_rate)?;
+    remap_sweep_tids(
+        &trace,
+        &batch_maps,
+        &event_names,
+        anchor_name,
+        global_ref_rate,
+    )?;
 
     tracing::info!("Sweep complete. Trace written to {:?}", trace);
 
