@@ -202,6 +202,47 @@ impl ThreadFilter {
         }
     }
 
+    /// Enforce the Cauchy–Schwarz bound `|P[i,j]| <= RHO_MAX * sqrt(P[i,i]*P[j,j])` on every
+    /// off-diagonal entry, using the *current* diagonals.
+    ///
+    /// The off-diagonal cross-covariance is injected by `quantum_step` (additive process noise
+    /// each quantum, unbounded) and seeded in `ensure_event`; meanwhile measurements shrink the
+    /// diagonals. Without this bound an off-diagonal grows far past what the diagonals support,
+    /// the scalar-update cross-gain `k[j] = P[j,i]/s` blows past 1, and the filter diverges
+    /// catastrophically (nRMSE 1e5–1e11). Holding every pair within the pairwise PSD bound keeps
+    /// the gain finite and the filter stable.
+    ///
+    /// A non-finite or non-positive diagonal yields bound 0, zeroing that row/column's
+    /// off-diagonals so the helper never produces `NaN`. O(n^2) in the number of active events
+    /// (tens), called per measurement / quantum.
+    fn clamp_cross_covariance(&mut self) {
+        const RHO_MAX: f64 = 0.999; // margin below 1.0 to stay strictly PD under FP drift
+        let n = self.x.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let var_prod = self.p[i][i] * self.p[j][j];
+                let bound = if var_prod.is_finite() && var_prod > 0.0 {
+                    RHO_MAX * var_prod.sqrt()
+                } else {
+                    0.0
+                };
+                let v = self.p[i][j];
+                // `>` is false for NaN, so test for "within bound" and clamp the rest; this
+                // also rewrites a NaN off-diagonal to a finite value.
+                let within_bound = v.abs() <= bound;
+                if !within_bound {
+                    let clamped = if bound == 0.0 {
+                        0.0
+                    } else {
+                        v.signum() * bound
+                    };
+                    self.p[i][j] = clamped;
+                    self.p[j][i] = clamped;
+                }
+            }
+        }
+    }
+
     /// Apply a scalar Kalman measurement update for `event_idx` with observation `z` and noise `r`.
     ///
     /// Uses a one-hot `H` (only `event_idx` observed), propagating the gain through the full
@@ -213,6 +254,10 @@ impl ThreadFilter {
         if !s.is_finite() || s <= 0.0 {
             return;
         }
+        // Restore the pairwise PSD bound before reading the cross-gain so a stale-large
+        // off-diagonal (from quantum_step accumulation or the ensure_event seed) cannot blow up
+        // `k[j] = P[j, event_idx] / s`.
+        self.clamp_cross_covariance();
         let k: Vec<f64> = (0..n).map(|j| self.p[j][event_idx] / s).collect();
         let y = z - self.x[event_idx];
         for j in 0..n {
@@ -472,7 +517,17 @@ impl StateEstimator for KalmanFilterEstimator {
         };
         let dq_diag = self.config.process_noise_per_ns * elapsed_ns as f64;
         let scale = self.config.correlation_process_noise_scale;
-        for (&(ci, cj), &r) in &corr.correlations {
+        // Iterate the correlation pairs in a deterministic order. `correlations` is a HashMap,
+        // and floating-point addition is non-associative, so HashMap iteration order (randomized
+        // per process) would make the accumulated off-diagonals — and thus the whole run —
+        // non-reproducible. Sorting the keys makes the simulation deterministic.
+        let mut pairs: Vec<(usize, usize, f64)> = corr
+            .correlations
+            .iter()
+            .map(|(&(ci, cj), &r)| (ci, cj, r))
+            .collect();
+        pairs.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        for (ci, cj, r) in pairs {
             let Some(&fi) = filter.event_index.get(&(ci as EventId)) else {
                 continue;
             };
@@ -483,6 +538,9 @@ impl StateEstimator for KalmanFilterEstimator {
             filter.p[fi][fj] += delta;
             filter.p[fj][fi] += delta;
         }
+        // Keep the accumulated off-diagonals within the pairwise PSD bound so the stored
+        // covariance never drifts to a state that would blow up the next measurement's gain.
+        filter.clamp_cross_covariance();
     }
 }
 
@@ -601,11 +659,13 @@ mod tests {
             kf.time_update(1, 1, elapsed_ns);
         }
         let rate_b_after = kf.rate(1, 1);
-        // Require a shift of at least 1% of r * z_innovation as a conservative floor.
-        // A test that only checks > rate_b_before passes on IEEE 754 noise; this
-        // threshold requires genuine signal from the cross-covariance mechanism.
+        // Require a shift well above IEEE 754 noise so the test proves genuine cross-covariance
+        // signal (a bare `> rate_b_before` would pass on FP noise). The pairwise PSD clamp now
+        // bounds the off-diagonal, so the propagated shift is smaller than the pre-clamp value
+        // but still many orders of magnitude above noise on these ~1e-6 quantities; the floor is
+        // a conservative fraction of the innovation rather than the old unbounded 1%.
         let z_innovation = 3e-6 - 1e-6_f64;
-        let min_shift = 0.01 * 0.8 * z_innovation;
+        let min_shift = 1e-4 * z_innovation;
         assert!(
             rate_b_after > rate_b_before + min_shift,
             "correlated partner rate should increase by at least {min_shift:.1e}: \
@@ -638,31 +698,32 @@ mod tests {
     }
 
     #[test]
-    fn quantum_step_adds_off_diagonal_noise() {
+    fn quantum_step_adds_bounded_off_diagonal_noise() {
         let mut kf = make_kf_with_correlation(0.5);
         kf.measurement_update(1, 0, 1e-6, 1e-12, 100, 1_000);
         kf.measurement_update(1, 1, 1e-6, 1e-12, 100, 1_000);
 
-        let p_off_before = {
-            let f = &kf.threads[&1];
-            let i0 = f.event_index[&0];
-            let i1 = f.event_index[&1];
-            f.p[i0][i1]
-        };
-
-        // quantum_step should add correlated process noise to P[0,1].
+        // quantum_step adds correlated process noise to P[0,1], but the clamp must keep it
+        // within the Cauchy–Schwarz bound |P[0,1]| <= sqrt(P[0,0]*P[1,1]).
         kf.quantum_step(1, 1_000_000);
 
-        let p_off_after = {
-            let f = &kf.threads[&1];
-            let i0 = f.event_index[&0];
-            let i1 = f.event_index[&1];
-            f.p[i0][i1]
-        };
+        let f = &kf.threads[&1];
+        let i0 = f.event_index[&0];
+        let i1 = f.event_index[&1];
+        let p00 = f.p[i0][i0];
+        let p11 = f.p[i1][i1];
+        let p01 = f.p[i0][i1];
+        let bound = (p00 * p11).sqrt();
 
+        // Positive r should still produce a positive off-diagonal (signal preserved)...
         assert!(
-            p_off_after >= p_off_before,
-            "off-diagonal P should not decrease after quantum_step with positive r"
+            p01 > 0.0,
+            "positive correlation should yield a positive off-diagonal, got {p01:.3e}"
+        );
+        // ...but it must not exceed the PSD bound.
+        assert!(
+            p01.abs() <= bound * (1.0 + 1e-9),
+            "off-diagonal {p01:.3e} exceeds PSD bound sqrt(P[0,0]*P[1,1])={bound:.3e}"
         );
     }
 
@@ -771,6 +832,71 @@ mod tests {
         assert!(
             p01 <= psd_limit * (1.0 + 1e-10),
             "seed violates PSD: |P[0,1]|={p01:.3e} > sqrt(P[0,0]*P[1,1])={psd_limit:.3e}"
+        );
+    }
+
+    #[test]
+    fn correlation_does_not_diverge_under_production_config() {
+        // Regression for the cross-covariance blowup: under the production config
+        // (process_noise_per_ns=1e-8, initial_variance=1000, correlation_process_noise_scale=0.5)
+        // strong correlation + an unmeasured partner used to drive nRMSE to 1e10+. The pairwise
+        // PSD clamp must keep P bounded and the partner estimate finite and sane.
+        let mut corr_map = HashMap::new();
+        corr_map.insert((0usize, 1usize), 0.9_f64);
+        let mut event_index = HashMap::new();
+        event_index.insert(0u32, 0usize);
+        event_index.insert(1u32, 1usize);
+        let correlation = Some(CorrelationData {
+            correlations: corr_map,
+            variances: vec![1e-12_f64; 2],
+            event_index,
+        });
+        let config = KalmanConfig {
+            process_noise_per_ns: 1e-8,
+            min_measurement_variance: 1e-18,
+            initial_variance: 1000.0,
+            uncertainty_reference_variance: 0.5,
+            correlation_process_noise_scale: 0.5,
+            correlation_path: None,
+        };
+        let mut kf = KalmanFilterEstimator {
+            threads: HashMap::new(),
+            snapshots: HashMap::new(),
+            config,
+            correlation,
+        };
+
+        let elapsed_ns: u64 = 10_000_000; // production q-schedule
+        let observed = 1e-6_f64; // event 0's observed rate
+
+        // Warm-up so both events exist.
+        kf.measurement_update(1, 0, observed, 1e-9, 100, elapsed_ns);
+        kf.measurement_update(1, 1, observed, 1e-9, 100, elapsed_ns);
+
+        // Repeatedly observe event 0 while event 1 only ages: the path that diverged before.
+        for t in 2..120u64 {
+            kf.quantum_step(1, elapsed_ns);
+            kf.measurement_update(1, 0, observed, 1e-9, 100, t * elapsed_ns);
+            kf.time_update(1, 1, elapsed_ns);
+
+            // The pairwise PSD bound must hold every step.
+            let f = &kf.threads[&1];
+            let i0 = f.event_index[&0];
+            let i1 = f.event_index[&1];
+            let bound = (f.p[i0][i0] * f.p[i1][i1]).sqrt();
+            assert!(
+                f.p[i0][i1].abs() <= bound * (1.0 + 1e-6),
+                "step {t}: off-diagonal {:.3e} exceeds PSD bound {bound:.3e}",
+                f.p[i0][i1]
+            );
+        }
+
+        // The partner estimate must stay finite and within a sane multiple of the observed rate
+        // (pre-fix this reached ~1e10 * observed).
+        let rate_partner = kf.rate(1, 1);
+        assert!(
+            rate_partner.is_finite() && rate_partner.abs() < 1e3 * observed,
+            "partner rate diverged: {rate_partner:.3e} (observed {observed:.3e})"
         );
     }
 }
