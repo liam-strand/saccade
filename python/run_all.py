@@ -185,7 +185,7 @@ def collect(r: Runner) -> dict[str, Path | None]:
     before = snapshot_run_dirs()
     if r.run(
         ["q2_accuracy.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results"],
+         "--results-dir", "./results", "--jobs", "16"],
         "q2_accuracy",
     ):
         if not r.dry_run:
@@ -202,7 +202,7 @@ def collect(r: Runner) -> dict[str, Path | None]:
     before = snapshot_run_dirs()
     if r.run(
         ["q3_kf_variants.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results"],
+         "--results-dir", "./results", "--jobs", "16"],
         "q3_kf_variants",
     ):
         if not r.dry_run:
@@ -245,7 +245,8 @@ def collect(r: Runner) -> dict[str, Path | None]:
     before = snapshot_run_dirs()
     if r.run(
         ["q4_llm_guidance.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--estimator", "ema", "--llm-trials", "3"],
+         "--results-dir", "./results", "--estimator", "ema", "--llm-trials", "3",
+         "--jobs", "16"],
         "q4_llm_guidance",
     ):
         if not r.dry_run:
