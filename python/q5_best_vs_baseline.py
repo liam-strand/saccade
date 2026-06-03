@@ -145,6 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Process only this workload slug",
     )
+    p.add_argument(
+        "--llm-model",
+        type=str,
+        default="google/gemma-4-26b-a4b-it",
+        help="Model name for LLM-driven schedulers; uses OpenRouter unless sim_utils is customized.",
+    )
     p.add_argument("--q-schedule", type=int, default=10_000_000)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--noise-floor-json", type=Path, default=None)
@@ -231,7 +237,7 @@ def main() -> None:
                 run_simulate(
                     args.saccade, args.library, trace_path,
                     scheduler, estimator, est_trace,
-                    FIXED_NUM_SLOTS, args.q_schedule, args.seed,
+                    FIXED_NUM_SLOTS, args.q_schedule, args.llm_model, args.seed,
                 )
                 eval_json = run_evaluate(args.saccade, trace_path, est_trace)
                 mn = median_nrmse(eval_json)

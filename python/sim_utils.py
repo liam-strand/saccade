@@ -43,6 +43,17 @@ FIXED_NUM_SLOTS = 4
 # ---------------------------------------------------------------------------
 
 
+def _read_tail(path: Path, n_lines: int = 40) -> str:
+    """Return the last *n_lines* of a text file, or an explanatory note on failure."""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return f"(could not read {path}: {exc})"
+    tail = lines[-n_lines:]
+    prefix = f"(last {len(tail)} of {len(lines)} lines; full log: {path})\n"
+    return prefix + "\n".join(tail)
+
+
 def run_simulate(
     saccade: Path,
     library: Path,
@@ -161,6 +172,10 @@ def run_batch_simulate(
 
     *base_config* is forwarded as the global ``--config`` flag; per-combo
     scheduler/estimator/seed/guidance override those values.
+
+    saccade's stderr is streamed to ``<tmp_dir>/batch_<workload>_stderr.log``
+    so failures are diagnosable.  On a non-zero exit a ``CalledProcessError`` is
+    raised with the tail of that log attached as ``.stderr``.
     """
     spec_path = tmp_dir / f"batch_spec_{rates_trace.stem}.json"
     spec_path.write_text(json.dumps(combos))
@@ -168,13 +183,18 @@ def run_batch_simulate(
         saccade, library, rates_trace, spec_path,
         num_slots, q_schedule, jobs, llm_model, base_config,
     )
-    subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        cwd=REPO_ROOT,
-    )
+    log_path = tmp_dir / f"batch_{rates_trace.stem}_stderr.log"
+    with log_path.open("w") as logf:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=logf,
+            cwd=REPO_ROOT,
+        )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=None, stderr=_read_tail(log_path),
+        )
 
 
 def build_evaluate_cmd(
@@ -317,6 +337,7 @@ def simulate_and_eval(
     estimator: str,
     num_slots: int,
     q_schedule: int,
+    llm_model: str,
     seed: int | None,
     tmp_dir: Path,
     workload: str,
@@ -331,7 +352,7 @@ def simulate_and_eval(
     )
     run_simulate(
         saccade, library, rates_trace, scheduler, estimator,
-        trace_path, num_slots, q_schedule, seed, base_config, guidance,
+        trace_path, num_slots, q_schedule, llm_model, seed, base_config, guidance,
     )
     return run_evaluate(saccade, rates_trace, trace_path)
 
@@ -344,6 +365,7 @@ def run_combo(
     estimator: str,
     num_slots: int,
     q_schedule: int,
+    llm_model: str,
     seed: int | None,
     llm_trials: int,
     tmp_dir: Path,
@@ -364,7 +386,7 @@ def run_combo(
     for trial in range(n_trials):
         eval_json = simulate_and_eval(
             saccade, library, rates_trace, scheduler, estimator,
-            num_slots, q_schedule, seed, tmp_dir, workload, trial,
+            num_slots, q_schedule, llm_model, seed, tmp_dir, workload, trial,
             base_config, guidance,
         )
         mn = median_nrmse(eval_json)
@@ -395,6 +417,7 @@ def run_combo_extended(
     estimator: str,
     num_slots: int,
     q_schedule: int,
+    llm_model: str,
     seed: int | None,
     llm_trials: int,
     tmp_dir: Path,
@@ -426,7 +449,7 @@ def run_combo_extended(
     for trial in range(n_trials):
         eval_json = simulate_and_eval(
             saccade, library, rates_trace, scheduler, estimator,
-            num_slots, q_schedule, seed, tmp_dir, workload, trial,
+            num_slots, q_schedule, llm_model, seed, tmp_dir, workload, trial,
             base_config, guidance,
         )
         mn = median_nrmse(eval_json)

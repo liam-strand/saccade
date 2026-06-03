@@ -60,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Estimator to pair with each LLM scheduler (default: kalman)",
     )
     p.add_argument(
+        "--llm-model",
+        type=str,
+        default="google/gemma-4-26b-a4b-it",
+        help="Model name for LLM-driven schedulers; uses OpenRouter unless sim_utils is customized.",
+    )
+    p.add_argument(
         "--base-config",
         type=Path,
         default=None,
@@ -162,6 +168,7 @@ def main() -> None:
                 estimator=args.estimator,
                 num_slots=FIXED_NUM_SLOTS,
                 q_schedule=args.q_schedule,
+                llm_model=args.llm_model,
                 seed=args.seed,
                 llm_trials=args.llm_trials,
                 tmp_dir=tmp_dir,

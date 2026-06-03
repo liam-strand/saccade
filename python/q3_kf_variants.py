@@ -162,7 +162,7 @@ def main() -> None:
             run_batch_simulate(
                 args.saccade, args.library, trace_path, batch_spec,
                 FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
-                tmp_dir,
+                tmp_dir, "google/gemma-4-26b-a4b-it",
                 base_config=None,  # per-combo configs carry all hyperparams
             )
         except subprocess.CalledProcessError as exc:
