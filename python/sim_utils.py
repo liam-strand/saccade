@@ -159,6 +159,7 @@ def run_batch_simulate(
     tmp_dir: Path,
     llm_model: str,
     base_config: Path | None = None,
+    spec_tag: str = "",
 ) -> None:
     """Run multiple simulate combos sharing one ``saccade simulate --batch`` process.
 
@@ -173,17 +174,23 @@ def run_batch_simulate(
     *base_config* is forwarded as the global ``--config`` flag; per-combo
     scheduler/estimator/seed/guidance override those values.
 
-    saccade's stderr is streamed to ``<tmp_dir>/batch_<workload>_stderr.log``
+    *spec_tag* disambiguates the per-call spec/log filenames.  Pass a unique
+    tag (e.g. a trial index) when launching several batches for the *same*
+    rates_trace concurrently, so their ``batch_spec_*.json`` / ``*_stderr.log``
+    files don't collide.  Defaults to "" (filename keyed by trace stem only).
+
+    saccade's stderr is streamed to ``<tmp_dir>/batch_<workload>[_<tag>]_stderr.log``
     so failures are diagnosable.  On a non-zero exit a ``CalledProcessError`` is
     raised with the tail of that log attached as ``.stderr``.
     """
-    spec_path = tmp_dir / f"batch_spec_{rates_trace.stem}.json"
+    suffix = f"_{spec_tag}" if spec_tag else ""
+    spec_path = tmp_dir / f"batch_spec_{rates_trace.stem}{suffix}.json"
     spec_path.write_text(json.dumps(combos))
     cmd = build_batch_simulate_cmd(
         saccade, library, rates_trace, spec_path,
         num_slots, q_schedule, jobs, llm_model, base_config,
     )
-    log_path = tmp_dir / f"batch_{rates_trace.stem}_stderr.log"
+    log_path = tmp_dir / f"batch_{rates_trace.stem}{suffix}_stderr.log"
     with log_path.open("w") as logf:
         result = subprocess.run(
             cmd,
