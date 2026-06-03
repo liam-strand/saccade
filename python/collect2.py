@@ -50,12 +50,6 @@ SPEC_BENCHMARKS = [
             "refrate_output.tga",
         ],
     },
-    {
-        "suite": "520.omnetpp_r",
-        "slug": "spec_520_omnetpp_r",
-        # sim-time-limit=2.25s in the ini completes in ~0.2s wall-clock; extend it.
-        "args": ["-c", "General", "-r", "0", "--sim-time-limit=200s"],
-    },
 ]
 
 
@@ -258,7 +252,7 @@ def main() -> None:
         nargs="+",
         metavar="SLUG",
         default=None,
-        help="Run only benchmarks with these slugs (e.g. spec_520_omnetpp_r spec_538_imagick_r)",
+        help="Run only benchmarks with these slugs (e.g. spec_531_deepsjeng_r spec_538_imagick_r)",
     )
     parser.add_argument(
         "--replace",

@@ -18,10 +18,5 @@
       "refrate_output.tga"
     ],
     "cwd": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/538.imagick_r/run/run_base_refrate__label_-m64.0000"
-  },
-  "spec_520_omnetpp_r": {
-    "binary": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/520.omnetpp_r/exe/omnetpp_r_base.%{label}-m64",
-    "args": ["-c", "General", "-r", "0", "--sim-time-limit=200s"],
-    "cwd": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/520.omnetpp_r/run/run_base_refrate__label_-m64.0000"
   }
 }
