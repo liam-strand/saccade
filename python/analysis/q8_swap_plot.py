@@ -30,6 +30,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+plt.rcParams.update({"font.size": 14})
+
 RAW_CSV = "results/q8_swap_latency_raw.csv"
 OUT_BREAKDOWN = "results/q8_swap_breakdown.png"
 OUT_DRIFT = "results/q8_swap_drift.png"
@@ -64,37 +66,43 @@ def quanta(rows: list[dict]) -> list[int]:
     return sorted({r["q"] for r in rows})
 
 
+def _med_iqr(vals: list[int]) -> tuple[float, float, float]:
+    """Median and the p25/p75 distances from it (for asymmetric error bars), in ms."""
+    a = np.array(vals) / 1e6
+    med = np.median(a)
+    return med, med - np.percentile(a, 25), np.percentile(a, 75) - med
+
+
 def plot_breakdown(rows: list[dict]) -> None:
     qs = quanta(rows)
-    reconfig_med, quiesce_med = [], []
+    quiesce_med, quiesce_lo, quiesce_hi = [], [], []
+    reconfig_med, reconfig_lo, reconfig_hi = [], [], []
     for q in qs:
         real = [r for r in rows if r["q"] == q and r["slots_changed"] > 0]
-        reconfig_med.append(np.median([r["reconfig_ns"] for r in real]) if real else np.nan)
-        quiesce_med.append(np.median([r["quiesce_ns"] for r in real]) if real else np.nan)
+        qm, ql, qh = _med_iqr([r["quiesce_ns"] for r in real]) if real else (np.nan, 0, 0)
+        rm, rl, rh = _med_iqr([r["reconfig_ns"] for r in real]) if real else (np.nan, 0, 0)
+        quiesce_med.append(qm); quiesce_lo.append(ql); quiesce_hi.append(qh)
+        reconfig_med.append(rm); reconfig_lo.append(rl); reconfig_hi.append(rh)
 
     x = np.arange(len(qs))
     w = 0.38
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(x - w / 2, np.array(quiesce_med) / 1e6, w, label="quiesce (stop-the-world spin)", color="crimson")
-    ax.bar(x + w / 2, np.array(reconfig_med) / 1e6, w, label="reconfig (perf_event_open + map)", color="steelblue")
+    ax.bar(
+        x - w / 2, quiesce_med, w, label="quiesce (stop-the-world spin)", color="crimson",
+        yerr=[quiesce_lo, quiesce_hi], capsize=3, error_kw={"elinewidth": 1, "ecolor": "black", "alpha": 0.6},
+    )
+    ax.bar(
+        x + w / 2, reconfig_med, w, label="reconfig (perf_event_open + map)", color="steelblue",
+        yerr=[reconfig_lo, reconfig_hi], capsize=3, error_kw={"elinewidth": 1, "ecolor": "black", "alpha": 0.6},
+    )
 
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels([fmt_ms(q) for q in qs])
     ax.set_xlabel("requested quantum (--q-schedule)")
     ax.set_ylabel("median per-swap time (ms, log scale)")
-    ax.set_title(
-        "Q8: where the slot-swap time goes\n"
-        "quiesce spin-wait vs true counter reconfiguration (real swaps only)"
-    )
     ax.legend()
     ax.grid(True, axis="y", which="both", alpha=0.3)
-    # Both timers accumulate per changed slot, so a 4-slot cold-start swap pools
-    # with 1-slot warm swaps; the raw CSV retains slots_changed for per-slot views.
-    ax.text(
-        0.99, -0.13, "medians pool across slots_changed (see raw CSV to normalize per slot)",
-        transform=ax.transAxes, ha="right", va="top", fontsize=8, color="gray",
-    )
     fig.tight_layout()
     fig.savefig(OUT_BREAKDOWN, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_BREAKDOWN}")
@@ -120,10 +128,6 @@ def plot_drift(rows: list[dict]) -> None:
 
     ax.set_xlabel("execution order_index (shuffled across the session)")
     ax.set_ylabel("swap_ns (ms)")
-    ax.set_title(
-        "Q8 drift check: swap latency vs execution order\n"
-        "trend should be flat per quantum if there is no thermal/load drift"
-    )
     ax.legend(title="quantum", ncol=2, fontsize=8)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -151,10 +155,6 @@ def plot_quantum(rows: list[dict]) -> None:
     ax.set_yscale("log")
     ax.set_xlabel("requested quantum --q-schedule (ms, log)")
     ax.set_ylabel("ms (log)")
-    ax.set_title(
-        "Q8 requested vs realized quantum\n"
-        "the gap above the dashed line is the rotation-period floor set by the swap"
-    )
     ax.legend()
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()

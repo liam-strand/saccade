@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
 
+plt.rcParams.update({"font.size": 14})
+
 CSV = "results/q2_scheduler_estimator.csv"
 OUT = "results/q2_heatmap.png"
 
@@ -52,13 +54,13 @@ raw = np.array(
 col_min = np.nanmin(raw, axis=0, keepdims=True)
 rel = raw / col_min
 
-fig, ax = plt.subplots(figsize=(11, 14))
+fig, ax = plt.subplots(figsize=(14, 18))
 im = ax.imshow(rel, aspect="auto", cmap="YlOrRd", norm=LogNorm(vmin=1.0, vmax=np.nanmax(rel)))
 
 ax.set_xticks(range(len(workloads)))
-ax.set_xticklabels(workloads, rotation=35, ha="right", fontsize=9)
+ax.set_xticklabels(workloads, rotation=35, ha="right")
 ax.set_yticks(range(len(row_labels)))
-ax.set_yticklabels(row_labels, fontsize=8, family="monospace")
+ax.set_yticklabels(row_labels, family="monospace")
 
 # Light separators between scheduler groups (every 3 estimator rows).
 for i in range(len(ESTIMATORS), len(row_keys), len(ESTIMATORS)):
@@ -78,7 +80,6 @@ for j in range(len(workloads)):
             f"{v:.2f}",
             ha="center",
             va="center",
-            fontsize=7,
             color="black" if rel[i, j] < 3 else "white",
             fontweight="bold" if is_best else "normal",
         )
@@ -88,13 +89,8 @@ for j in range(len(workloads)):
             )
 
 cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-cbar.set_label("median nRMSE relative to best combo for that workload\n(1.0 = best, log scale)", fontsize=9)
+cbar.set_label("median nRMSE relative to best combo for that workload\n(1.0 = best, log scale)")
 
-ax.set_title(
-    "Q2 sweep: scheduler × estimator accuracy by workload\n"
-    "(cell = raw median nRMSE; green box = best combo per workload)",
-    fontsize=12,
-)
 fig.tight_layout()
 fig.savefig(OUT, dpi=130, bbox_inches="tight")
 print(f"wrote {OUT}  ({raw.shape[0]} combos × {raw.shape[1]} workloads)")
