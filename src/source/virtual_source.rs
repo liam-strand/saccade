@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::event::EventId;
 use crate::sample::RawSample;
-use crate::source::SampleSource;
+use crate::source::{SampleSource, SwapStats};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
@@ -117,11 +117,25 @@ impl SampleSource for VirtualSampleSource {
 
     fn apply_schedule(
         &mut self,
-        _old_set: &[EventId],
+        old_set: &[EventId],
         new_set: &[EventId],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<SwapStats, Box<dyn std::error::Error>> {
+        // Simulation does no real reconfiguration; report only how many slots
+        // changed so the timing fields stay zero (and honest) for virtual runs.
+        let slots_changed = if old_set.is_empty() {
+            new_set.len()
+        } else {
+            old_set
+                .iter()
+                .zip(new_set.iter())
+                .filter(|(old, new)| old != new)
+                .count()
+        };
         self.active_set = new_set.to_vec();
-        Ok(())
+        Ok(SwapStats {
+            slots_changed,
+            ..SwapStats::default()
+        })
     }
 
     fn num_slots(&self) -> usize {

@@ -51,16 +51,23 @@ impl HardwareCounters {
     ///
     /// Pauses eBPF tracking, opens fresh `perf_event` FDs for every CPU, updates the BPF map,
     /// then resumes tracking.
+    ///
+    /// Returns `(quiesce_ns, reconfig_ns)`: the time spent in the `stop_counters` spin-wait
+    /// versus the actual `perf_event_open`/map-update reconfiguration.
     pub fn update_slot(
         &mut self,
         skel: &mut SamplerSkel<'static>,
         slot_idx: usize,
         event_id: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
         let bpf_map = &self.bpf_maps[slot_idx];
         let event = self.event_registry.get_event(event_id);
 
+        let quiesce_start = std::time::Instant::now();
         self.stop_counters(skel);
+        let quiesce_ns = quiesce_start.elapsed().as_nanos() as u64;
+
+        let reconfig_start = std::time::Instant::now();
 
         self.active_counters[slot_idx]
             .iter_mut()
@@ -99,8 +106,9 @@ impl HardwareCounters {
             });
 
         self.start_counters(skel);
+        let reconfig_ns = reconfig_start.elapsed().as_nanos() as u64;
 
-        Ok(())
+        Ok((quiesce_ns, reconfig_ns))
     }
 
     /// Signal the eBPF program to stop sampling and spin-wait until all CPUs have acknowledged.

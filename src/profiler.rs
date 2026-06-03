@@ -54,11 +54,19 @@ impl<'s> Profiler<'s> {
 
         // 5. Apply schedule
         let swap_start = std::time::Instant::now();
-        self.source
+        let stats = self
+            .source
             .apply_schedule(&self.active_set, &decision.active_events)
             .unwrap();
         let swap_ns = swap_start.elapsed().as_nanos();
-        tracing::debug!(swap_ns, quantum_ns = elapsed_ns, "slot_swap");
+        tracing::debug!(
+            swap_ns,
+            quiesce_ns = stats.quiesce_ns,
+            reconfig_ns = stats.reconfig_ns,
+            slots_changed = stats.slots_changed,
+            quantum_ns = elapsed_ns,
+            "slot_swap"
+        );
         self.active_set = decision.active_events;
 
         // 6. Emit to all sinks

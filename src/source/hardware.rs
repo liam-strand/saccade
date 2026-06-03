@@ -4,7 +4,7 @@ use crate::event::{EventId, EventRegistry};
 use crate::hardware_counters::HardwareCounters;
 use crate::sample::{MAX_COUNTERS, MAX_CPUS, RawSample, SampleType, WireSample};
 use crate::sampler::SamplerSkelBuilder;
-use crate::source::SampleSource;
+use crate::source::{SampleSource, SwapStats};
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use perf_event::{Builder, events};
@@ -201,10 +201,15 @@ impl SampleSource for HardwareSampleSource {
         &mut self,
         old_set: &[EventId],
         new_set: &[EventId],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<SwapStats, Box<dyn std::error::Error>> {
+        let mut stats = SwapStats::default();
         if old_set.is_empty() {
             for (i, &id) in new_set.iter().enumerate() {
-                self.hw_counters.update_slot(&mut self.skel, i, id)?;
+                let (quiesce_ns, reconfig_ns) =
+                    self.hw_counters.update_slot(&mut self.skel, i, id)?;
+                stats.quiesce_ns += quiesce_ns;
+                stats.reconfig_ns += reconfig_ns;
+                stats.slots_changed += 1;
                 for cpu_baselines in self.baselines.iter_mut() {
                     cpu_baselines[i] = 0;
                 }
@@ -212,8 +217,12 @@ impl SampleSource for HardwareSampleSource {
         } else {
             for (i, &old_id) in old_set.iter().enumerate() {
                 if old_id != new_set[i] {
-                    self.hw_counters
-                        .update_slot(&mut self.skel, i, new_set[i])?;
+                    let (quiesce_ns, reconfig_ns) =
+                        self.hw_counters
+                            .update_slot(&mut self.skel, i, new_set[i])?;
+                    stats.quiesce_ns += quiesce_ns;
+                    stats.reconfig_ns += reconfig_ns;
+                    stats.slots_changed += 1;
                     // Reset baseline only for this slot; the next RESUME marker
                     // will re-anchor it from the current absolute counter value.
                     for cpu_baselines in self.baselines.iter_mut() {
@@ -222,7 +231,7 @@ impl SampleSource for HardwareSampleSource {
                 }
             }
         }
-        Ok(())
+        Ok(stats)
     }
 
     fn num_slots(&self) -> usize {
