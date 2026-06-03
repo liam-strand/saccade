@@ -72,6 +72,23 @@ EXPECTED_FIGURES = [
 
 
 # --------------------------------------------------------------------------- #
+# Time formatting helpers
+# --------------------------------------------------------------------------- #
+def _clock() -> str:
+    """Wall-clock time-of-day, e.g. 15:48:40."""
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _dur(seconds: float) -> str:
+    """Human-friendly elapsed time, e.g. 4.2s or 3m12s or 1h05m."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    return f"{int(seconds // 3600)}h{int((seconds % 3600) // 60):02d}m"
+
+
+# --------------------------------------------------------------------------- #
 # Run bookkeeping
 # --------------------------------------------------------------------------- #
 class Runner:
@@ -80,40 +97,48 @@ class Runner:
     def __init__(self, *, dry_run: bool, fail_fast: bool) -> None:
         self.dry_run = dry_run
         self.fail_fast = fail_fast
-        self.results: list[tuple[str, str, str]] = []  # (label, status, detail)
+        # (label, status, detail, duration_seconds | None)
+        self.results: list[tuple[str, str, str, float | None]] = []
 
-    def record(self, label: str, status: str, detail: str = "") -> None:
-        self.results.append((label, status, detail))
+    def record(self, label: str, status: str, detail: str = "",
+               duration: float | None = None) -> None:
+        self.results.append((label, status, detail, duration))
 
     def run(self, cmd: list[str], label: str) -> bool:
         """Run `uv run python <cmd>` in PY_DIR. Returns True on success."""
         printable = " ".join(str(c) for c in cmd)
-        print(f"\n>>> [{label}] uv run python {printable}", flush=True)
+        print(f"\n>>> [{_clock()}] [{label}] uv run python {printable}", flush=True)
         if self.dry_run:
             self.record(label, "DRY")
             return True
+        start = time.monotonic()
         try:
             proc = subprocess.run(
                 ["uv", "run", "python", *[str(c) for c in cmd]],
                 cwd=PY_DIR,
             )
         except Exception as exc:  # noqa: BLE001 - surface any spawn failure
-            print(f"!!! [{label}] failed to launch: {exc}", file=sys.stderr)
-            self.record(label, "FAIL", str(exc))
+            elapsed = time.monotonic() - start
+            print(f"!!! [{_clock()}] [{label}] failed to launch: {exc} "
+                  f"({_dur(elapsed)})", file=sys.stderr)
+            self.record(label, "FAIL", str(exc), elapsed)
             if self.fail_fast:
                 raise SystemExit(f"--fail-fast: aborting after {label}")
             return False
+        elapsed = time.monotonic() - start
         if proc.returncode != 0:
-            print(f"!!! [{label}] exited {proc.returncode}", file=sys.stderr)
-            self.record(label, "FAIL", f"exit {proc.returncode}")
+            print(f"!!! [{_clock()}] [{label}] exited {proc.returncode} "
+                  f"({_dur(elapsed)})", file=sys.stderr)
+            self.record(label, "FAIL", f"exit {proc.returncode}", elapsed)
             if self.fail_fast:
                 raise SystemExit(f"--fail-fast: aborting after {label}")
             return False
-        self.record(label, "OK")
+        print(f"<<< [{_clock()}] [{label}] done in {_dur(elapsed)}", flush=True)
+        self.record(label, "OK", "", elapsed)
         return True
 
     def skip(self, label: str, reason: str) -> None:
-        print(f"--- [{label}] SKIPPED: {reason}", flush=True)
+        print(f"--- [{_clock()}] [{label}] SKIPPED: {reason}", flush=True)
         self.record(label, "SKIP", reason)
 
 
@@ -397,9 +422,10 @@ def print_summary(r: Runner, started_at: float, *, dry_run: bool) -> int:
     print("\n" + "=" * 70)
     print("RUN SUMMARY")
     print("=" * 70)
-    width = max((len(label) for label, _, _ in r.results), default=10)
-    for label, status, detail in r.results:
-        line = f"  {status:<4} {label:<{width}}"
+    width = max((len(label) for label, _, _, _ in r.results), default=10)
+    for label, status, detail, duration in r.results:
+        dur = _dur(duration) if duration is not None else ""
+        line = f"  {status:<4} {label:<{width}}  {dur:>7}"
         if detail:
             line += f"  ({detail})"
         print(line)
@@ -419,8 +445,10 @@ def print_summary(r: Runner, started_at: float, *, dry_run: bool) -> int:
             rel = path.relative_to(RESULTS_DIR.parent)
             print(f"  [{fresh:>5}] {rel}")
 
-    n_fail = sum(1 for _, s, _ in r.results if s == "FAIL")
-    print(f"\n{n_fail} failure(s).")
+    n_fail = sum(1 for _, s, _, _ in r.results if s == "FAIL")
+    total = sum(d for _, _, _, d in r.results if d is not None)
+    print(f"\n{n_fail} failure(s). Total step time: {_dur(total)} "
+          f"(wall clock: {_dur(time.time() - started_at)}).")
     return 1 if n_fail else 0
 
 
