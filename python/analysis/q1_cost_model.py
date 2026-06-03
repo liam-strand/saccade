@@ -8,9 +8,12 @@ The grid plots in q1_plot.py answer "how big is the overhead". These two answer
                         1. fixed attach/teardown  -- constant intercept (~49 ms)
                         2. one-quantum teardown    -- the q_schedule-dependent part
                                                       of startup (≈ 1 x q_schedule)
-                        3. runtime-scaling sampling -- everything left over, which
-                                                      grows as workload runs longer
-                                                      and q_sample shrinks.
+                        3. runtime instrumentation floor -- everything left over.
+                                                      Despite the name this does
+                                                      NOT scale with sampling: the
+                                                      q1_sample_collapse figure shows
+                                                      overhead is independent of the
+                                                      delivered-sample count (R²≈0).
                       The runtime layer is the median across q_sample; the cap
                       error bar spans its min..max across q_sample.
 
@@ -125,7 +128,7 @@ def plot_cost_model(overhead_s: dict, startup_s: dict, intercept_s: float, slope
                linewidth=0.4, label="one-quantum teardown")
         top = fixed + quantum
         ax.bar(x, rt_med, width=0.62, bottom=top, color=C_RUNTIME, edgecolor="black",
-               linewidth=0.4, label="runtime-scaling sampling")
+               linewidth=0.4, label="runtime instrumentation floor")
         # Cap error bar = runtime min..max across q_sample, anchored on the layer.
         ax.errorbar(x, top + rt_med, yerr=[rt_med - rt_lo, rt_hi - rt_med], fmt="none",
                     ecolor="black", elinewidth=1.0, capsize=4, alpha=0.7)
@@ -137,13 +140,7 @@ def plot_cost_model(overhead_s: dict, startup_s: dict, intercept_s: float, slope
         ax.grid(axis="y", alpha=0.3)
 
     axes[0].set_ylabel("overhead (ms, absolute)")
-    axes[0].legend(fontsize=12, loc="upper left")
-    fig.suptitle(
-        "Q1: overhead cost model — fixed startup + one quantum + runtime sampling\n"
-        f"startup ≈ {intercept_s * 1000:.0f} ms + {slope * 1e9:.2f}×q_schedule; "
-        "runtime layer = median across q_sample (caps span min–max)",
-        fontsize=14,
-    )
+    axes[0].legend(fontsize=14, loc="upper left")
     fig.tight_layout()
     fig.savefig(OUT_COST, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_COST}")
@@ -189,7 +186,7 @@ def _sweep_panel(ax, runs: list[tuple], axis_idx: int, knob_values: list[int],
         ax.plot(xs, med, "o-", color=SINK_COLORS[sink], lw=2.0, ms=6, label=f"{sink}")
 
     ax.axhline(floor, color="black", ls="--", lw=1.3)
-    ax.text(xs[-1], floor, f" floor ≈ {floor:.1f}%", color="black", fontsize=12,
+    ax.text(xs[-1], floor, f" floor ≈ {floor:.1f}%", color="black", fontsize=14,
             va="bottom", ha="right")
     ax.set_xscale("log")
     ax.set_xticks(xs)
@@ -208,16 +205,8 @@ def plot_insensitivity(baseline_s: float) -> None:
     _sweep_panel(ax2, runs, 1, Q_SCHEDULE_NS, "q_schedule (rotation period)", floor)
 
     ax1.set_ylabel("wall-clock overhead (% of baseline)")
-    ax1.set_title("sweep q_sample — flat (sampling is cheap)")
-    ax2.set_title("sweep q_schedule — rises as rotation coarsens")
     # Single shared legend (sinks + band) from the first panel.
-    ax1.legend(fontsize=12, loc="upper right", title="sink", title_fontsize=12)
-    fig.suptitle(
-        "Q1: overhead is insensitive to sampling rate, but grows ~2× as the scheduling period coarsens\n"
-        f"band = pooled 25–75th pct of reps; lines = per-sink median; "
-        f"floor ≈ {floor:.1f}% (baseline {baseline_s:.2f} s)",
-        fontsize=14,
-    )
+    ax1.legend(fontsize=14, loc="upper right", title="sink", title_fontsize=14)
     fig.tight_layout()
     fig.savefig(OUT_INSENS, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_INSENS}")

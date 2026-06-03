@@ -1,9 +1,13 @@
-"""Q1 overhead vs. delivered-sample count: the "overhead collapses" figure.
+"""Q1 overhead vs. delivered-sample count: testing the per-sample cost model.
 
-Hypothesis: wall-clock overhead is proportional to the number of samples
-actually delivered (ringbuf submissions), not to the configuration knobs
-themselves.  If true, every (q_schedule, q_sample, sink) combination should
-collapse onto a single OLS line when plotted as overhead_ms ~ samples_emitted.
+Hypothesis under test: wall-clock overhead is proportional to the number of
+samples actually delivered (ringbuf submissions), not to the configuration
+knobs themselves.  If true, every (q_schedule, q_sample, sink) combination
+collapses onto a single OLS line as overhead_ms ~ samples_emitted.
+
+Result (see the figure): it does NOT collapse — R² ≈ 0.  Overhead is a roughly
+constant floor independent of how many samples are delivered, so the per-sample
+marginal cost is negligible relative to a fixed always-on instrumentation cost.
 
 Reads results/q1_overhead_raw.csv (produced by q1_overhead.py after a run with
 an instrumented saccade binary that emits ``samples_emitted=N run_complete``
@@ -149,7 +153,7 @@ def main() -> None:
         xycoords="axes fraction",
         va="top",
         ha="left",
-        fontsize=12,
+        fontsize=14,
         bbox=dict(boxstyle="round,pad=0.4", fc="white", alpha=0.8, ec="#cccccc"),
     )
 
@@ -176,8 +180,8 @@ def main() -> None:
     leg1 = ax.legend(
         handles=sink_handles,
         title="sink",
-        title_fontsize=12,
-        fontsize=11,
+        title_fontsize=14,
+        fontsize=14,
         loc="upper left",
         bbox_to_anchor=(1.01, 1.0),
         borderaxespad=0,
@@ -186,8 +190,8 @@ def main() -> None:
     ax.legend(
         handles=sched_handles + [fit_handle],
         title="q_schedule",
-        title_fontsize=12,
-        fontsize=11,
+        title_fontsize=14,
+        fontsize=14,
         loc="upper left",
         bbox_to_anchor=(1.01, 0.55),
         borderaxespad=0,
@@ -196,12 +200,6 @@ def main() -> None:
     ax.set_xlabel("samples delivered (ringbuf submissions)")
     ax.set_ylabel("wall-clock overhead (ms)")
     ax.grid(alpha=0.3)
-    ax.set_title(
-        f"Q1: overhead collapses onto delivered-sample count\n"
-        f"slope = {slope_ns:.0f} ns/sample, intercept = {intercept:.0f} ms, "
-        f"R² = {r2:.3f} — cost is per-sample, not per-config",
-        fontsize=14,
-    )
 
     fig.tight_layout()
     fig.savefig(OUT_PNG, dpi=130, bbox_inches="tight")
