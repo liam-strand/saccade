@@ -5,13 +5,18 @@
 #include <bpf/bpf_helpers.h>
 
 /* Control knobs written by userspace via the libbpf-rs .bss map interface. */
-volatile __u64 min_sample_interval_ns = 1000000; // Minimum ns between INTERMEDIATE samples (default 1 ms).
-volatile __u32 target_tgid = 0;                  // TGID to trace; 0 means trace all processes.
-volatile __u32 active_counter_ids[MAX_COUNTERS] = {0}; // Logical event IDs for the currently-loaded counter slots.
-volatile bool tracking = false;                  // Master enable; handlers mark CPUs stopped and return early while false.
+volatile __u64 min_sample_interval_ns =
+    1000000;                    // Minimum ns between INTERMEDIATE samples (default 1 ms).
+volatile __u32 target_tgid = 0; // TGID to trace; 0 means trace all processes.
+volatile __u32 active_counter_ids[MAX_COUNTERS] = {
+    0}; // Logical event IDs for the currently-loaded counter slots.
+volatile bool tracking =
+    false; // Master enable; handlers mark CPUs stopped and return early while false.
 /* Per-CPU stopped flags; initialized true so every CPU emits a RESUME on first
  * observation, establishing counter baselines before any real samples are recorded. */
 volatile bool stopped[MAX_CPUS] = {[0 ... MAX_CPUS - 1] = true};
+
+__u64 samples_emitted = 0; // total ringbuf submissions = samples actually delivered
 
 /* Shared ringbuffer through which samples are delivered to userspace. */
 struct {
@@ -117,7 +122,8 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     s->type = type;
     bpf_get_current_comm(&s->task, sizeof(s->task));
 
-    // Read absolute hardware counter values into the sample; delta computation happens in userspace.
+    // Read absolute hardware counter values into the sample; delta computation happens in
+    // userspace.
 #pragma unroll
     for (int i = 0; i < MAX_COUNTERS; i++) {
         u32 idx = s->cpu_id;
@@ -132,6 +138,7 @@ record_sample(__u32 pid, __u32 tgid, __u64 now, __u64 delta, __u32 type) {
     }
 
     bpf_ringbuf_submit(s, 0);
+    __sync_fetch_and_add(&samples_emitted, 1);
 }
 
 /* Called on the first event seen on a stopped CPU.  Clears the stopped flag,

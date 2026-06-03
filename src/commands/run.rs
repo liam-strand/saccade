@@ -82,6 +82,9 @@ pub fn run(
         loops += 1;
     }
     child.wait().unwrap();
+    if let Some(n) = profiler.samples_emitted() {
+        tracing::info!(samples_emitted = n, "run_complete");
+    }
     drop(profiler);
     sink::finish_sinks(&mut sinks);
     debug!("Child process exited after {} loops.", loops);

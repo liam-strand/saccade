@@ -23,6 +23,7 @@ downstream.
 import argparse
 import csv
 import random
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -38,16 +39,27 @@ SINKS = ["none", "csv", "perfetto"]
 CSV_TMP = Path("/tmp/saccade_q1.csv")
 
 
-def run_timed(cmd: list[str], *, check: bool = True) -> float:
-    """Run *cmd* and return wall-clock elapsed time in seconds."""
+def run_timed(cmd: list[str], *, check: bool = True) -> tuple[float, int | None]:
+    """Run *cmd* and return (elapsed_s, samples_emitted | None).
+
+    stderr is captured and searched for the last occurrence of
+    ``samples_emitted=<N>`` (the INFO-level line emitted by ``saccade run``).
+    Baseline runs (bare target, no saccade) emit nothing and return None for the
+    sample count.  stdout is discarded.  subprocess.run drains the pipe so the
+    single-line output cannot cause a deadlock.
+    """
     t0 = time.perf_counter()
-    subprocess.run(
+    result = subprocess.run(
         cmd,
         check=check,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    return time.perf_counter() - t0
+    elapsed = time.perf_counter() - t0
+    matches = re.findall(r"samples_emitted=(\d+)", result.stderr)
+    samples_emitted = int(matches[-1]) if matches else None
+    return elapsed, samples_emitted
 
 
 def build_saccade_cmd(
@@ -107,22 +119,41 @@ def build_units(workloads: list[str]) -> list[dict]:
     return units
 
 
-def aggregate(raw_rows: list[dict], workload: str) -> tuple[float, dict[tuple, np.ndarray]]:
-    """Return (baseline_median_s, {(sink, q_sched, q_samp): elapsed-time samples})."""
+def aggregate(
+    raw_rows: list[dict], workload: str
+) -> tuple[float, dict[tuple, np.ndarray], dict[tuple, float | None]]:
+    """Return (baseline_median_s, {config: elapsed-time samples}, {config: samples_emitted median}).
+
+    The third element maps each (sink, q_sched, q_samp) key to the median
+    samples_emitted across reps (float), or None if no rows had a value.
+    """
     base = [r["elapsed_s"] for r in raw_rows if r["workload"] == workload and r["is_baseline"]]
     baseline_median = float(np.median(base))
     by_config: dict[tuple, list[float]] = {}
+    by_samples: dict[tuple, list[int]] = {}
     for r in raw_rows:
         if r["workload"] != workload or r["is_baseline"]:
             continue
-        by_config.setdefault((r["sink"], r["q_schedule_ns"], r["q_sample_ns"]), []).append(
-            r["elapsed_s"]
-        )
-    return baseline_median, {k: np.array(v) for k, v in by_config.items()}
+        key = (r["sink"], r["q_schedule_ns"], r["q_sample_ns"])
+        by_config.setdefault(key, []).append(r["elapsed_s"])
+        se = r.get("samples_emitted")
+        if se is not None:
+            by_samples.setdefault(key, []).append(int(se))
+    samples_median: dict[tuple, float | None] = {
+        k: float(np.median(v)) if v else None for k, v in by_samples.items()
+    }
+    # Ensure every config key is present (may be None if no samples were recorded).
+    for k in by_config:
+        samples_median.setdefault(k, None)
+    return baseline_median, {k: np.array(v) for k, v in by_config.items()}, samples_median
 
 
 def write_overhead_csv(
-    baseline_median: float, by_config: dict, reps: int, out_csv: Path
+    baseline_median: float,
+    by_config: dict,
+    reps: int,
+    out_csv: Path,
+    samples_median: dict | None = None,
 ) -> list[dict]:
     """Real-workload summary: per-config median overhead as a fraction of baseline."""
     fieldnames = [
@@ -134,6 +165,7 @@ def write_overhead_csv(
         "overhead_fraction",
         "iqr_s",
         "reps",
+        "samples_median",
     ]
     rows: list[dict] = []
     with open(out_csv, "w", newline="") as f:
@@ -146,6 +178,10 @@ def write_overhead_csv(
                     saccade_median = float(np.median(times))
                     iqr = float(np.percentile(times, 75) - np.percentile(times, 25))
                     overhead = (saccade_median - baseline_median) / baseline_median
+                    sm = None
+                    if samples_median is not None:
+                        raw_sm = samples_median.get((sink, q_sched, q_samp))
+                        sm = round(raw_sm) if raw_sm is not None else ""
                     row = {
                         "q_schedule_ns": q_sched,
                         "q_sample_ns": q_samp,
@@ -155,6 +191,7 @@ def write_overhead_csv(
                         "overhead_fraction": round(overhead, 6),
                         "iqr_s": round(iqr, 6),
                         "reps": reps,
+                        "samples_median": sm if sm is not None else "",
                     }
                     writer.writerow(row)
                     rows.append(row)
@@ -331,7 +368,7 @@ def main() -> None:
 
     # Global warmup, discarded.
     for _ in range(args.warmup):
-        run_timed(target, check=False)
+        _elapsed, _ = run_timed(target, check=False)
 
     raw_fieldnames = [
         "order_index",
@@ -342,6 +379,7 @@ def main() -> None:
         "q_sample_ns",
         "is_baseline",
         "elapsed_s",
+        "samples_emitted",
     ]
     raw_rows: list[dict] = []
 
@@ -370,7 +408,7 @@ def main() -> None:
                     targets[unit["workload"]],
                 )
 
-            elapsed = run_timed(cmd)
+            elapsed, samples_emitted = run_timed(cmd)
 
             raw_writer.writerow(
                 {
@@ -382,6 +420,7 @@ def main() -> None:
                     "q_sample_ns": unit["q_samp"] if unit["q_samp"] is not None else "",
                     "is_baseline": int(unit["kind"] == "baseline"),
                     "elapsed_s": round(elapsed, 6),
+                    "samples_emitted": samples_emitted if samples_emitted is not None else "",
                 }
             )
             rawfile.flush()
@@ -393,19 +432,22 @@ def main() -> None:
                     "q_schedule_ns": unit["q_sched"],
                     "q_sample_ns": unit["q_samp"],
                     "elapsed_s": elapsed,
+                    "samples_emitted": samples_emitted,
                 }
             )
 
     # Real workload -> overhead summary (fraction of baseline).
-    base_target, cfg_target = aggregate(raw_rows, "target")
-    overhead_rows = write_overhead_csv(base_target, cfg_target, args.rounds, overhead_csv)
+    base_target, cfg_target, samp_target = aggregate(raw_rows, "target")
+    overhead_rows = write_overhead_csv(
+        base_target, cfg_target, args.rounds, overhead_csv, samples_median=samp_target
+    )
     print_overhead(overhead_rows)
     print(f"\nRaw per-run results:  {raw_csv}")
     print(f"Overhead summary:     {overhead_csv}")
 
     # Null workload -> saccade startup cost (absolute).
     if "null" in targets:
-        base_null, cfg_null = aggregate(raw_rows, "null")
+        base_null, cfg_null, _samp_null = aggregate(raw_rows, "null")
         startup_rows = write_startup_csv(base_null, cfg_null, args.rounds, startup_csv)
         print_startup(startup_rows, base_null)
         print(f"Startup summary:      {startup_csv}")

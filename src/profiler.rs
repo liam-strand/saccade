@@ -136,6 +136,11 @@ impl<'s> Profiler<'s> {
     pub fn current_time_ns(&self) -> u64 {
         self.current_time_ns
     }
+
+    /// Total samples delivered by the source, if the source tracks it.
+    pub fn samples_emitted(&self) -> Option<u64> {
+        self.source.samples_emitted()
+    }
 }
 
 /// Builder for `Profiler`; all four components are required before calling `build`.

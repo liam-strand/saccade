@@ -237,4 +237,8 @@ impl SampleSource for HardwareSampleSource {
     fn num_slots(&self) -> usize {
         MAX_COUNTERS
     }
+
+    fn samples_emitted(&self) -> Option<u64> {
+        self.skel.maps.bss_data.as_ref().map(|b| b.samples_emitted)
+    }
 }

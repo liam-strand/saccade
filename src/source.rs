@@ -49,4 +49,9 @@ pub trait SampleSource {
     /// Number of hardware counter slots available simultaneously.
     /// `4` for eBPF hardware sources; configurable for virtual sources.
     fn num_slots(&self) -> usize;
+
+    /// Total samples delivered (ringbuf submissions) since start, if the source tracks it.
+    fn samples_emitted(&self) -> Option<u64> {
+        None
+    }
 }
