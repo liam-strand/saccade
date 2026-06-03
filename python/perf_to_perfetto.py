@@ -206,7 +206,12 @@ def _build_counter_packet(timestamp_ns: int, track_uuid: int, value: float) -> b
 # Public API
 # ---------------------------------------------------------------------------
 
-def convert(input_path: Path, output_path: Path, interval_ms: float = 100.0) -> None:
+def convert(
+    input_path: Path,
+    output_path: Path,
+    interval_ms: float = 100.0,
+    tid: int = 0,
+) -> None:
     """Convert a ``perf stat -I`` CSV file at *input_path* to a Perfetto trace at *output_path*.
 
     The interval_ms parameter is accepted for API compatibility but is not used
@@ -216,7 +221,12 @@ def convert(input_path: Path, output_path: Path, interval_ms: float = 100.0) -> 
     The output format matches what ``saccade evaluate`` expects:
     - One counter track per event, named ``{event_name}/rate``.
     - Counter values in events per nanosecond.
-    - tid defaults to 0 (perf stat aggregates all threads).
+    - tid: ``saccade evaluate`` keys series on ``(event_name, tid)``.  perf stat
+      aggregates all threads, so there is no natural tid.  When *tid* is 0 (the
+      default) the counter tracks are emitted with no thread parent and the reader
+      resolves them to tid=0.  Pass a non-zero *tid* to parent the counter tracks
+      under a synthetic thread track of that tid -- use this to match the tid of a
+      single-threaded ground-truth sweep trace so the two align during evaluate.
     """
     records = parse_perf_csv(input_path)
     if not records:
@@ -236,13 +246,28 @@ def convert(input_path: Path, output_path: Path, interval_ms: float = 100.0) -> 
     event_uuid: dict[str, int] = {
         name: uuid_base + i for i, name in enumerate(event_names)
     }
+    # When a tid is requested, parent every counter track under a thread track so
+    # the reader (src/perfetto/reader.rs) resolves the series to that tid.
+    thread_uuid = 9_000_000 if tid != 0 else None
+    parent_uuid = thread_uuid
 
     with output_path.open("wb") as fh:
-        # Emit one TrackDescriptor per event (counter track, no parent → tid=0).
+        # Emit the parent thread track first, if a tid was requested.
+        if thread_uuid is not None:
+            fh.write(_write_trace_packet(_build_track_descriptor_packet(
+                uuid=thread_uuid,
+                name=f"perf_stat/tid{tid}",
+                thread_pid=tid,
+                thread_tid=tid,
+                thread_name="perf_stat",
+            )))
+
+        # Emit one TrackDescriptor per event (counter track).
         for name in event_names:
             pkt_bytes = _build_track_descriptor_packet(
                 uuid=event_uuid[name],
                 name=f"{name}/rate",
+                parent_uuid=parent_uuid,
                 is_counter=True,
                 counter_unit_name="events/ns",
             )
@@ -254,6 +279,63 @@ def convert(input_path: Path, output_path: Path, interval_ms: float = 100.0) -> 
             uuid = event_uuid[name]
             pkt_bytes = _build_counter_packet(rec["timestamp_ns"], uuid, rec["rate"])
             fh.write(_write_trace_packet(pkt_bytes))
+
+
+def _read_trace_packets(data: bytes):
+    """Yield raw TracePacket byte-strings from a Perfetto Trace container."""
+    i = 0
+    n = len(data)
+    while i < n:
+        if data[i] != 0x0A:
+            raise ValueError(f"unexpected tag {data[i]:#x} at offset {i}")
+        i += 1
+        shift = 0
+        length = 0
+        while True:
+            b = data[i]
+            i += 1
+            length |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        yield data[i:i + length]
+        i += length
+
+
+def remap_trace_tid(src_path: Path, dst_path: Path, new_tid: int) -> list[int]:
+    """Rewrite a Perfetto trace so its thread track(s) carry *new_tid*.
+
+    ``saccade run`` writes counter tracks parented to the target's real OS tid,
+    but a sweep ground-truth trace remaps threads to synthetic tids (see
+    remap_sweep_tids in src/commands/sweep.rs).  ``saccade evaluate`` keys series
+    on ``(event_name, tid)``, so a live run never matches the GT unless its tid is
+    aligned.  This collapses the trace's thread tid to *new_tid* so the two align.
+
+    Only safe when the source trace has exactly one thread tid (the
+    single-threaded SPEC rate workloads here).  Returns the sorted list of
+    original thread tids found; if there is more than one, NO remap is applied
+    (the trace is copied verbatim) and the caller should warn.
+    """
+    from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TracePacket
+
+    data = Path(src_path).read_bytes()
+    packets = []
+    thread_tids: set[int] = set()
+    for raw in _read_trace_packets(data):
+        pkt = TracePacket()
+        pkt.ParseFromString(raw)
+        if pkt.HasField("track_descriptor") and pkt.track_descriptor.HasField("thread"):
+            thread_tids.add(pkt.track_descriptor.thread.tid)
+        packets.append(pkt)
+
+    do_remap = len(thread_tids) == 1
+    with Path(dst_path).open("wb") as fh:
+        for pkt in packets:
+            if do_remap and pkt.HasField("track_descriptor") and pkt.track_descriptor.HasField("thread"):
+                pkt.track_descriptor.thread.tid = new_tid
+            fh.write(_write_trace_packet(pkt.SerializeToString()))
+
+    return sorted(thread_tids)
 
 
 # ---------------------------------------------------------------------------
@@ -292,12 +374,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "running_ns / enabled_ns columns. Default: 100."
         ),
     )
+    p.add_argument(
+        "--tid",
+        type=int,
+        default=0,
+        help=(
+            "Emit counter tracks under a synthetic thread of this tid so they "
+            "align with a single-threaded ground-truth trace. Default: 0 (no parent)."
+        ),
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    convert(args.input, args.output, args.interval_ms)
+    convert(args.input, args.output, args.interval_ms, tid=args.tid)
     print(f"Written: {args.output}", file=sys.stderr)
 
 

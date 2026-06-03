@@ -1,0 +1,27 @@
+{
+  "spec_531_deepsjeng_r": {
+    "binary": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/531.deepsjeng_r/exe/deepsjeng_r_base.%{label}-m64",
+    "args": ["ref.txt"],
+    "cwd": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/531.deepsjeng_r/run/run_base_refrate__label_-m64.0000"
+  },
+  "spec_538_imagick_r": {
+    "binary": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/538.imagick_r/exe/imagick_r_base.%{label}-m64",
+    "args": [
+      "-limit", "disk", "0",
+      "refrate_input.tga",
+      "-edge", "41",
+      "-resample", "181%",
+      "-emboss", "31",
+      "-colorspace", "YUV",
+      "-mean-shift", "19x19+15%",
+      "-resize", "30%",
+      "refrate_output.tga"
+    ],
+    "cwd": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/538.imagick_r/run/run_base_refrate__label_-m64.0000"
+  },
+  "spec_520_omnetpp_r": {
+    "binary": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/520.omnetpp_r/exe/omnetpp_r_base.%{label}-m64",
+    "args": ["-c", "General", "-r", "0", "--sim-time-limit=200s"],
+    "cwd": "/tank/yhe7443/benchmarks/SPEC2017/benchspec/CPU/520.omnetpp_r/run/run_base_refrate__label_-m64.0000"
+  }
+}
