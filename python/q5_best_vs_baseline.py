@@ -19,8 +19,8 @@ The *_real legs invoke `saccade run`, which executes the real benchmark binary
 and profiles it live.  This requires the `saccade` binary to carry the needed
 capabilities (granted via `setcap`) -- no sudo.  Note that `saccade run` uses
 whatever physical hardware counter slots the CPU exposes; it has no --num-slots
-flag.  The simulated legs use FIXED_NUM_SLOTS (4), so if the hardware slot count
-differs from 4, part of any sim-vs-real gap is structural rather than estimator
+flag.  The simulated legs use FIXED_NUM_SLOTS (6), so if the hardware slot count
+differs from 6, part of any sim-vs-real gap is structural rather than estimator
 error.  LLM-driven schedulers make live OpenRouter calls during the real run
 (matching the endpoint/model used by the simulate path); LLM_API_KEY must be set.
 

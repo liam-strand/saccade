@@ -43,7 +43,7 @@ impl TestScheduler {
 
         Self {
             events,
-            num_slots: 4,
+            num_slots: 6,
             current_idx: 0,
         }
     }

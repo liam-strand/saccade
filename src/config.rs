@@ -345,7 +345,7 @@ struct Defaults {
     q_output_ns: u64,
     /// Default noise standard deviation (0 = no noise).
     noise_stddev: f64,
-    /// Default number of hardware counter slots (4).
+    /// Default number of hardware counter slots (6).
     num_slots: usize,
     /// Default Kalman filter configuration.
     kalman: KalmanConfig,
@@ -365,7 +365,7 @@ impl Default for Defaults {
             q_sample_ns: 100_000,
             q_output_ns: 0,
             noise_stddev: 0.0,
-            num_slots: 4,
+            num_slots: 6,
             kalman: KalmanConfig::default(),
             ema: EmaConfig::default(),
             llm: LlmConfig::default(),

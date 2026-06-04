@@ -24,9 +24,9 @@ struct {
     __uint(max_entries, 256 * 1024); // 256 KB
 } ringbuf SEC(".maps");
 
-/* Four perf_event_array maps, one per counter slot (counter0..counter3).
+/* Six perf_event_array maps, one per counter slot (counter0..counter5).
  * Each map holds one perf_event fd per CPU, opened by userspace for the
- * hardware event identified by active_counter_ids[i].  Four separate maps
+ * hardware event identified by active_counter_ids[i].  Six separate maps
  * are required because BPF cannot index perf_event_array references by a
  * runtime variable; get_counter() dispatches to the right map via switch. */
 struct {
@@ -53,6 +53,18 @@ struct {
     __type(key, u32);
     __type(value, u32);
 } counter3 SEC(".maps"); // Slot 3: active_counter_ids[3]
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32);
+    __type(value, u32);
+} counter4 SEC(".maps"); // Slot 4: active_counter_ids[4]
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, u32);
+    __type(value, u32);
+} counter5 SEC(".maps"); // Slot 5: active_counter_ids[5]
 
 /* Tracks the reference timestamp for each tracked kernel thread (key: tid).
  * Set to switch-in time on context switch; updated to now after each INTERMEDIATE sample. */
@@ -76,7 +88,7 @@ static __always_inline long get_task_state(struct task_struct *t) {
     return ((struct task_struct___pre_5_14 *)t)->state;
 }
 
-/* Returns a pointer to the perf_event_array map for counter slot i (0–3), or
+/* Returns a pointer to the perf_event_array map for counter slot i (0–5), or
  * NULL for out-of-range indices.  A switch is required because BPF cannot
  * dereference a runtime-computed pointer to a map reference. */
 static __always_inline void *get_counter(int i) {
@@ -89,6 +101,10 @@ static __always_inline void *get_counter(int i) {
             return &counter2;
         case 3:
             return &counter3;
+        case 4:
+            return &counter4;
+        case 5:
+            return &counter5;
         default:
             return NULL;
     }

@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 pub struct HardwareCounters {
     /// Number of logical CPUs being monitored.
     num_cpus: usize,
-    /// Owned handles to the four BPF `PERF_EVENT_ARRAY` maps (`counter0`–`counter3`).
+    /// Owned handles to the six BPF `PERF_EVENT_ARRAY` maps (`counter0`–`counter5`).
     bpf_maps: [MapHandle; MAX_COUNTERS],
     /// Registry used to look up raw event/umask encodings by event ID.
     event_registry: EventRegistry,
@@ -33,6 +33,8 @@ impl HardwareCounters {
             MapHandle::try_from(&skel.maps.counter1).expect("Failed to get counter1"),
             MapHandle::try_from(&skel.maps.counter2).expect("Failed to get counter2"),
             MapHandle::try_from(&skel.maps.counter3).expect("Failed to get counter3"),
+            MapHandle::try_from(&skel.maps.counter4).expect("Failed to get counter4"),
+            MapHandle::try_from(&skel.maps.counter5).expect("Failed to get counter5"),
         ];
 
         Self {

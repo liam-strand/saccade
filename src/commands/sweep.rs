@@ -2,7 +2,7 @@
 //! the target through fixed-counter batches.
 //!
 //! Each batch reserves one counter slot for `ex_ret_instr` (retired instructions) as an anchor and
-//! fills the remaining three slots with user events.  After all batches complete, every non-anchor
+//! fills the remaining slots with user events.  After all batches complete, every non-anchor
 //! event rate is normalized to `(count / anchor_count) * global_ref_rate` so that rates are
 //! comparable across batches regardless of run-to-run timing variation.  The anchor event's own
 //! track shows the instruction throughput (events/ns) over time.
@@ -14,7 +14,7 @@ use crate::event::EventRegistry;
 use crate::perfetto::{PerfettoWriter, read_rate_timeseries};
 use crate::profiler::ProfilerBuilder;
 use crate::quantum::Quantum;
-use crate::sample::TASK_COMM_LEN;
+use crate::sample::{MAX_COUNTERS, TASK_COMM_LEN};
 use crate::scheduler::fixed::FixedScheduler;
 use crate::sink::matrix::MatrixSink;
 use crate::sink::perfetto::PerfettoSink;
@@ -238,7 +238,8 @@ pub fn sweep(
     let all_ids: Vec<u32> = (0..lib.events.len() as u32).collect();
 
     // Reserve one counter slot per batch for the anchor event (retired instructions).
-    // Batches become [anchor, user_0, user_1, user_2] instead of 4 user events.
+    // Batches become [anchor, user_0, .., user_{MAX_COUNTERS-2}] instead of MAX_COUNTERS
+    // user events.
     let anchor_name = "ex_ret_instr";
     let anchor_id: u32 = lib
         .events
@@ -251,7 +252,7 @@ pub fn sweep(
         .filter(|&id| id != anchor_id)
         .collect();
     let batches: Vec<Vec<u32>> = user_ids
-        .chunks(3)
+        .chunks(MAX_COUNTERS - 1)
         .map(|c| {
             std::iter::once(anchor_id)
                 .chain(c.iter().copied())

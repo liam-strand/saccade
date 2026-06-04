@@ -2,7 +2,7 @@
 """Sweep scheduler × estimator combinations across workload traces to evaluate
 accuracy of adaptive scheduling strategies.
 
-Fixed: num_slots=4, full event library.
+Fixed: num_slots=6, full event library.
 Iterates over every .perfetto trace in --traces-dir (or just --workload).
 Outputs timestamped results under --results-dir/<timestamp>/.
 """

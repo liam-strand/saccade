@@ -47,7 +47,7 @@ pub trait SampleSource {
     ) -> Result<SwapStats, Box<dyn std::error::Error>>;
 
     /// Number of hardware counter slots available simultaneously.
-    /// `4` for eBPF hardware sources; configurable for virtual sources.
+    /// `MAX_COUNTERS` (6) for eBPF hardware sources; configurable for virtual sources.
     fn num_slots(&self) -> usize;
 
     /// Total samples delivered (ringbuf submissions) since start, if the source tracks it.

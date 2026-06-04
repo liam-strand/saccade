@@ -82,8 +82,8 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         target: Vec<String>,
     },
-    /// Run the target repeatedly, each time with a different fixed batch of 4 counters,
-    /// until all available counters have been covered once.
+    /// Run the target repeatedly, each time with a different fixed batch of 6 counters
+    /// (one anchor + 5 user events), until all available counters have been covered once.
     Sweep {
         /// Use library from specified file
         #[arg(short, long)]
@@ -186,7 +186,7 @@ pub enum Commands {
         seed: Option<u64>,
 
         /// Number of hardware counter slots available during simulation
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = 6)]
         num_slots: usize,
 
         /// Output CSV file

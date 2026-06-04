@@ -2,6 +2,7 @@
 
 use crate::event::EventId;
 use crate::quantum::Quantum;
+use crate::sample::MAX_COUNTERS;
 use crate::scheduler::Scheduler;
 use crate::sink::OutputSink;
 use crate::source::SampleSource;
@@ -178,7 +179,11 @@ impl<'s> ProfilerBuilder<'s> {
         mut s: impl Scheduler + 'static,
         all_events: Vec<EventId>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
+        let num_slots = self
+            .source
+            .as_ref()
+            .map(|src| src.num_slots())
+            .unwrap_or(MAX_COUNTERS);
         s.init(all_events, num_slots)?;
         self.scheduler = Some(Box::new(s));
         Ok(self)
@@ -190,7 +195,11 @@ impl<'s> ProfilerBuilder<'s> {
         mut s: Box<dyn Scheduler>,
         all_events: Vec<EventId>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let num_slots = self.source.as_ref().map(|src| src.num_slots()).unwrap_or(4);
+        let num_slots = self
+            .source
+            .as_ref()
+            .map(|src| src.num_slots())
+            .unwrap_or(MAX_COUNTERS);
         s.init(all_events, num_slots)?;
         self.scheduler = Some(s);
         Ok(self)

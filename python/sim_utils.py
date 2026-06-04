@@ -38,7 +38,7 @@ LLM_SCHEDULERS = frozenset({
     "reasoning-static-llm",
     "reasoning-dynamic-llm",
 })
-FIXED_NUM_SLOTS = 4
+FIXED_NUM_SLOTS = 6
 
 
 # ---------------------------------------------------------------------------

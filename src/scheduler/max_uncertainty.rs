@@ -15,11 +15,11 @@ pub struct MaxUncertaintyScheduler {
 }
 
 impl MaxUncertaintyScheduler {
-    /// Creates a scheduler with an empty event list and a default slot count of 4.
+    /// Creates a scheduler with an empty event list and a default slot count of 6.
     fn new() -> Self {
         Self {
             events: Vec::new(),
-            num_slots: 4,
+            num_slots: 6,
         }
     }
 }

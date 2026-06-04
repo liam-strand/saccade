@@ -27,7 +27,7 @@ impl Default for RateOfChangeScheduler {
     fn default() -> Self {
         Self {
             events: Vec::new(),
-            num_slots: 4,
+            num_slots: 6,
             history: HashMap::new(),
             last_scheduled_ns: HashMap::new(),
         }
