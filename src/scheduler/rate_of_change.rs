@@ -66,10 +66,10 @@ impl Scheduler for RateOfChangeScheduler {
     ) -> ScheduleDecision {
         let now_ns = quantum.timestamp_ns();
 
-        // Evict history entries older than 50× the quantum duration to avoid mixing
+        // Evict history entries older than 200× the quantum duration to avoid mixing
         // observations from different execution phases across long idle gaps.
         // Skipped when elapsed_ns is zero (e.g. test fixtures) to prevent spurious eviction.
-        let stale_threshold = 50u64.saturating_mul(quantum.elapsed_ns());
+        let stale_threshold = 200u64.saturating_mul(quantum.elapsed_ns());
         if stale_threshold > 0 {
             for h in self.history.values_mut() {
                 while h
