@@ -32,8 +32,8 @@ import numpy as np
 from tqdm import tqdm
 
 # Parameter grid
-Q_SCHEDULE_NS = [100_000, 1_000_000, 10_000_000, 100_000_000]
-Q_SAMPLE_NS = [10_000, 100_000, 1_000_000]
+Q_SCHEDULE_NS = [1_000_000, 10_000_000, 100_000_000, 1_000_000]
+Q_SAMPLE_NS = [1_000, 10_000, 100_000]
 SINKS = ["none", "csv", "perfetto"]
 
 CSV_TMP = Path("/tmp/saccade_q1.csv")
