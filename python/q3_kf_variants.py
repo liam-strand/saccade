@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from sim_utils import (
     FIXED_NUM_SLOTS,
+    LATENCY_PROFILE,
     filter_traces_by_kind,
     is_significant,
     load_noise_floor,
@@ -78,6 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only the trace whose stem matches this name",
     )
     p.add_argument("--q-schedule", type=int, default=10_000_000)
+    p.add_argument(
+        "--llm-latency-profile",
+        type=Path,
+        default=LATENCY_PROFILE,
+        help="LLM latency profile JSON forwarded to every simulate call "
+        "(e.g. a fresh q7 llm_latency_profile.json).",
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument(
         "--noise-floor-json",
@@ -164,6 +172,7 @@ def main() -> None:
                 FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
                 tmp_dir, "google/gemma-4-26b-a4b-it",
                 base_config=None,  # per-combo configs carry all hyperparams
+                latency_profile=args.llm_latency_profile,
             )
         except subprocess.CalledProcessError as exc:
             tqdm.write(f"  ERROR batch-simulate {workload}: {exc}", file=sys.stderr)

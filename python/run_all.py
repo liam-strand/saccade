@@ -11,12 +11,16 @@ Run from the python/ directory:
     uv run python run_all.py --skip-collect # re-plot only, from existing data
     uv run python run_all.py --dry-run      # echo commands, run nothing
 
-The two tricky bits this handles automatically:
+The tricky bits this handles automatically:
   * Promotion - q2/q3 collection write their CSV into a fresh results/<timestamp>/
     dir, but the q2/q3 plot scripts read the *top-level* results/*.csv. We copy the
     timestamped CSV up after each of those collectors runs.
   * Dependency passing - q5 collection needs the q2 grid CSV via --grid-csv, and the
     q4/q5 plots take the captured run dir explicitly for determinism.
+  * Latency profile - q7 runs before the simulation collectors (q2/q3/q4/q5) and its
+    fresh llm_latency_profile.json is forwarded to them via --llm-latency-profile.
+    Pass --use-saved-latency-profile to skip q7 collection and let the simulations
+    use the saved default profile from sim_utils instead.
 """
 
 from __future__ import annotations
@@ -186,7 +190,7 @@ def promote(run_dir: Path, filename: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Stage A - collection
 # --------------------------------------------------------------------------- #
-def collect(r: Runner) -> dict[str, Path | None]:
+def collect(r: Runner, *, use_saved_latency: bool) -> dict[str, Path | None]:
     """Run all collectors. Returns captured run dirs / grid path for later stages."""
     captured: dict[str, Path | None] = {
         "q2_grid": None,
@@ -206,11 +210,41 @@ def collect(r: Runner) -> dict[str, Path | None]:
         "q1_overhead",
     )
 
-    # 2. q2 accuracy (timestamped; LLM live) -> promote + remember grid for q5.
+    # 2. q7 llm latency profile (timestamped; dummy model, no API). Runs before
+    #    the simulation collectors so they can replay its fresh latency profile,
+    #    forwarded below via --llm-latency-profile.
+    profile_args: list[str] = []
+    if use_saved_latency:
+        r.skip("q7_llm_latency",
+               "--use-saved-latency-profile: simulations use the saved default")
+    else:
+        before = snapshot_run_dirs()
+        if r.run(
+            ["q7_llm_latency.py", *common, "--traces-dir", TRACES_DIR,
+             "--results-dir", "./results", "--reps", "10"],
+            "q7_llm_latency",
+        ):
+            if not r.dry_run:
+                try:
+                    q7_dir = capture_new_run_dir(before)
+                except RuntimeError as exc:
+                    print(f"!!! q7_llm_latency: {exc}", file=sys.stderr)
+                else:
+                    captured["q7_dir"] = q7_dir
+                    profile = q7_dir / "llm_latency_profile.json"
+                    if profile.is_file():
+                        profile_args = ["--llm-latency-profile", str(profile)]
+                        print(f"    simulations will use fresh latency profile: "
+                              f"{profile.relative_to(PY_DIR)}")
+                    else:
+                        print(f"!!! q7_llm_latency: {profile} missing; simulations "
+                              "fall back to the saved profile", file=sys.stderr)
+
+    # 3. q2 accuracy (timestamped; LLM live) -> promote + remember grid for q5.
     before = snapshot_run_dirs()
     if r.run(
         ["q2_accuracy.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--jobs", "16"],
+         "--results-dir", "./results", "--jobs", "16", *profile_args],
         "q2_accuracy",
     ):
         if not r.dry_run:
@@ -223,11 +257,11 @@ def collect(r: Runner) -> dict[str, Path | None]:
                 if promote(q2_dir, "q2_scheduler_estimator.csv"):
                     captured["q2_grid"] = q2_dir / "q2_scheduler_estimator.csv"
 
-    # 3. q3 kalman variants (timestamped) -> promote.
+    # 4. q3 kalman variants (timestamped) -> promote.
     before = snapshot_run_dirs()
     if r.run(
         ["q3_kf_variants.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--jobs", "16"],
+         "--results-dir", "./results", "--jobs", "16", *profile_args],
         "q3_kf_variants",
     ):
         if not r.dry_run:
@@ -239,25 +273,12 @@ def collect(r: Runner) -> dict[str, Path | None]:
                 captured["q3_dir"] = q3_dir
                 promote(q3_dir, "q3_kf_variants.csv")
 
-    # 4. q6 noise floor (top-level json; live). Override q6's wrong default --saccade.
+    # 5. q6 noise floor (top-level json; live). Override q6's wrong default --saccade.
     r.run(
         ["q6_noise_floor.py", *common, "--results-dir", "./results",
          "--target", Q6_TARGET],
         "q6_noise_floor",
     )
-
-    # 5. q7 llm latency profile (timestamped; dummy model, no API) -> remember dir.
-    before = snapshot_run_dirs()
-    if r.run(
-        ["q7_llm_latency.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--reps", "10"],
-        "q7_llm_latency",
-    ):
-        if not r.dry_run:
-            try:
-                captured["q7_dir"] = capture_new_run_dir(before)
-            except RuntimeError as exc:
-                print(f"!!! q7_llm_latency: {exc}", file=sys.stderr)
 
     # 6. q8 swap latency (top-level CSVs; live). --target last.
     r.run(
@@ -271,7 +292,7 @@ def collect(r: Runner) -> dict[str, Path | None]:
     if r.run(
         ["q4_llm_guidance.py", *common, "--traces-dir", TRACES_DIR,
          "--results-dir", "./results", "--estimator", "ema", "--llm-trials", "3",
-         "--jobs", "16"],
+         "--jobs", "16", *profile_args],
         "q4_llm_guidance",
     ):
         if not r.dry_run:
@@ -290,7 +311,7 @@ def collect(r: Runner) -> dict[str, Path | None]:
         if r.run(
             ["q5_best_vs_baseline.py", *common, "--grid-csv", grid_arg,
              "--benchmarks-json", Q5_BENCH, "--results-dir", "./results",
-             "--real-reps", "5"],
+             "--real-reps", "5", *profile_args],
             "q5_best_vs_baseline",
         ):
             if not r.dry_run:
@@ -305,7 +326,8 @@ def collect(r: Runner) -> dict[str, Path | None]:
 # --------------------------------------------------------------------------- #
 # Stage B - analysis
 # --------------------------------------------------------------------------- #
-def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool) -> None:
+def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool,
+            use_saved_latency: bool = False) -> None:
     # q1 family
     r.run(["analysis/q1_plot.py"], "q1_plot")
     r.run(["analysis/q1_cost_model.py"], "q1_cost_model")
@@ -351,7 +373,7 @@ def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool) 
     if q7_dir is not None:
         r.run(["analysis/q7_latency_violin.py", str(q7_dir / "llm_latency_profile.json")],
               "q7_latency_violin")
-    elif skip_collect:
+    elif skip_collect or use_saved_latency:
         nd = newest_run_dir_with("llm_latency_profile.json")
         if nd is None:
             r.skip("q7_latency_violin", "no results/*/llm_latency_profile.json found")
@@ -456,13 +478,16 @@ def print_summary(r: Runner, started_at: float, *, dry_run: bool) -> int:
 # Entry point
 # --------------------------------------------------------------------------- #
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description="Runs everything! (except for saccade sweep data trace collection)")
     ap.add_argument("--skip-collect", action="store_true",
                     help="Skip all collection; re-run analysis from existing data.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Echo commands without executing anything.")
     ap.add_argument("--fail-fast", action="store_true",
                     help="Abort on the first non-zero exit (default: continue).")
+    ap.add_argument("--use-saved-latency-profile", action="store_true",
+                    help="Skip q7 latency collection; simulations use the saved "
+                         "default profile from sim_utils instead of a fresh one.")
     args = ap.parse_args()
 
     started_at = time.time()
@@ -474,10 +499,11 @@ def main() -> int:
                                             "q5_dir": None}
     else:
         print("== STAGE A: COLLECTION ==")
-        captured = collect(r)
+        captured = collect(r, use_saved_latency=args.use_saved_latency_profile)
 
     print("\n== STAGE B: ANALYSIS ==")
-    analyze(r, captured, skip_collect=args.skip_collect)
+    analyze(r, captured, skip_collect=args.skip_collect,
+            use_saved_latency=args.use_saved_latency_profile)
 
     print("\n== BUNDLE ==")
     bundle_dir = bundle(captured, dry_run=args.dry_run)

@@ -14,6 +14,9 @@ from typing import Callable
 import numpy as np
 
 REPO_ROOT = Path(__file__).parent.parent
+# Default LLM latency profile for `saccade simulate`. Scripts expose this as
+# the --llm-latency-profile default; run_all.py overrides it with a freshly
+# collected q7 profile.
 LATENCY_PROFILE = Path(__file__).parent / "gemma4_8b_latency.json"
 
 SCHEDULERS = [
@@ -67,6 +70,7 @@ def run_simulate(
     seed: int | None,
     base_config: Path | None = None,
     guidance: str | None = None,
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> None:
     """Invoke `saccade simulate`, writing estimated output to *out_trace*.
 
@@ -74,6 +78,8 @@ def run_simulate(
     (e.g. ``[kalman]`` or ``[llm]``) take effect before CLI overrides.
     *guidance* appends ``--guidance <text>`` and overrides any guidance
     string in *base_config*.
+    *latency_profile* is forwarded as ``--llm-latency-profile``; defaults to
+    the saved profile (``LATENCY_PROFILE``).
 
     All paths should be absolute.  The subprocess cwd is set to the repo
     root so that relative ``correlation_path`` values in TOML configs
@@ -94,7 +100,7 @@ def run_simulate(
         "--llm-model", llm_model,
         "--llm-base-url", "https://openrouter.ai/api",
         "--llm-api-key", os.environ["LLM_API_KEY"],
-        "--llm-latency-profile", str(LATENCY_PROFILE),
+        "--llm-latency-profile", str(latency_profile),
     ]
     if seed is not None:
         cmd += ["--seed", str(seed)]
@@ -120,6 +126,7 @@ def build_batch_simulate_cmd(
     llm_model: str,
     base_config: Path | None = None,
     api_key: str | None = None,
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> list[str]:
     """Build the ``saccade simulate --batch`` argv list.
 
@@ -143,7 +150,7 @@ def build_batch_simulate_cmd(
         "--llm-model", llm_model,
         "--llm-base-url", "https://openrouter.ai/api",
         "--llm-api-key", api_key,
-        "--llm-latency-profile", str(LATENCY_PROFILE),
+        "--llm-latency-profile", str(latency_profile),
     ]
     return cmd
 
@@ -160,6 +167,7 @@ def run_batch_simulate(
     llm_model: str,
     base_config: Path | None = None,
     spec_tag: str = "",
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> None:
     """Run multiple simulate combos sharing one ``saccade simulate --batch`` process.
 
@@ -189,6 +197,7 @@ def run_batch_simulate(
     cmd = build_batch_simulate_cmd(
         saccade, library, rates_trace, spec_path,
         num_slots, q_schedule, jobs, llm_model, base_config,
+        latency_profile=latency_profile,
     )
     log_path = tmp_dir / f"batch_{rates_trace.stem}{suffix}_stderr.log"
     with log_path.open("w") as logf:
@@ -351,6 +360,7 @@ def simulate_and_eval(
     trial: int = 0,
     base_config: Path | None = None,
     guidance: str | None = None,
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> dict:
     """Run one simulate + evaluate pair and return the evaluate JSON dict."""
     trace_path = (
@@ -360,6 +370,7 @@ def simulate_and_eval(
     run_simulate(
         saccade, library, rates_trace, scheduler, estimator,
         trace_path, num_slots, q_schedule, llm_model, seed, base_config, guidance,
+        latency_profile=latency_profile,
     )
     return run_evaluate(saccade, rates_trace, trace_path)
 
@@ -379,6 +390,7 @@ def run_combo(
     workload: str,
     base_config: Path | None = None,
     guidance: str | None = None,
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Simulate + evaluate one (scheduler, estimator) combo, averaging LLM runs.
 
@@ -394,7 +406,7 @@ def run_combo(
         eval_json = simulate_and_eval(
             saccade, library, rates_trace, scheduler, estimator,
             num_slots, q_schedule, llm_model, seed, tmp_dir, workload, trial,
-            base_config, guidance,
+            base_config, guidance, latency_profile=latency_profile,
         )
         mn = median_nrmse(eval_json)
         mc = mean_coverage(eval_json)
@@ -431,6 +443,7 @@ def run_combo_extended(
     workload: str,
     base_config: Path | None = None,
     guidance: str | None = None,
+    latency_profile: Path = LATENCY_PROFILE,
 ) -> dict:
     """Like ``run_combo`` but returns a dict with all primary and secondary metrics.
 
@@ -457,7 +470,7 @@ def run_combo_extended(
         eval_json = simulate_and_eval(
             saccade, library, rates_trace, scheduler, estimator,
             num_slots, q_schedule, llm_model, seed, tmp_dir, workload, trial,
-            base_config, guidance,
+            base_config, guidance, latency_profile=latency_profile,
         )
         mn = median_nrmse(eval_json)
         mc = mean_coverage(eval_json)

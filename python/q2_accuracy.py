@@ -14,19 +14,16 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-
 import argparse
-
 from tqdm import tqdm
-
 import numpy as np
-
 import shlex
 
 from sim_utils import (
     SCHEDULERS,
     ESTIMATORS,
     FIXED_NUM_SLOTS,
+    LATENCY_PROFILE,
     LLM_SCHEDULERS,
     build_batch_simulate_cmd,
     build_evaluate_cmd,
@@ -115,6 +112,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="google/gemma-4-26b-a4b-it",
         help="Model name for LLM-driven models; uses OpenRouter unless sim_utils is customized.",
+    )
+    parser.add_argument(
+        "--llm-latency-profile",
+        type=Path,
+        default=LATENCY_PROFILE,
+        help="LLM latency profile JSON forwarded to every simulate call "
+        "(e.g. a fresh q7 llm_latency_profile.json).",
     )
     parser.add_argument(
         "--workload",
@@ -252,6 +256,7 @@ def _print_dry_run(args: argparse.Namespace, traces: list[Path], schedulers: lis
                 args.saccade, args.library, trace, spec_path,
                 FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
                 args.llm_model, args.base_config, api_key="$LLM_API_KEY",
+                latency_profile=args.llm_latency_profile,
             )
             combos = len(sched_list) * len(ESTIMATORS)
             print(
@@ -397,6 +402,7 @@ def main() -> None:
                     args.saccade, args.library, trace, spec,
                     FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
                     traces_out_dir, args.llm_model, args.base_config,
+                    latency_profile=args.llm_latency_profile,
                 )
             except subprocess.CalledProcessError as exc:
                 tqdm.write(

@@ -27,6 +27,7 @@ from tqdm import tqdm
 
 from sim_utils import (
     FIXED_NUM_SLOTS,
+    LATENCY_PROFILE,
     LLM_SCHEDULERS,
     filter_traces_by_kind,
     importance_weighted_nrmse,
@@ -81,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="google/gemma-4-26b-a4b-it",
         help="Model name for LLM-driven schedulers; uses OpenRouter unless sim_utils is customized.",
+    )
+    p.add_argument(
+        "--llm-latency-profile",
+        type=Path,
+        default=LATENCY_PROFILE,
+        help="LLM latency profile JSON forwarded to every simulate call "
+        "(e.g. a fresh q7 llm_latency_profile.json).",
     )
     p.add_argument(
         "--base-config",
@@ -216,6 +224,7 @@ def main() -> None:
             args.saccade, args.library, trace, _batch_spec(trace.stem, trial),
             FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
             tmp_dir, args.llm_model, args.base_config, spec_tag=f"t{trial}",
+            latency_profile=args.llm_latency_profile,
         )
 
     print(
