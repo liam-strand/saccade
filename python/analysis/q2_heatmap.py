@@ -1,9 +1,10 @@
-"""Heatmap of Q2 sweep median_nrmse: (scheduler x estimator) rows by workload columns.
+"""Heatmap of Q2 sweep nrmse_mean: (scheduler x estimator) rows by workload columns.
 
 Color encodes accuracy *relative to the best combo for that workload* (cell /
 column-min), since absolute nRMSE scales differ by orders of magnitude across
 workloads. 1.0 (dark) = best for that workload; brighter = worse. Cells are
-annotated with the raw median_nrmse.
+annotated with the raw nrmse_mean (mean across trials of per-trial median nRMSE)
+± nrmse_stddev (stddev across trials).
 """
 
 import csv
@@ -33,13 +34,17 @@ SCHEDULERS = [
 ]
 
 rows = {}
+stddevs = {}
 workloads = []
 with open(CSV) as f:
     for r in csv.DictReader(f):
         w = r["workload"]
         if w not in workloads:
             workloads.append(w)
-        rows[(r["scheduler"], r["estimator"], w)] = float(r["median_nrmse"])
+        rows[(r["scheduler"], r["estimator"], w)] = float(r["nrmse_mean"])
+        stddevs[(r["scheduler"], r["estimator"], w)] = (
+            float(r["nrmse_stddev"]) if r["nrmse_stddev"] else np.nan
+        )
 
 workloads.sort()
 row_keys = [(s, e) for s in SCHEDULERS for e in ESTIMATORS]
@@ -47,6 +52,9 @@ row_labels = [f"{s}  ·  {e}" for s, e in row_keys]
 
 raw = np.array(
     [[rows.get((s, e, w), np.nan) for w in workloads] for s, e in row_keys]
+)
+std = np.array(
+    [[stddevs.get((s, e, w), np.nan) for w in workloads] for s, e in row_keys]
 )
 
 # Normalize each column by its minimum so the best combo per workload reads as 1.0.
@@ -65,7 +73,7 @@ ax.set_yticklabels(row_labels, family="monospace")
 for i in range(len(ESTIMATORS), len(row_keys), len(ESTIMATORS)):
     ax.axhline(i - 0.5, color="white", lw=2)
 
-# Annotate raw median_nrmse; bold + boxed the best combo in each workload column.
+# Annotate raw nrmse_mean ± stddev; bold + boxed the best combo in each workload column.
 best_row_per_col = np.nanargmin(raw, axis=0)
 # viridis is dark at the low (best) end; with LogNorm the colormap midpoint
 # sits at sqrt(vmax) in log space -- white text below it, black above.
@@ -76,12 +84,15 @@ for j in range(len(workloads)):
         if np.isnan(v):
             continue
         is_best = i == best_row_per_col[j]
+        sd = std[i, j]
+        label = f"{v:.2f}" if np.isnan(sd) else f"{v:.2f}\n±{sd:.2f}"
         ax.text(
             j,
             i,
-            f"{v:.2f}",
+            label,
             ha="center",
             va="center",
+            fontsize=9,
             color="white" if rel[i, j] < text_cut else "black",
             fontweight="bold" if is_best else "normal",
         )
@@ -93,7 +104,7 @@ for j in range(len(workloads)):
             )
 
 cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-cbar.set_label("median nRMSE relative to best combo for that workload\n(1.0 = best, log scale)")
+cbar.set_label("mean nRMSE relative to best combo for that workload\n(1.0 = best, log scale)")
 
 fig.tight_layout()
 fig.savefig(OUT, dpi=130, bbox_inches="tight")
