@@ -88,7 +88,7 @@ impl Scheduler for MaxUncertaintyScheduler {
 
         // Sort by uncertainty descending, tiebroken by event_id ascending so
         // cold-start selection (all ties at +inf) is deterministic across seeds.
-        scored.sort_by(|(id1, u1), (id2, u2)| u2.total_cmp(u1).then(id1.cmp(id2)));
+        scored.sort_by(|(id1, u1), (id2, u2)| u2.total_cmp(u1));
 
         ScheduleDecision {
             active_events: scored
