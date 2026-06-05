@@ -30,31 +30,30 @@ against q_schedule (startup ≈ intercept + slope x q_schedule); the intercept i
 the constant attach/teardown floor, the remainder is the per-run extra quantum.
 """
 
+import sys
+sys.path.append("../python")
 import csv
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-matplotlib.rcParams.update({"font.size": 14})
+from q1_overhead import Q_SAMPLE_NS, Q_SCHEDULE_NS, SINKS
+ps.apply_style(14)
 
-OVERHEAD_CSV = "results/q1_overhead.csv"
-STARTUP_CSV = "results/q1_startup.csv"
-RAW_CSV = "results/q1_overhead_raw.csv"
-OUT_COST = "results/q1_cost_model.png"
-OUT_INSENS = "results/q1_insensitivity.png"
+OVERHEAD_CSV = str(ps.RESULTS_DIR / "q1_overhead.csv")
+STARTUP_CSV = str(ps.RESULTS_DIR / "q1_startup.csv")
+RAW_CSV = str(ps.RESULTS_DIR / "q1_overhead_raw.csv")
+OUT_COST = ps.out("q1_cost_model.png")
+OUT_INSENS = ps.out("q1_insensitivity.png")
 
-SINKS = ["none", "csv", "perfetto"]
-Q_SCHEDULE_NS = [100_000, 1_000_000, 10_000_000, 100_000_000]
-Q_SAMPLE_NS = [10_000, 100_000, 1_000_000]
-
-# Layer colours: neutral floor, warm quantum, cool runtime.
-C_FIXED = "#9e9e9e"
-C_QUANTUM = "#f0a85a"
-C_RUNTIME = "#3b8ea5"
-SINK_COLORS = {"none": "#3b8ea5", "csv": "#f0a85a", "perfetto": "#8e5572"}
+# Layer (color, hatch) pairs and per-sink colors from the shared style; the
+# hatch is what keeps the stacked layers apart in grayscale.
+C_FIXED, H_FIXED = ps.COST_LAYERS["fixed"]
+C_QUANTUM, H_QUANTUM = ps.COST_LAYERS["quantum"]
+C_RUNTIME, H_RUNTIME = ps.COST_LAYERS["runtime"]
+SINK_COLORS = ps.SINK_COLORS
 
 
 def fmt_ns(ns: int) -> str:
@@ -122,13 +121,13 @@ def plot_cost_model(overhead_s: dict, startup_s: dict, intercept_s: float, slope
             ]
             rt_med[i], rt_lo[i], rt_hi[i] = np.median(rt), min(rt), max(rt)
 
-        ax.bar(x, fixed, width=0.62, color=C_FIXED, edgecolor="black", linewidth=0.4,
-               label="fixed attach/teardown")
-        ax.bar(x, quantum, width=0.62, bottom=fixed, color=C_QUANTUM, edgecolor="black",
-               linewidth=0.4, label="one-quantum teardown")
+        ax.bar(x, fixed, width=0.62, color=C_FIXED, hatch=H_FIXED, edgecolor="black",
+               linewidth=0.4, label="fixed attach/teardown")
+        ax.bar(x, quantum, width=0.62, bottom=fixed, color=C_QUANTUM, hatch=H_QUANTUM,
+               edgecolor="black", linewidth=0.4, label="one-quantum teardown")
         top = fixed + quantum
-        ax.bar(x, rt_med, width=0.62, bottom=top, color=C_RUNTIME, edgecolor="black",
-               linewidth=0.4, label="runtime instrumentation floor")
+        ax.bar(x, rt_med, width=0.62, bottom=top, color=C_RUNTIME, hatch=H_RUNTIME,
+               edgecolor="black", linewidth=0.4, label="runtime instrumentation floor")
         # Cap error bar = runtime min..max across q_sample, anchored on the layer.
         ax.errorbar(x, top + rt_med, yerr=[rt_med - rt_lo, rt_hi - rt_med], fmt="none",
                     ecolor="black", elinewidth=1.0, capsize=4, alpha=0.7)
@@ -174,16 +173,18 @@ def _sweep_panel(ax, runs: list[tuple], axis_idx: int, knob_values: list[int],
         p25.append(np.percentile(pool, 25))
         p50.append(np.percentile(pool, 50))
         p75.append(np.percentile(pool, 75))
-    ax.fill_between(xs, p25, p75, color="#bdbdbd", alpha=0.5, lw=0,
+    ax.fill_between(xs, p25, p75, color=ps.NEUTRAL, alpha=0.5, lw=0,
                     label="pooled 25–75th pct")
 
-    # Per-sink median lines.
-    for sink in SINKS:
+    # Per-sink median lines: distinct linestyle + marker so the three sinks
+    # stay apart in grayscale.
+    for i, sink in enumerate(SINKS):
         med = [
             np.median([r[3] for r in runs if r[axis_idx] == v and r[0] == sink])
             for v in knob_values
         ]
-        ax.plot(xs, med, "o-", color=SINK_COLORS[sink], lw=2.0, ms=6, label=f"{sink}")
+        ax.plot(xs, med, color=SINK_COLORS[sink], ls=ps.LINESTYLES[i % len(ps.LINESTYLES)],
+                marker=ps.MARKERS[i % len(ps.MARKERS)], lw=2.0, ms=6, label=f"{sink}")
 
     ax.axhline(floor, color="black", ls="--", lw=1.3)
     ax.text(xs[-1], floor, f" floor ≈ {floor:.1f}%", color="black", fontsize=14,

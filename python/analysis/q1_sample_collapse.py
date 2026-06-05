@@ -16,30 +16,30 @@ to stderr at the end of each profiling run).
 Writes results/q1_sample_collapse.png.
 """
 
+import sys
+sys.path.append("../python")
+
 import csv
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from q1_overhead import Q_SAMPLE_NS, Q_SCHEDULE_NS, SINKS
 
-matplotlib.rcParams.update({"font.size": 14})
+ps.apply_style(14)
 
-RAW_CSV = "results/q1_overhead_raw.csv"
-OUT_PNG = "results/q1_sample_collapse.png"
+RAW_CSV = str(ps.RESULTS_DIR / "q1_overhead_raw.csv")
+OUT_PNG = ps.out("q1_sample_collapse.png")
 
-SINKS = ["none", "csv", "perfetto"]
-Q_SCHEDULE_NS = [100_000, 1_000_000, 10_000_000, 100_000_000]
-
-SINK_COLORS = {"none": "#3b8ea5", "csv": "#f0a85a", "perfetto": "#8e5572"}
+SINK_COLORS = ps.SINK_COLORS
 
 # One marker shape per q_schedule value (coarsest = diamond for easy spotting).
 Q_SCHED_MARKERS = {
-    100_000: "o",
-    1_000_000: "s",
-    10_000_000: "^",
-    100_000_000: "D",
+    1_000_000: "o",
+    10_000_000: "s",
+    100_000_000: "^",
+    1_000_000_000: "D",
 }
 
 
@@ -166,7 +166,7 @@ def main() -> None:
         plt.scatter(
             [],
             [],
-            color="#555555",
+            color=ps.NEUTRAL,
             marker=Q_SCHED_MARKERS[q],
             s=60,
             label=f"q_sched={fmt_ns(q)}",

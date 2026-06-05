@@ -19,18 +19,17 @@ figure (raw median nRMSE per workload, log y) under results/.
 
 import csv
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-plt.rcParams.update({"font.size": 14})
+ps.apply_style(14)
 
-CSV = "results/q2_scheduler_estimator.csv"
+CSV = str(ps.RESULTS_DIR / "q2_scheduler_estimator.csv")
 # One figure per scheduler: results/q2_estimator_sweep_<scheduler>.png
-OUT_FIG = "results/q2_estimator_sweep_{sched}.png"
-OUT_CSV = "results/q2_estimator_sweep.csv"
+OUT_FIG = ps.out("q2_estimator_sweep_{sched}.png")
+OUT_CSV = ps.out("q2_estimator_sweep.csv")
 
 ESTIMATORS = ["propagate", "ema", "kalman"]
 # (scheduler, human-readable role) chosen for the three sweeps.
@@ -39,7 +38,9 @@ SCHEDULERS = [
     ("max-uncertainty", "uncertainty-driven"),
     ("dynamic-llm", "best (by mean rank)"),
 ]
-EST_COLOR = {"propagate": "#bdbdbd", "ema": "#4c72b0", "kalman": "#dd8452"}
+EST_COLOR = ps.EST_COLOR
+# Per-estimator hatch: the grayscale-safe cue alongside color.
+EST_HATCH = {e: ps.HATCHES[j % len(ps.HATCHES)] for j, e in enumerate(ESTIMATORS)}
 
 
 def load():
@@ -98,7 +99,11 @@ def main():
     # ---- one figure per scheduler: grouped bars per workload, log y ----------
     x = np.arange(len(workloads))
     bw = 0.26
-    handles = [plt.Rectangle((0, 0), 1, 1, color=EST_COLOR[e]) for e in ESTIMATORS]
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, facecolor=EST_COLOR[e], hatch=EST_HATCH[e],
+                      edgecolor="black", linewidth=0.4)
+        for e in ESTIMATORS
+    ]
 
     for sched, _role in SCHEDULERS:
         win = {e: 0 for e in ESTIMATORS}
@@ -108,7 +113,8 @@ def main():
 
         fig, ax = plt.subplots(figsize=(7, 5.2))
         for j, e in enumerate(ESTIMATORS):
-            ax.bar(x + (j - 1) * bw, vec(sched, e), bw, color=EST_COLOR[e])
+            ax.bar(x + (j - 1) * bw, vec(sched, e), bw, color=EST_COLOR[e],
+                   hatch=EST_HATCH[e], edgecolor="black", linewidth=0.4)
         # mark the per-workload winner with a star above its bar
         for i in range(len(workloads)):
             vals = {e: vec(sched, e)[i] for e in ESTIMATORS}

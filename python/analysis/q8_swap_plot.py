@@ -24,18 +24,17 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-plt.rcParams.update({"font.size": 14})
+ps.apply_style(14)
 
-RAW_CSV = "results/q8_swap_latency_raw.csv"
-OUT_BREAKDOWN = "results/q8_swap_breakdown.png"
-OUT_DRIFT = "results/q8_swap_drift.png"
-OUT_QUANTUM = "results/q8_swap_quantum.png"
+RAW_CSV = str(ps.RESULTS_DIR / "q8_swap_latency_raw.csv")
+OUT_BREAKDOWN = ps.out("q8_swap_breakdown.png")
+OUT_DRIFT = ps.out("q8_swap_drift.png")
+OUT_QUANTUM = ps.out("q8_swap_quantum.png")
 
 
 def fmt_ms(ns: float) -> str:
@@ -88,11 +87,13 @@ def plot_breakdown(rows: list[dict]) -> None:
     w = 0.38
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.bar(
-        x - w / 2, quiesce_med, w, label="quiesce (stop-the-world spin)", color="crimson",
+        x - w / 2, quiesce_med, w, label="quiesce (stop-the-world spin)", color=ps.BAD,
+        edgecolor="black", linewidth=0.4,
         yerr=[quiesce_lo, quiesce_hi], capsize=3, error_kw={"elinewidth": 1, "ecolor": "black", "alpha": 0.6},
     )
     ax.bar(
-        x + w / 2, reconfig_med, w, label="reconfig (perf_event_open + map)", color="steelblue",
+        x + w / 2, reconfig_med, w, label="reconfig (perf_event_open + map)", color=ps.OKABE["blue"],
+        hatch=ps.HATCHES[1], edgecolor="black", linewidth=0.4,
         yerr=[reconfig_lo, reconfig_hi], capsize=3, error_kw={"elinewidth": 1, "ecolor": "black", "alpha": 0.6},
     )
 
@@ -110,7 +111,7 @@ def plot_breakdown(rows: list[dict]) -> None:
 
 def plot_drift(rows: list[dict]) -> None:
     qs = quanta(rows)
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap(ps.CMAP)
     fig, ax = plt.subplots(figsize=(11, 6))
     for i, q in enumerate(qs):
         real = [r for r in rows if r["q"] == q and r["slots_changed"] > 0]
@@ -147,9 +148,9 @@ def plot_quantum(rows: list[dict]) -> None:
 
     qs_ms = np.array(qs) / 1e6
     fig, ax = plt.subplots(figsize=(9, 6))
-    ax.plot(qs_ms, np.array(realized_med) / 1e6, "o-", color="darkorange", label="realized quantum (elapsed)")
-    ax.plot(qs_ms, np.array(swap_med) / 1e6, "s-", color="crimson", label="median swap_ns")
-    ax.plot(qs_ms, qs_ms, "--", color="gray", label="requested = realized (ideal)")
+    ax.plot(qs_ms, np.array(realized_med) / 1e6, "o-", color=ps.BASELINE, label="realized quantum (elapsed)")
+    ax.plot(qs_ms, np.array(swap_med) / 1e6, "s-", color=ps.ACCENT, label="median swap_ns")
+    ax.plot(qs_ms, qs_ms, "--", color=ps.NEUTRAL, label="requested = realized (ideal)")
 
     ax.set_xscale("log")
     ax.set_yscale("log")

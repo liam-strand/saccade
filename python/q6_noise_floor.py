@@ -52,8 +52,8 @@ def main() -> None:
     parser.add_argument(
         "--saccade",
         type=Path,
-        default=Path("./target/release/saccade"),
-        help="saccade binary (default: ./target/release/saccade)",
+        default=Path("../target/release/saccade"),
+        help="saccade binary (default: ../target/release/saccade)",
     )
     parser.add_argument(
         "--library",

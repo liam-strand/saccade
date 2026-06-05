@@ -21,6 +21,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+# Canonical output dir (shared with the analysis scripts), cwd-independent.
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
 
 def compute_correlations(
     h5_path: str,
@@ -195,15 +198,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default="python/correlation.json",
+        # NOT under results/: this JSON is calibration data consumed via the
+        # correlation_path entries in python/config/kf_*.toml, which expect it
+        # at the repo-root-relative path python/correlation.json.
+        default=str(Path(__file__).resolve().parent / "correlation.json"),
         help="Output JSON path (default: python/correlation.json)",
     )
     parser.add_argument(
         "--heatmap",
-        default="python/correlation_heatmap.png",
-        help="Output heatmap PNG path",
+        default=str(RESULTS_DIR / "correlation_heatmap.png"),
+        help="Output heatmap PNG path (default: results/correlation_heatmap.png)",
     )
     args = parser.parse_args()
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading {args.h5} ...")
     result = compute_correlations(args.h5, args.threshold, args.min_samples)

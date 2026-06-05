@@ -4,10 +4,17 @@ accuracy of adaptive scheduling strategies.
 
 Fixed: num_slots=6, full event library.
 Iterates over every .perfetto trace in --traces-dir (or just --workload).
+Every combo runs --trials times; per-combo metrics are aggregated across
+trials.  Simulation is parallelized through ``saccade simulate --batch`` (one
+process per workload loads the rates trace once and fans the full
+scheduler × estimator × trial grid across a Rayon pool of ``--jobs`` threads,
+with up to ``--batch-jobs`` processes in flight); evaluation of the resulting
+traces is parallelized with a thread pool.
 Outputs timestamped results under --results-dir/<timestamp>/.
 """
 
 import csv
+import os
 import subprocess
 import sys
 from collections import defaultdict
@@ -160,16 +167,33 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--llm-trials",
+        "--trials",
         type=int,
-        default=3,
-        help="Number of trials for LLM schedulers; results are averaged (default: 3)",
+        default=10,
+        help=(
+            "Number of trials per scheduler×estimator combo; results are "
+            "aggregated across trials (default: 10). With --seed, trial t "
+            "uses seed+t so trials differ but stay reproducible."
+        ),
     )
     parser.add_argument(
         "--jobs",
         type=int,
-        default=1,
-        help="Rayon threads for each per-workload batch call (default: 1)",
+        default=max(1, (os.cpu_count() or 4)),
+        help="Rayon threads *within* each batch process, and workers for parallel evaluate.",
+    )
+    parser.add_argument(
+        "--batch-jobs",
+        type=int,
+        default=0,
+        help=(
+            "Max number of `saccade simulate --batch` subprocesses to run "
+            "concurrently. 0 (default) runs all of them at once (one per "
+            "workload). Each batch loads its rates trace into memory once, "
+            "shared by all trials, so peak RAM ≈ batch-jobs × trace size; "
+            "total concurrent LLM requests ≈ batch-jobs × min(jobs, "
+            "combos-per-batch)."
+        ),
     )
     parser.add_argument(
         "--estimator",
@@ -213,16 +237,23 @@ def _print_dry_run(args: argparse.Namespace, traces: list[Path], schedulers: lis
 
     print(
         f"[dry-run] {len(traces)} workload(s) × {len(schedulers)} scheduler(s) "
-        f"× {len(ESTIMATORS)} estimator(s) = {len(grid_combos)} combination(s).",
+        f"× {len(ESTIMATORS)} estimator(s) = {len(grid_combos)} combination(s), "
+        f"× {args.trials} trial(s) each.",
         file=sys.stderr,
     )
     print(f"[dry-run] Workloads:  {[t.stem for t in traces]}", file=sys.stderr)
     print(f"[dry-run] Schedulers: {schedulers}", file=sys.stderr)
     print(f"[dry-run] Estimators: {ESTIMATORS}", file=sys.stderr)
+    n_batches = len(traces)
+    max_batches = n_batches if args.batch_jobs <= 0 else min(args.batch_jobs, n_batches)
+    print(
+        f"[dry-run] {n_batches} batch(es) (one per workload), "
+        f"up to {max_batches} concurrently, {args.jobs} Rayon threads each.",
+        file=sys.stderr,
+    )
     if llm_scheds:
         print(
-            f"[dry-run] LLM schedulers (model={args.llm_model}, "
-            f"trials={args.llm_trials}): {llm_scheds}",
+            f"[dry-run] LLM schedulers (model={args.llm_model}): {llm_scheds}",
             file=sys.stderr,
         )
     if args.exclude_schedulers:
@@ -244,32 +275,31 @@ def _print_dry_run(args: argparse.Namespace, traces: list[Path], schedulers: lis
 
     for trace in traces:
         workload = trace.stem
-        # Trial 0 batches all schedulers; trials 1..N-1 batch LLM schedulers only.
-        trial_sched_lists = [(0, schedulers)]
-        for trial in range(1, args.llm_trials):
-            if llm_scheds:
-                trial_sched_lists.append((trial, llm_scheds))
-
-        for trial, sched_list in trial_sched_lists:
-            spec_path = traces_out_dir / f"batch_spec_{workload}.json"
-            cmd = build_batch_simulate_cmd(
-                args.saccade, args.library, trace, spec_path,
-                FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
-                args.llm_model, args.base_config, api_key="$LLM_API_KEY",
-                latency_profile=args.llm_latency_profile,
-            )
-            combos = len(sched_list) * len(ESTIMATORS)
-            print(
-                f"# {workload} trial {trial}: batch of {combos} combo(s) "
-                f"({len(sched_list)} sched × {len(ESTIMATORS)} est)",
-                file=sys.stderr,
-            )
-            print(shlex.join(cmd), file=sys.stderr)
+        # One batch per workload covering the full scheduler × estimator
+        # × trial grid (the trace is loaded once per batch process).
+        spec_path = traces_out_dir / f"batch_spec_{workload}.json"
+        cmd = build_batch_simulate_cmd(
+            args.saccade, args.library, trace, spec_path,
+            FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
+            args.llm_model, args.base_config, api_key="$LLM_API_KEY",
+            latency_profile=args.llm_latency_profile,
+        )
+        combos = len(schedulers) * len(ESTIMATORS) * args.trials
+        seed_note = (
+            f", seeds {args.seed}..{args.seed + args.trials - 1}"
+            if args.seed is not None else ""
+        )
+        print(
+            f"# {workload}: batch of {combos} combo(s) "
+            f"({len(schedulers)} sched × {len(ESTIMATORS)} est "
+            f"× {args.trials} trial(s){seed_note})",
+            file=sys.stderr,
+        )
+        print(shlex.join(cmd), file=sys.stderr)
 
         for sched in schedulers:
-            n_trials = args.llm_trials if sched in LLM_SCHEDULERS else 1
             for est in ESTIMATORS:
-                for trial in range(n_trials):
+                for trial in range(args.trials):
                     cmd = build_evaluate_cmd(
                         args.saccade, trace, _out_trace(workload, sched, est, trial)
                     )
@@ -351,7 +381,6 @@ def main() -> None:
         for sched in schedulers
         for est in ESTIMATORS
     ]
-    trace_map = {t.stem: t for t in traces}
 
     print(
         f"Found {len(traces)} workload trace(s). "
@@ -362,118 +391,121 @@ def main() -> None:
     if args.exclude_schedulers:
         print(f"Excluded schedulers: {args.exclude_schedulers}", file=sys.stderr)
 
-    llm_schedulers = [s for s in schedulers if s in LLM_SCHEDULERS]
-    non_llm_schedulers = [s for s in schedulers if s not in LLM_SCHEDULERS]
-
     def _out_trace(workload: str, sched: str, est: str, trial: int = 0) -> Path:
         return traces_out_dir / f"est_{workload}_{sched}_{est}_slots{FIXED_NUM_SLOTS}_t{trial}.perfetto"
 
-    def _batch_spec(workload: str, sched_list: list[str], trial: int) -> list[dict]:
+    def _batch_spec(workload: str) -> list[dict]:
         entries = []
-        for sched in sched_list:
+        for sched in schedulers:
             for est in ESTIMATORS:
-                entry: dict = {
-                    "scheduler": sched,
-                    "estimator": est,
-                    "trace": str(_out_trace(workload, sched, est, trial)),
-                }
-                if args.seed is not None:
-                    entry["seed"] = args.seed
-                entries.append(entry)
+                for trial in range(args.trials):
+                    entry: dict = {
+                        "scheduler": sched,
+                        "estimator": est,
+                        "trace": str(_out_trace(workload, sched, est, trial)),
+                    }
+                    if args.seed is not None:
+                        # Offset per trial so repeated non-LLM runs actually
+                        # differ while staying reproducible.
+                        entry["seed"] = args.seed + trial
+                    entries.append(entry)
         return entries
 
-    combo_to_row: dict[tuple, dict] = {}
+    # --- Phase 1: simulate.  One batch per workload, fired concurrently. ---
+    # Each batch process loads its rates trace ONCE and fans the full
+    # scheduler × estimator × trial grid across a Rayon pool of --jobs
+    # threads, so trials share one copy of the trace data structures; the
+    # batch *processes* themselves run in parallel up to --batch-jobs.
+    max_batches = (
+        len(traces) if args.batch_jobs <= 0 else min(args.batch_jobs, len(traces))
+    )
 
-    for trace in tqdm(traces, desc="simulate", unit="workload"):
-        workload = trace.stem
+    def _run_batch(trace: Path) -> None:
+        run_batch_simulate(
+            args.saccade, args.library, trace, _batch_spec(trace.stem),
+            FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
+            traces_out_dir, args.llm_model, args.base_config,
+            latency_profile=args.llm_latency_profile,
+        )
 
-        # Trial 0: all schedulers batched together in one process.
-        # Trials 1..N-1: LLM schedulers only (non-LLM is deterministic with a
-        # fixed seed so repeating adds no information).
-        trial_specs = [_batch_spec(workload, schedulers, 0)]
-        for trial in range(1, args.llm_trials):
-            if llm_schedulers:
-                trial_specs.append(_batch_spec(workload, llm_schedulers, trial))
-
-        failed = False
-        for trial, spec in enumerate(trial_specs):
+    print(
+        f"Simulating {len(traces)} batch(es) (one per workload, "
+        f"{len(schedulers) * len(ESTIMATORS)} combos × {args.trials} trial(s) each), "
+        f"up to {max_batches} concurrently, {args.jobs} threads each.",
+        file=sys.stderr,
+    )
+    with ThreadPoolExecutor(max_workers=max(1, max_batches)) as ex:
+        futs = {ex.submit(_run_batch, t): t for t in traces}
+        for fut in tqdm(
+            as_completed(futs), total=len(futs), desc="batch-simulate", unit="batch"
+        ):
+            trace = futs[fut]
             try:
-                run_batch_simulate(
-                    args.saccade, args.library, trace, spec,
-                    FIXED_NUM_SLOTS, args.q_schedule, args.jobs,
-                    traces_out_dir, args.llm_model, args.base_config,
-                    latency_profile=args.llm_latency_profile,
-                )
+                fut.result()
             except subprocess.CalledProcessError as exc:
+                # The batch is internally failure-tolerant (it writes surviving
+                # combos' traces); a non-zero exit means *all* its combos failed.
+                # Missing traces are handled as None in the evaluate phase below.
                 tqdm.write(
-                    f"  ERROR batch-simulate {workload} trial {trial}: {exc}",
+                    f"  ERROR batch-simulate {trace.stem}: {exc}",
                     file=sys.stderr,
                 )
                 if exc.stderr:
-                    tqdm.write(
-                        f"    saccade stderr:\n{exc.stderr}",
-                        file=sys.stderr,
-                    )
-                failed = True
-                break
+                    tqdm.write(f"    saccade stderr:\n{exc.stderr}", file=sys.stderr)
 
-        if failed:
-            for sched in schedulers:
-                for est in ESTIMATORS:
-                    row: dict = {
-                        "workload": workload, "scheduler": sched, "estimator": est,
-                        "median_nrmse": "", "coverage": "",
-                        "nrmse_mean": "", "nrmse_stddev": "",
-                        "nrmse_p90": "", "nrmse_max": "",
-                        "nrmse_weighted": "", "mean_calibration": "",
-                    }
-                    if noise_floor is not None:
-                        row["significant"] = ""
-                    combo_to_row[(workload, sched, est)] = row
-            continue
+    # --- Phase 2: evaluate every produced trace in parallel, aggregate by combo. ---
+    # Each trial returns (median_nrmse, mean_coverage, p90, max, weighted, calibration).
+    # nrmse_mean/nrmse_stddev are trial-variability stats (across trials);
+    # nrmse_p90/nrmse_max/nrmse_weighted are per-eval distribution stats aggregated
+    # across trials with the same scheme (median/mean respectively).
+    def _eval_trial(work_tuple: tuple) -> tuple:
+        trace, sched, est, trial = work_tuple
+        workload = trace.stem
+        out_trace = _out_trace(workload, sched, est, trial)
+        if not out_trace.exists():
+            # A single combo can fail (transient LLM timeout) without aborting
+            # the batch; its trace simply won't be written.
+            return workload, sched, est, None, None, None, None, None, None
+        try:
+            ev = run_evaluate(args.saccade, trace, out_trace)
+            dist = nrmse_distribution(ev)
+            return (
+                workload, sched, est,
+                median_nrmse(ev), mean_coverage(ev),
+                dist["p90"], dist["max"],
+                importance_weighted_nrmse(ev),
+                mean_calibration(ev),
+            )
+        except subprocess.CalledProcessError as exc:
+            tqdm.write(
+                f"  ERROR evaluate {workload}/{sched}/{est} t{trial}: {exc}",
+                file=sys.stderr,
+            )
+            return workload, sched, est, None, None, None, None, None, None
 
-        # Evaluate all output traces in parallel, then average LLM results.
-        # Each trial returns (median_nrmse, mean_coverage, p90, max, weighted, calibration).
-        # nrmse_mean/nrmse_stddev are trial-variability stats (across LLM trials);
-        # nrmse_p90/nrmse_max/nrmse_weighted are per-eval distribution stats aggregated
-        # across trials with the same scheme (median/mean respectively).
-        def _eval_trial(args_tuple: tuple) -> tuple:
-            sched, est, trial = args_tuple
-            out_trace = _out_trace(workload, sched, est, trial)
-            try:
-                ev = run_evaluate(args.saccade, trace, out_trace)
-                dist = nrmse_distribution(ev)
-                return (
-                    sched, est, trial,
-                    median_nrmse(ev), mean_coverage(ev),
-                    dist["p90"], dist["max"],
-                    importance_weighted_nrmse(ev),
-                    mean_calibration(ev),
-                )
-            except subprocess.CalledProcessError as exc:
-                tqdm.write(
-                    f"  ERROR evaluate {workload}/{sched}/{est} t{trial}: {exc}",
-                    file=sys.stderr,
-                )
-                return sched, est, trial, None, None, None, None, None, None
+    eval_work = [
+        (trace, sched, est, t)
+        for trace in traces
+        for sched in schedulers
+        for est in ESTIMATORS
+        for t in range(args.trials)
+    ]
+    raw: dict[tuple, list] = defaultdict(list)
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+        for fut in tqdm(
+            as_completed(ex.submit(_eval_trial, w) for w in eval_work),
+            total=len(eval_work), desc="evaluate", unit="eval",
+        ):
+            wl, sched, est, mn, mc, p90, mx, wt, cal = fut.result()
+            raw[(wl, sched, est)].append((mn, mc, p90, mx, wt, cal))
 
-        n_trials = {sched: args.llm_trials if sched in LLM_SCHEDULERS else 1
-                    for sched in schedulers}
-        eval_work = [
-            (sched, est, t)
-            for sched in schedulers
-            for est in ESTIMATORS
-            for t in range(n_trials[sched])
-        ]
-        raw: dict[tuple, list] = defaultdict(list)
-        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-            for fut in as_completed(ex.submit(_eval_trial, w) for w in eval_work):
-                sched, est, _t, mn, mc, p90, mx, wt, cal = fut.result()
-                raw[(sched, est)].append((mn, mc, p90, mx, wt, cal))
+    combo_to_row: dict[tuple, dict] = {}
 
+    for trace in traces:
+        workload = trace.stem
         for sched in schedulers:
             for est in ESTIMATORS:
-                results = raw[(sched, est)]
+                results = raw[(workload, sched, est)]
                 nrmse_vals = [r[0] for r in results if r[0] is not None]
                 cov_vals = [r[1] for r in results if r[1] is not None]
                 p90_vals = [r[2] for r in results if r[2] is not None]
@@ -482,7 +514,7 @@ def main() -> None:
                 cal_vals = [r[5] for r in results if r[5] is not None]
                 final_nrmse = float(np.median(nrmse_vals)) if nrmse_vals else None
                 final_cov = float(np.mean(cov_vals)) if cov_vals else None
-                # nrmse_mean/stddev: variability across LLM trials (same axis as before)
+                # nrmse_mean/stddev: variability across trials (same axis as before)
                 nrmse_mean = float(np.mean(nrmse_vals)) if nrmse_vals else None
                 nrmse_std = (
                     float(np.std(nrmse_vals, ddof=1))
@@ -517,8 +549,8 @@ def main() -> None:
         "estimator",
         "median_nrmse",    # frozen primary metric
         "coverage",
-        "nrmse_mean",      # trial-variability: mean of per-trial median_nrmse (LLM only)
-        "nrmse_stddev",    # trial-variability: stddev of per-trial median_nrmse (LLM only)
+        "nrmse_mean",      # trial-variability: mean of per-trial median_nrmse
+        "nrmse_stddev",    # trial-variability: stddev of per-trial median_nrmse
         "nrmse_p90",       # per-eval distribution: 90th-percentile event nRMSE
         "nrmse_max",       # per-eval distribution: worst-case event nRMSE
         "nrmse_weighted",  # per-eval: importance_weighted_nrmse (secondary lens)

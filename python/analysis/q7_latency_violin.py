@@ -21,29 +21,20 @@ The call types (see q7_llm_latency.py for how they are produced):
 Samples are stored in milliseconds; everything here is plotted in seconds.
 """
 
+import json
 import sys
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import json
+import plot_style as ps
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Bumped font sizes: this figure is typeset at half text-width, so the default
 # sizes are illegible once scaled down.
-plt.rcParams.update(
-    {
-        "font.size": 15,
-        "axes.labelsize": 16,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-    }
-)
+ps.apply_style(15)
 
-OUT = "results/q7_llm_latency_violin.png"
+OUT = ps.out("q7_llm_latency_violin.png")
 
 
 def find_profile() -> Path:
@@ -53,7 +44,7 @@ def find_profile() -> Path:
         if not path.is_file():
             raise SystemExit(f"no such file: {path}")
         return path
-    candidates = sorted(Path("results").glob("*/llm_latency_profile.json"))
+    candidates = sorted(ps.RESULTS_DIR.glob("*/llm_latency_profile.json"))
     if not candidates:
         raise SystemExit(
             "no results/*/llm_latency_profile.json found; run q7_llm_latency.py first"
@@ -94,7 +85,7 @@ def plot(data: dict[str, np.ndarray]) -> None:
     series = [data[ct] for ct in cts]
     positions = np.arange(1, len(cts) + 1)
 
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap(ps.CMAP)
     colors = [cmap(i / max(1, len(cts) - 1)) for i in range(len(cts))]
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -125,12 +116,12 @@ def plot(data: dict[str, np.ndarray]) -> None:
             zorder=3,
         )
         med = float(np.median(vals))
-        ax.hlines(med, pos - 0.42, pos + 0.42, color="crimson", lw=3.5, zorder=4)
+        ax.hlines(med, pos - 0.42, pos + 0.42, color=ps.ACCENT, lw=3.5, zorder=4)
         ax.text(
             pos + 0.46,
             med,
             f"{med:.0f} s",
-            color="crimson",
+            color=ps.ACCENT,
             fontsize=13,
             va="center",
             ha="left",

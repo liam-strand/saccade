@@ -16,26 +16,25 @@ The per-config raw reps are not re-read here -- only the median and the IQR
 from the summary CSV -- so uncertainty is shown as +/- IQR/2 error bars (the
 middle-50%% half-width), not true distributions.
 """
+import sys
+sys.path.append("../python")
 
 import csv
 from pathlib import Path
-
-import matplotlib
-
-matplotlib.use("Agg")
+import plot_style as ps
 import matplotlib.pyplot as plt
 import numpy as np
 
-CSV = "results/q1_overhead.csv"
-STARTUP_CSV = "results/q1_startup.csv"
-OUT_BARS = "results/q1_overhead_bars.png"
-OUT_BARS_RUNTIME = "results/q1_overhead_bars_runtime.png"
-OUT_HEATMAP = "results/q1_overhead_heatmap.png"
-OUT_BY_SINK = "results/q1_overhead_by_sink.png"
+from q1_overhead import Q_SAMPLE_NS, Q_SCHEDULE_NS, SINKS
 
-SINKS = ["none", "csv", "perfetto"]
-Q_SCHEDULE_NS = [100_000, 1_000_000, 10_000_000, 100_000_000]
-Q_SAMPLE_NS = [10_000, 100_000, 1_000_000]
+ps.apply_style(10)
+
+CSV = str(ps.RESULTS_DIR / "q1_overhead.csv")
+STARTUP_CSV = str(ps.RESULTS_DIR / "q1_startup.csv")
+OUT_BARS = ps.out("q1_overhead_bars.png")
+OUT_BARS_RUNTIME = ps.out("q1_overhead_bars_runtime.png")
+OUT_HEATMAP = ps.out("q1_overhead_heatmap.png")
+OUT_BY_SINK = ps.out("q1_overhead_by_sink.png")
 
 
 def fmt_ns(ns: int) -> str:
@@ -97,7 +96,7 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
     If startup data is available, a dashed line per panel marks that sink's fixed
     startup cost -- the floor of overhead that is independent of workload runtime.
     """
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap(ps.CMAP)
     colors = [cmap(i / (len(Q_SCHEDULE_NS) - 1)) for i in range(len(Q_SCHEDULE_NS))]
 
     fig, axes = plt.subplots(
@@ -119,6 +118,7 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
                 yerr=err,
                 capsize=2,
                 color=colors[k],
+                hatch=ps.HATCHES[k % len(ps.HATCHES)],
                 edgecolor="black",
                 linewidth=0.4,
                 error_kw={"elinewidth": 0.8, "alpha": 0.6},
@@ -129,7 +129,7 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
             floor = sink_startup_pct(startup, sink)
             ax.axhline(
                 floor,
-                color="crimson",
+                color=ps.ACCENT,
                 ls="--",
                 lw=1.3,
                 label="fixed startup cost" if ax is axes[0] else None,
@@ -138,7 +138,7 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
                 len(Q_SAMPLE_NS) - 0.5,
                 floor,
                 f" startup ≈ {floor:.1f}%",
-                color="crimson",
+                color=ps.ACCENT,
                 fontsize=8,
                 va="bottom",
                 ha="right",
@@ -169,7 +169,7 @@ def plot_bars_runtime(cells: dict, meta: dict, startup: dict) -> None:
     long the workload runs (per-quantum sampling, counter swaps) -- by removing
     saccade's fixed startup/teardown cost measured on /bin/true.
     """
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap(ps.CMAP)
     colors = [cmap(i / (len(Q_SCHEDULE_NS) - 1)) for i in range(len(Q_SCHEDULE_NS))]
 
     fig, axes = plt.subplots(1, len(SINKS), figsize=(14, 5), sharey=True)
@@ -193,6 +193,7 @@ def plot_bars_runtime(cells: dict, meta: dict, startup: dict) -> None:
                 yerr=err,
                 capsize=2,
                 color=colors[k],
+                hatch=ps.HATCHES[k % len(ps.HATCHES)],
                 edgecolor="black",
                 linewidth=0.4,
                 error_kw={"elinewidth": 0.8, "alpha": 0.6},
@@ -236,7 +237,7 @@ def plot_heatmap(cells: dict) -> None:
     im = None
     for ax, sink in zip(axes, SINKS):
         g = grids[sink]
-        im = ax.imshow(g, aspect="auto", cmap="YlOrRd", vmin=0, vmax=vmax)
+        im = ax.imshow(g, aspect="auto", cmap=ps.CMAP, vmin=0, vmax=vmax)
         ax.set_title(f"sink = {sink}", fontsize=11)
         ax.set_xticks(range(len(Q_SAMPLE_NS)))
         ax.set_xticklabels([fmt_ns(q) for q in Q_SAMPLE_NS], rotation=20, ha="right")
@@ -255,7 +256,8 @@ def plot_heatmap(cells: dict) -> None:
                     ha="center",
                     va="center",
                     fontsize=8,
-                    color="black" if g[i, j] < vmax * 0.6 else "white",
+                    # viridis is dark at low values: white text on dark cells.
+                    color="white" if g[i, j] < vmax * 0.6 else "black",
                 )
 
     cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
@@ -286,7 +288,7 @@ def plot_by_sink(cells: dict) -> None:
         meanprops={"marker": "D", "markerfacecolor": "white", "markeredgecolor": "black"},
     )
     for median in bp["medians"]:
-        median.set_color("crimson")
+        median.set_color(ps.ACCENT)
     # Overlay the individual config points with a little horizontal jitter.
     jitter = np.linspace(-0.12, 0.12, len(data[0]))
     for i, vals in enumerate(data):
@@ -294,7 +296,7 @@ def plot_by_sink(cells: dict) -> None:
             np.full(len(vals), i + 1) + jitter,
             vals,
             s=18,
-            color="steelblue",
+            color=ps.OKABE["blue"],
             alpha=0.7,
             zorder=3,
         )
@@ -304,7 +306,7 @@ def plot_by_sink(cells: dict) -> None:
     ax.grid(axis="y", alpha=0.3)
     ax.set_title(
         "Q1: overhead distribution across all 12 configs per sink\n"
-        "(box = quartiles, red = median, diamond = mean, dots = individual configs)",
+        "(box = quartiles, orange = median, diamond = mean, dots = individual configs)",
         fontsize=11,
     )
     fig.tight_layout()

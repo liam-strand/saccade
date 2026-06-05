@@ -35,30 +35,29 @@ import csv
 import sys
 from pathlib import Path
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
 
-plt.rcParams.update({"font.size": 14})
+ps.apply_style(14)
 
-RESULTS_DIR = Path("results")
+RESULTS_DIR = ps.RESULTS_DIR
 NOISE_FLOOR_JSON = RESULTS_DIR / "noise_floor.json"
-OUT = RESULTS_DIR / "q5_sim_vs_real.png"
+OUT = ps.out("q5_sim_vs_real.png")
 
 # Leg draw order, with display label, bar color, and whether it ran on real hw.
-# color groups the config family (best=green, baseline=orange, perf_stat=gray);
+# color groups the config family (best=blue, baseline=orange, perf_stat=gray);
 # the hatch (applied to real legs) is what separates sim from live.
 LEGS = [
-    ("best",          "best\n(sim)",      "#2ca02c", False),
-    ("best_real",     "best\n(real)",     "#2ca02c", True),
-    ("baseline",      "baseline\n(sim)",  "#ff7f0e", False),
-    ("baseline_real", "baseline\n(real)", "#ff7f0e", True),
-    ("perf_stat",     "perf stat",        "#7f7f7f", True),
+    ("best",          "best\n(sim)",      ps.Q5_LEGS["best"],      False),
+    ("best_real",     "best\n(real)",     ps.Q5_LEGS["best"],      True),
+    ("baseline",      "baseline\n(sim)",  ps.Q5_LEGS["baseline"],  False),
+    ("baseline_real", "baseline\n(real)", ps.Q5_LEGS["baseline"],  True),
+    ("perf_stat",     "perf stat",        ps.Q5_LEGS["perf_stat"], True),
 ]
-REAL_HATCH = "////"
+REAL_HATCH = ps.REAL_HATCH
 
 
 def find_run_dir(argv: list[str]) -> Path:
@@ -262,9 +261,10 @@ def main() -> None:
 
     # Legend: color = config family, hatch = real hardware.
     handles = [
-        Patch(facecolor="#2ca02c", edgecolor="black", label="best config"),
-        Patch(facecolor="#ff7f0e", edgecolor="black", label="baseline (round-robin + propagate)"),
-        Patch(facecolor="#7f7f7f", edgecolor="black", label="perf stat"),
+        Patch(facecolor=ps.Q5_LEGS["best"], edgecolor="black", label="best config"),
+        Patch(facecolor=ps.Q5_LEGS["baseline"], edgecolor="black",
+              label="baseline (round-robin + propagate)"),
+        Patch(facecolor=ps.Q5_LEGS["perf_stat"], edgecolor="black", label="perf stat"),
         Patch(facecolor="white", edgecolor="black", hatch=REAL_HATCH, label="ran on real hardware"),
     ]
     ax_top.legend(handles=handles, fontsize=14, loc="upper left", framealpha=0.8)

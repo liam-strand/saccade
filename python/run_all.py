@@ -9,6 +9,8 @@ Run from the python/ directory:
 
     uv run python run_all.py                # full collection + analysis (LLM live)
     uv run python run_all.py --skip-collect # re-plot only, from existing data
+    uv run python run_all.py --from q2      # resume collection at q2 (skip q1/q7)
+    uv run python run_all.py --steps q4,q5  # run only these collectors
     uv run python run_all.py --dry-run      # echo commands, run nothing
 
 The tricky bits this handles automatically:
@@ -21,6 +23,10 @@ The tricky bits this handles automatically:
     fresh llm_latency_profile.json is forwarded to them via --llm-latency-profile.
     Pass --use-saved-latency-profile to skip q7 collection and let the simulations
     use the saved default profile from sim_utils instead.
+  * Step selection - --steps/--from gate individual collectors. Deselected steps
+    resolve any outputs needed downstream (q7 latency profile, q2 grid, q4/q5/q7
+    run dirs) from the newest existing results/<timestamp>/ data, so later
+    collectors and the plots still work after an interrupted run.
 """
 
 from __future__ import annotations
@@ -47,10 +53,14 @@ Q5_BENCH = "./config/q5_benchmarks.json"
 
 NPB_BIN = "/tank/yhe7443/benchmarks/NPB3.3.1/NPB3.3-SER/bin"
 Q1_TARGET = f"{NPB_BIN}/ua.A.x"
-Q6_TARGET = f"{NPB_BIN}/cg.A.x"
+Q6_TARGET = f"{NPB_BIN}/ep.A.x"
 Q8_TARGET = f"{NPB_BIN}/cg.B.x"
 
 TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
+
+# Collection steps in execution order (the order collect() runs them), for
+# --steps/--from. q7 runs early so the simulations can replay its profile.
+COLLECT_STEPS = ["q1", "q7", "q2", "q3", "q6", "q8", "q4", "q5"]
 
 # Figures each analysis script is expected to (re)write, for the final summary.
 EXPECTED_FIGURES = [
@@ -66,8 +76,8 @@ EXPECTED_FIGURES = [
     "q2_heatmap.png",
     "q3_kf_variants.png",
     "q3_kf_sane.png",
-    "q4_guidance.png",  # written inside the q4 run dir
-    "q5_sim_vs_real.png",  # written inside the q5 run dir
+    "q4_guidance.png",
+    "q5_sim_vs_real.png",
     "q7_llm_latency_violin.png",
     "q8_swap_breakdown.png",
     "q8_swap_drift.png",
@@ -176,6 +186,16 @@ def newest_run_dir_with(filename: str) -> Path | None:
     return matches[-1] if matches else None
 
 
+def newest_data_dir_with(filename: str) -> Path | None:
+    """Like newest_run_dir_with, but falls back to the top-level results/ dir
+    itself if `filename` only exists there (pre-timestamp layout / hand-promoted
+    data). Used by --steps/--from to resolve deselected steps' outputs."""
+    nd = newest_run_dir_with(filename)
+    if nd is not None:
+        return nd
+    return RESULTS_DIR if (RESULTS_DIR / filename).is_file() else None
+
+
 def promote(run_dir: Path, filename: str) -> bool:
     """Copy run_dir/filename up to the top-level results/ dir."""
     src = run_dir / filename
@@ -190,8 +210,14 @@ def promote(run_dir: Path, filename: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Stage A - collection
 # --------------------------------------------------------------------------- #
-def collect(r: Runner, *, use_saved_latency: bool) -> dict[str, Path | None]:
-    """Run all collectors. Returns captured run dirs / grid path for later stages."""
+def collect(r: Runner, *, use_saved_latency: bool,
+            steps: set[str]) -> dict[str, Path | None]:
+    """Run the selected collectors. Returns captured run dirs / grid path.
+
+    Collectors not in `steps` are skipped; outputs of theirs that later steps
+    or plots need (q7 latency profile, q2 grid, q4/q5 run dirs) are resolved
+    from the newest existing results/<timestamp>/ data instead.
+    """
     captured: dict[str, Path | None] = {
         "q2_grid": None,
         "q2_dir": None,
@@ -204,11 +230,14 @@ def collect(r: Runner, *, use_saved_latency: bool) -> dict[str, Path | None]:
     common = ["--saccade", SACCADE, "--library", LIBRARY]
 
     # 1. q1 overhead (top-level CSVs; live). --target must come last (REMAINDER).
-    r.run(
-        ["q1_overhead.py", *common, "--results-dir", "./results",
-         "--warmup", "5", "--rounds", "20", "--target", Q1_TARGET],
-        "q1_overhead",
-    )
+    if "q1" in steps:
+        r.run(
+            ["q1_overhead.py", *common, "--results-dir", "./results",
+             "--warmup", "5", "--rounds", "20", "--target", Q1_TARGET],
+            "q1_overhead",
+        )
+    else:
+        r.skip("q1_overhead", "deselected by --steps/--from")
 
     # 2. q7 llm latency profile (timestamped; dummy model, no API). Runs before
     #    the simulation collectors so they can replay its fresh latency profile,
@@ -217,6 +246,17 @@ def collect(r: Runner, *, use_saved_latency: bool) -> dict[str, Path | None]:
     if use_saved_latency:
         r.skip("q7_llm_latency",
                "--use-saved-latency-profile: simulations use the saved default")
+    elif "q7" not in steps:
+        q7_dir = newest_data_dir_with("llm_latency_profile.json")
+        if q7_dir is None:
+            r.skip("q7_llm_latency", "deselected; no existing profile found, "
+                   "simulations use the saved default")
+        else:
+            r.skip("q7_llm_latency", "deselected; reusing "
+                   f"{q7_dir.name}/llm_latency_profile.json")
+            captured["q7_dir"] = q7_dir
+            profile_args = ["--llm-latency-profile",
+                            str(q7_dir / "llm_latency_profile.json")]
     else:
         before = snapshot_run_dirs()
         if r.run(
@@ -241,69 +281,101 @@ def collect(r: Runner, *, use_saved_latency: bool) -> dict[str, Path | None]:
                               "fall back to the saved profile", file=sys.stderr)
 
     # 3. q2 accuracy (timestamped; LLM live) -> promote + remember grid for q5.
-    before = snapshot_run_dirs()
-    if r.run(
-        ["q2_accuracy.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--jobs", "16", *profile_args],
-        "q2_accuracy",
-    ):
-        if not r.dry_run:
-            try:
-                q2_dir = capture_new_run_dir(before)
-            except RuntimeError as exc:
-                print(f"!!! q2_accuracy: {exc}", file=sys.stderr)
-            else:
-                captured["q2_dir"] = q2_dir
-                if promote(q2_dir, "q2_scheduler_estimator.csv"):
-                    captured["q2_grid"] = q2_dir / "q2_scheduler_estimator.csv"
+    if "q2" not in steps:
+        q2_dir = newest_data_dir_with("q2_scheduler_estimator.csv")
+        if q2_dir is None:
+            r.skip("q2_accuracy", "deselected; no existing q2 grid found")
+        else:
+            r.skip("q2_accuracy", "deselected; reusing "
+                   f"{q2_dir.name}/q2_scheduler_estimator.csv")
+            captured["q2_dir"] = q2_dir
+            captured["q2_grid"] = q2_dir / "q2_scheduler_estimator.csv"
+    else:
+        before = snapshot_run_dirs()
+        if r.run(
+            ["q2_accuracy.py", *common, "--traces-dir", TRACES_DIR,
+             "--results-dir", "./results", "--jobs", "16", *profile_args],
+            "q2_accuracy",
+        ):
+            if not r.dry_run:
+                try:
+                    q2_dir = capture_new_run_dir(before)
+                except RuntimeError as exc:
+                    print(f"!!! q2_accuracy: {exc}", file=sys.stderr)
+                else:
+                    captured["q2_dir"] = q2_dir
+                    if promote(q2_dir, "q2_scheduler_estimator.csv"):
+                        captured["q2_grid"] = q2_dir / "q2_scheduler_estimator.csv"
 
     # 4. q3 kalman variants (timestamped) -> promote.
-    before = snapshot_run_dirs()
-    if r.run(
-        ["q3_kf_variants.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--jobs", "16", *profile_args],
-        "q3_kf_variants",
-    ):
-        if not r.dry_run:
-            try:
-                q3_dir = capture_new_run_dir(before)
-            except RuntimeError as exc:
-                print(f"!!! q3_kf_variants: {exc}", file=sys.stderr)
-            else:
-                captured["q3_dir"] = q3_dir
-                promote(q3_dir, "q3_kf_variants.csv")
+    if "q3" not in steps:
+        r.skip("q3_kf_variants", "deselected by --steps/--from")
+    else:
+        before = snapshot_run_dirs()
+        if r.run(
+            ["q3_kf_variants.py", *common, "--traces-dir", TRACES_DIR,
+             "--results-dir", "./results", "--jobs", "16", *profile_args],
+            "q3_kf_variants",
+        ):
+            if not r.dry_run:
+                try:
+                    q3_dir = capture_new_run_dir(before)
+                except RuntimeError as exc:
+                    print(f"!!! q3_kf_variants: {exc}", file=sys.stderr)
+                else:
+                    captured["q3_dir"] = q3_dir
+                    promote(q3_dir, "q3_kf_variants.csv")
 
     # 5. q6 noise floor (top-level json; live). Override q6's wrong default --saccade.
-    r.run(
-        ["q6_noise_floor.py", *common, "--results-dir", "./results",
-         "--target", Q6_TARGET],
-        "q6_noise_floor",
-    )
+    if "q6" in steps:
+        r.run(
+            ["q6_noise_floor.py", *common, "--results-dir", "./results",
+             "--target", Q6_TARGET],
+            "q6_noise_floor",
+        )
+    else:
+        r.skip("q6_noise_floor", "deselected by --steps/--from")
 
     # 6. q8 swap latency (top-level CSVs; live). --target last.
-    r.run(
-        ["q8_swap_latency.py", *common, "--results-dir", "./results",
-         "--rounds", "10", "--target", Q8_TARGET],
-        "q8_swap_latency",
-    )
+    if "q8" in steps:
+        r.run(
+            ["q8_swap_latency.py", *common, "--results-dir", "./results",
+             "--rounds", "10", "--target", Q8_TARGET],
+            "q8_swap_latency",
+        )
+    else:
+        r.skip("q8_swap_latency", "deselected by --steps/--from")
 
     # 7. q4 llm guidance (timestamped; always LLM) -> remember dir for plot.
-    before = snapshot_run_dirs()
-    if r.run(
-        ["q4_llm_guidance.py", *common, "--traces-dir", TRACES_DIR,
-         "--results-dir", "./results", "--estimator", "ema", "--llm-trials", "3",
-         "--jobs", "16", *profile_args],
-        "q4_llm_guidance",
-    ):
-        if not r.dry_run:
-            try:
-                captured["q4_dir"] = capture_new_run_dir(before)
-            except RuntimeError as exc:
-                print(f"!!! q4_llm_guidance: {exc}", file=sys.stderr)
+    if "q4" not in steps:
+        q4_dir = newest_data_dir_with("q4_llm_guidance.csv")
+        captured["q4_dir"] = q4_dir
+        r.skip("q4_llm_guidance", "deselected; "
+               + (f"plot reuses {q4_dir.name}/" if q4_dir is not None
+                  else "no existing run dir for the plot"))
+    else:
+        before = snapshot_run_dirs()
+        if r.run(
+            ["q4_llm_guidance.py", *common, "--traces-dir", TRACES_DIR,
+             "--results-dir", "./results", "--estimator", "ema", "--llm-trials", "3",
+             "--jobs", "16", *profile_args],
+            "q4_llm_guidance",
+        ):
+            if not r.dry_run:
+                try:
+                    captured["q4_dir"] = capture_new_run_dir(before)
+                except RuntimeError as exc:
+                    print(f"!!! q4_llm_guidance: {exc}", file=sys.stderr)
 
     # 8. q5 best-vs-baseline (timestamped; live real legs) -- needs the q2 grid.
     grid = captured["q2_grid"]
-    if grid is None and not r.dry_run:
+    if "q5" not in steps:
+        q5_dir = newest_data_dir_with("q5_comparison.csv")
+        captured["q5_dir"] = q5_dir
+        r.skip("q5_best_vs_baseline", "deselected; "
+               + (f"plot reuses {q5_dir.name}/" if q5_dir is not None
+                  else "no existing run dir for the plot"))
+    elif grid is None and not r.dry_run:
         r.skip("q5_best_vs_baseline", "no q2 grid CSV captured")
     else:
         grid_arg = str(grid) if grid is not None else "<q2_grid.csv>"
@@ -455,8 +527,8 @@ def print_summary(r: Runner, started_at: float, *, dry_run: bool) -> int:
     if not dry_run:
         print("\nFigures in results/ (mtime relative to run start):")
         for fig in EXPECTED_FIGURES:
-            # A figure may exist top-level and/or inside run dirs (q4/q5 write into
-            # their run dir). Report whichever copy is freshest.
+            # All analysis scripts write top-level now, but figures from older
+            # runs may still sit inside run dirs. Report whichever is freshest.
             candidates = [RESULTS_DIR / fig, *RESULTS_DIR.glob(f"*/{fig}")]
             existing = [p for p in candidates if p.is_file()]
             if not existing:
@@ -488,7 +560,34 @@ def main() -> int:
     ap.add_argument("--use-saved-latency-profile", action="store_true",
                     help="Skip q7 latency collection; simulations use the saved "
                          "default profile from sim_utils instead of a fresh one.")
+    ap.add_argument("--steps", metavar="STEP[,STEP...]",
+                    help="Only run these collection steps (comma-separated). "
+                         f"Choices: {', '.join(COLLECT_STEPS)}. Deselected steps "
+                         "reuse the newest existing results data.")
+    ap.add_argument("--from", dest="from_step", metavar="STEP",
+                    help="Resume collection from this step onward, in execution "
+                         f"order ({' -> '.join(COLLECT_STEPS)}); earlier steps "
+                         "reuse the newest existing results data.")
     args = ap.parse_args()
+
+    steps = set(COLLECT_STEPS)
+    if args.steps and args.from_step:
+        ap.error("--steps and --from are mutually exclusive")
+    if args.skip_collect and (args.steps or args.from_step):
+        ap.error("--skip-collect cannot be combined with --steps/--from")
+    if args.steps:
+        steps = {s.strip() for s in args.steps.split(",") if s.strip()}
+        unknown = steps - set(COLLECT_STEPS)
+        if unknown:
+            ap.error(f"--steps: unknown step(s) {', '.join(sorted(unknown))} "
+                     f"(choices: {', '.join(COLLECT_STEPS)})")
+        if not steps:
+            ap.error("--steps: empty selection")
+    elif args.from_step:
+        if args.from_step not in COLLECT_STEPS:
+            ap.error(f"--from: unknown step {args.from_step!r} "
+                     f"(choices: {', '.join(COLLECT_STEPS)})")
+        steps = set(COLLECT_STEPS[COLLECT_STEPS.index(args.from_step):])
 
     started_at = time.time()
     r = Runner(dry_run=args.dry_run, fail_fast=args.fail_fast)
@@ -499,7 +598,12 @@ def main() -> int:
                                             "q5_dir": None}
     else:
         print("== STAGE A: COLLECTION ==")
-        captured = collect(r, use_saved_latency=args.use_saved_latency_profile)
+        if steps != set(COLLECT_STEPS):
+            selected = [s for s in COLLECT_STEPS if s in steps]
+            print(f"   (steps: {', '.join(selected)}; "
+                  "deselected steps reuse existing data)")
+        captured = collect(r, use_saved_latency=args.use_saved_latency_profile,
+                           steps=steps)
 
     print("\n== STAGE B: ANALYSIS ==")
     analyze(r, captured, skip_collect=args.skip_collect,

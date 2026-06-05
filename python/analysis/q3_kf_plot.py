@@ -20,37 +20,24 @@ coverage (round-robin ~0.99, rate-of-change ~0.70), so nRMSE is NOT comparable
 """
 
 import csv
-from pathlib import Path
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Bumped font sizes: these figures are typeset at half text-width, so the
 # default sizes are illegible once scaled down.
-plt.rcParams.update(
-    {
-        "font.size": 15,
-        "axes.labelsize": 16,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-    }
-)
+ps.apply_style(15)
 
-CSV = "results/q3_kf_variants.csv"
-OUT_MAIN = "results/q3_kf_variants.png"
-OUT_SANE = "results/q3_kf_sane.png"
+CSV = str(ps.RESULTS_DIR / "q3_kf_variants.csv")
+OUT_MAIN = ps.out("q3_kf_variants.png")
+OUT_SANE = ps.out("q3_kf_sane.png")
 
 SCHEDULERS = ["round-robin", "rate-of-change"]
-# Variant -> (display color, marker). Order is the legend/plot order.
-VARIANTS = {
-    "ema":           ("#1f77b4", "o"),
-    "kf_naive":      ("#2ca02c", "s"),
-    "kf_analytical": ("#ff7f0e", "^"),
-    "kf_expert":     ("#d62728", "D"),
-}
+# Variant -> (display color, marker); the marker doubles as the grayscale cue.
+# Order is the legend/plot order.
+VARIANTS = ps.KF_VARIANTS
 SANE_VARIANTS = ["ema", "kf_naive"]
 # nRMSE below this is the "usable" band; above it an estimator is effectively useless.
 USABLE_NRMSE = 1.5
@@ -108,11 +95,11 @@ def plot_main(nrmse: dict, coverage: dict, workloads: list) -> None:
         ax.axhspan(
             ax.get_ylim()[0] if False else 1e-2,
             USABLE_NRMSE,
-            color="green",
+            color=ps.OKABE["bluish_green"],
             alpha=0.06,
             zorder=0,
         )
-        ax.axhline(USABLE_NRMSE, color="green", ls="--", lw=1.0, alpha=0.6)
+        ax.axhline(USABLE_NRMSE, color=ps.OKABE["bluish_green"], ls="--", lw=1.0, alpha=0.6)
         cov = mean_coverage(coverage, sched, workloads)
         ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})", fontsize=16)
         ax.set_yscale("log")
@@ -127,7 +114,7 @@ def plot_main(nrmse: dict, coverage: dict, workloads: list) -> None:
         len(workloads) - 0.5,
         USABLE_NRMSE,
         " usable band",
-        color="green",
+        color=ps.OKABE["bluish_green"],
         fontsize=12,
         va="bottom",
         ha="right",
@@ -154,6 +141,7 @@ def plot_sane(nrmse: dict, coverage: dict, workloads: list) -> None:
                 vals,
                 width,
                 color=colors[variant],
+                hatch=ps.HATCHES[k % len(ps.HATCHES)],
                 edgecolor="black",
                 linewidth=0.4,
                 label=variant if ax is axes[0] else None,
@@ -164,7 +152,7 @@ def plot_sane(nrmse: dict, coverage: dict, workloads: list) -> None:
             best = min(pair, key=pair.get)
             k = SANE_VARIANTS.index(best)
             offset = (k - (len(SANE_VARIANTS) - 1) / 2) * width
-            ax.scatter(j + offset, pair[best], marker="*", s=70, color="gold",
+            ax.scatter(j + offset, pair[best], marker="*", s=70, color=ps.OKABE["yellow"],
                        edgecolor="black", linewidth=0.4, zorder=4)
         cov = mean_coverage(coverage, sched, workloads)
         ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})", fontsize=16)

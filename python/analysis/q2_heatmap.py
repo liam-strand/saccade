@@ -2,23 +2,22 @@
 
 Color encodes accuracy *relative to the best combo for that workload* (cell /
 column-min), since absolute nRMSE scales differ by orders of magnitude across
-workloads. 1.0 (white) = best for that workload; warmer = worse. Cells are
+workloads. 1.0 (dark) = best for that workload; brighter = worse. Cells are
 annotated with the raw median_nrmse.
 """
 
 import csv
 
-import matplotlib
+import plot_style as ps
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
 
-plt.rcParams.update({"font.size": 14})
+ps.apply_style(14)
 
-CSV = "results/q2_scheduler_estimator.csv"
-OUT = "results/q2_heatmap.png"
+CSV = str(ps.RESULTS_DIR / "q2_scheduler_estimator.csv")
+OUT = ps.out("q2_heatmap.png")
 
 ESTIMATORS = ["propagate", "ema", "kalman"]
 SCHEDULERS = [
@@ -55,7 +54,7 @@ col_min = np.nanmin(raw, axis=0, keepdims=True)
 rel = raw / col_min
 
 fig, ax = plt.subplots(figsize=(14, 18))
-im = ax.imshow(rel, aspect="auto", cmap="YlOrRd", norm=LogNorm(vmin=1.0, vmax=np.nanmax(rel)))
+im = ax.imshow(rel, aspect="auto", cmap=ps.CMAP, norm=LogNorm(vmin=1.0, vmax=np.nanmax(rel)))
 
 ax.set_xticks(range(len(workloads)))
 ax.set_xticklabels(workloads, rotation=35, ha="right")
@@ -68,6 +67,9 @@ for i in range(len(ESTIMATORS), len(row_keys), len(ESTIMATORS)):
 
 # Annotate raw median_nrmse; bold + boxed the best combo in each workload column.
 best_row_per_col = np.nanargmin(raw, axis=0)
+# viridis is dark at the low (best) end; with LogNorm the colormap midpoint
+# sits at sqrt(vmax) in log space -- white text below it, black above.
+text_cut = np.sqrt(np.nanmax(rel))
 for j in range(len(workloads)):
     for i in range(len(row_keys)):
         v = raw[i, j]
@@ -80,12 +82,14 @@ for j in range(len(workloads)):
             f"{v:.2f}",
             ha="center",
             va="center",
-            color="black" if rel[i, j] < 3 else "white",
+            color="white" if rel[i, j] < text_cut else "black",
             fontweight="bold" if is_best else "normal",
         )
         if is_best:
             ax.add_patch(
-                plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="lime", lw=2.2)
+                plt.Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor=ps.ACCENT, lw=2.2
+                )
             )
 
 cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
