@@ -5,6 +5,7 @@ use crate::quantum::Quantum;
 use crate::scheduler::ScheduleDecision;
 use crate::scheduler::Scheduler;
 use crate::state::StateEstimator;
+use rand::{prelude::SliceRandom, rng};
 
 /// Activates successive `num_slots`-wide windows of the event list, wrapping around on each step.
 pub struct RoundRobinScheduler {
@@ -36,9 +37,11 @@ impl RoundRobinScheduler {
 impl Scheduler for RoundRobinScheduler {
     fn init(
         &mut self,
-        events: Vec<EventId>,
+        mut events: Vec<EventId>,
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rng();
+        events.shuffle(&mut r);
         self.events = events;
         self.num_slots = num_slots;
         Ok(())

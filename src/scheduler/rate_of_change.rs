@@ -6,6 +6,7 @@ use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::collections::{HashMap, VecDeque};
+use rand::{prelude::SliceRandom, rng};
 
 /// Scheduler that prioritizes hardware events with high rate-of-change (non-linearity).
 ///
@@ -51,9 +52,11 @@ fn triangle_cost(a: (u64, f64), b: (u64, f64), c: (u64, f64), delta_t_ns: f64) -
 impl Scheduler for RateOfChangeScheduler {
     fn init(
         &mut self,
-        all_events: Vec<EventId>,
+        mut all_events: Vec<EventId>,
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rng();
+        all_events.shuffle(&mut r);
         self.events = all_events;
         self.num_slots = num_slots;
         Ok(())

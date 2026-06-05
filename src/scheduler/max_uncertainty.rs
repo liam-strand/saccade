@@ -5,6 +5,8 @@ use crate::quantum::Quantum;
 use crate::scheduler::{ScheduleDecision, Scheduler};
 use crate::state::StateEstimator;
 use std::collections::HashMap;
+use rand::{prelude::SliceRandom, rng};
+
 
 /// Selects the `num_slots` events whose per-thread uncertainty is highest on average, maximizing information gain.
 pub struct MaxUncertaintyScheduler {
@@ -33,9 +35,11 @@ impl Default for MaxUncertaintyScheduler {
 impl Scheduler for MaxUncertaintyScheduler {
     fn init(
         &mut self,
-        all_events: Vec<EventId>,
+        mut all_events: Vec<EventId>,
         num_slots: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut r = rng();
+        all_events.shuffle(&mut r);
         self.events = all_events;
         self.num_slots = num_slots;
         Ok(())
