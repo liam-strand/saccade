@@ -123,6 +123,7 @@ def main():
             ax.plot(x[i] + (j - 1) * bw, vals[best_e] * 1.06, marker="*",
                     color="black", ms=11, zorder=5)
         ax.set_yscale("log")
+        ax.set_title(f"Estimator sweep under {sched}")
         ax.set_ylabel("median nRMSE (lower = better)")
         ax.set_xticks(x)
         ax.set_xticklabels([w.replace("spec_", "").replace("npb_", "")

@@ -101,7 +101,7 @@ def plot_main(nrmse: dict, coverage: dict, workloads: list) -> None:
         )
         ax.axhline(USABLE_NRMSE, color=ps.OKABE["bluish_green"], ls="--", lw=1.0, alpha=0.6)
         cov = mean_coverage(coverage, sched, workloads)
-        ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})", fontsize=16)
+        ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})")
         ax.set_yscale("log")
         ax.set_xticks(x)
         ax.set_xticklabels([short(w) for w in workloads], rotation=35, ha="right", fontsize=14)
@@ -119,6 +119,7 @@ def plot_main(nrmse: dict, coverage: dict, workloads: list) -> None:
         va="bottom",
         ha="right",
     )
+    fig.suptitle("Correlation-aware KF variants diverge")
     fig.tight_layout()
     fig.savefig(OUT_MAIN, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_MAIN}")
@@ -155,7 +156,7 @@ def plot_sane(nrmse: dict, coverage: dict, workloads: list) -> None:
             ax.scatter(j + offset, pair[best], marker="*", s=70, color=ps.OKABE["yellow"],
                        edgecolor="black", linewidth=0.4, zorder=4)
         cov = mean_coverage(coverage, sched, workloads)
-        ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})", fontsize=16)
+        ax.set_title(f"{sched}\n(mean coverage ≈ {cov:.2f})")
         ax.set_xticks(x)
         ax.set_xticklabels([short(w) for w in workloads], rotation=35, ha="right", fontsize=14)
         ax.grid(axis="y", alpha=0.3)
@@ -163,6 +164,7 @@ def plot_sane(nrmse: dict, coverage: dict, workloads: list) -> None:
         ax.set_ylabel("median nRMSE")
 
     axes[0].legend(title="estimator variant", fontsize=13, title_fontsize=14)
+    fig.suptitle("The stable estimators: ema vs. kf_naive")
     fig.tight_layout()
     fig.savefig(OUT_SANE, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_SANE}")

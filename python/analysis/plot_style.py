@@ -99,6 +99,9 @@ def apply_style(font_size: int = 14) -> None:
         {
             "font.size": font_size,
             "axes.labelsize": font_size + 1,
+            # All titles (panel and figure) render at a fixed size 14.
+            "axes.titlesize": 14,
+            "figure.titlesize": 14,
             "xtick.labelsize": font_size - 1,
             "ytick.labelsize": font_size - 1,
             "axes.prop_cycle": plt.cycler(

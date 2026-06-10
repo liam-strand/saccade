@@ -71,6 +71,7 @@ vmax = np.nanmax(np.abs(logr))
 fig, ax = plt.subplots(figsize=(14, 18))
 im = ax.imshow(logr, aspect="auto", cmap=cmap, norm=Normalize(-vmax, vmax))
 
+ax.set_title("Scheduler × estimator accuracy vs. random·ema baseline")
 ax.set_xticks(range(len(workloads)))
 ax.set_xticklabels(workloads, rotation=35, ha="right")
 ax.set_yticks(range(len(row_labels)))

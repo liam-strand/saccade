@@ -100,6 +100,7 @@ def plot_breakdown(rows: list[dict]) -> None:
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels([fmt_ms(q) for q in qs])
+    ax.set_title("Swap cost breakdown: quiesce vs. reconfig")
     ax.set_xlabel("requested quantum (--q-schedule)")
     ax.set_ylabel("median per-swap time (ms, log scale)")
     ax.legend()
@@ -127,6 +128,7 @@ def plot_drift(rows: list[dict]) -> None:
             xs = np.array([order.min(), order.max()])
             ax.plot(xs, slope * xs + intercept, color=color, lw=2)
 
+    ax.set_title("Swap latency vs. execution order")
     ax.set_xlabel("execution order_index (shuffled across the session)")
     ax.set_ylabel("swap_ns (ms)")
     ax.legend(title="quantum", ncol=2, fontsize=8)
@@ -154,6 +156,7 @@ def plot_quantum(rows: list[dict]) -> None:
 
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.set_title("Requested vs. realized rotation quantum")
     ax.set_xlabel("requested quantum --q-schedule (ms, log)")
     ax.set_ylabel("ms (log)")
     ax.legend()

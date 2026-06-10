@@ -140,6 +140,7 @@ def plot_cost_model(overhead_s: dict, startup_s: dict, intercept_s: float, slope
 
     axes[0].set_ylabel("overhead (ms, absolute)")
     axes[0].legend(fontsize=14, loc="upper left")
+    fig.suptitle("Where the overhead comes from (cost decomposition)")
     fig.tight_layout()
     fig.savefig(OUT_COST, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_COST}")
@@ -197,7 +198,6 @@ def _sweep_panel(ax, runs: list[tuple], axis_idx: int, knob_values: list[int],
 
 
 def plot_insensitivity(baseline_s: float) -> None:
-    """Headline: overhead is a flat floor the q_sample / q_schedule knobs barely move."""
     runs = load_raw_overhead_pct(baseline_s)
     floor = float(np.median([r[3] for r in runs]))
 
@@ -208,6 +208,7 @@ def plot_insensitivity(baseline_s: float) -> None:
     ax1.set_ylabel("wall-clock overhead (% of baseline)")
     # Single shared legend (sinks + band) from the first panel.
     ax1.legend(fontsize=14, loc="upper right", title="sink", title_fontsize=14)
+    fig.suptitle("Overhead grows with scheduling quantum")
     fig.tight_layout()
     fig.savefig(OUT_INSENS, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT_INSENS}")

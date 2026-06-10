@@ -199,6 +199,7 @@ def main() -> None:
 
     ax.set_xlabel("samples delivered (ringbuf submissions)")
     ax.set_ylabel("wall-clock overhead (ms)")
+    ax.set_title("Overhead does not scale with delivered samples")
     ax.grid(alpha=0.3)
 
     fig.tight_layout()

@@ -143,7 +143,7 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
                 va="bottom",
                 ha="right",
             )
-        ax.set_title(f"sink = {sink}", fontsize=11)
+        ax.set_title(f"sink = {sink}")
         ax.set_xticks(x)
         ax.set_xticklabels([fmt_ns(q) for q in Q_SAMPLE_NS])
         ax.set_xlabel("q_sample")
@@ -152,10 +152,9 @@ def plot_bars(cells: dict, meta: dict, startup: dict | None) -> None:
     axes[0].set_ylabel("wall-clock overhead (% of baseline)")
     axes[0].legend(title="q_schedule", fontsize=8, title_fontsize=9)
     fig.suptitle(
-        "Q1: saccade runtime overhead by sink, sampling, and scheduling period\n"
+        "saccade runtime overhead by sink, sampling, and scheduling period\n"
         f"error bars = ±IQR/2 (middle-50% spread of {meta['reps']} reps); "
         f"baseline = {meta['baseline_s']:.2f} s",
-        fontsize=12,
     )
     fig.tight_layout()
     fig.savefig(OUT_BARS, dpi=130, bbox_inches="tight")
@@ -200,7 +199,7 @@ def plot_bars_runtime(cells: dict, meta: dict, startup: dict) -> None:
                 label=fmt_ns(q_sched) if ax is axes[0] else None,
             )
         ax.axhline(0, color="black", lw=0.8)
-        ax.set_title(f"sink = {sink}", fontsize=11)
+        ax.set_title(f"sink = {sink}")
         ax.set_xticks(x)
         ax.set_xticklabels([fmt_ns(q) for q in Q_SAMPLE_NS])
         ax.set_xlabel("q_sample")
@@ -209,10 +208,9 @@ def plot_bars_runtime(cells: dict, meta: dict, startup: dict) -> None:
     axes[0].set_ylabel("runtime-scaling overhead (% of baseline)")
     axes[0].legend(title="q_schedule", fontsize=8, title_fontsize=9)
     fig.suptitle(
-        "Q1: runtime-scaling overhead (fixed startup cost removed)\n"
+        "Runtime-scaling overhead (fixed startup cost removed)\n"
         f"per-config startup subtracted; error bars = ±IQR/2; "
         f"baseline = {meta['baseline_s']:.2f} s",
-        fontsize=12,
     )
     fig.tight_layout()
     fig.savefig(OUT_BARS_RUNTIME, dpi=130, bbox_inches="tight")
@@ -238,7 +236,7 @@ def plot_heatmap(cells: dict) -> None:
     for ax, sink in zip(axes, SINKS):
         g = grids[sink]
         im = ax.imshow(g, aspect="auto", cmap=ps.CMAP, vmin=0, vmax=vmax)
-        ax.set_title(f"sink = {sink}", fontsize=11)
+        ax.set_title(f"sink = {sink}")
         ax.set_xticks(range(len(Q_SAMPLE_NS)))
         ax.set_xticklabels([fmt_ns(q) for q in Q_SAMPLE_NS], rotation=20, ha="right")
         ax.set_yticks(range(len(Q_SCHEDULE_NS)))
@@ -263,9 +261,8 @@ def plot_heatmap(cells: dict) -> None:
     cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
     cbar.set_label("overhead (% of baseline)", fontsize=9)
     fig.suptitle(
-        "Q1: overhead across the q_schedule × q_sample grid\n"
+        "Overhead across the q_schedule × q_sample grid\n"
         "(cell = overhead %; ± = IQR as % of baseline)",
-        fontsize=12,
         y=0.99,
     )
     fig.savefig(OUT_HEATMAP, dpi=130, bbox_inches="tight")
@@ -305,9 +302,8 @@ def plot_by_sink(cells: dict) -> None:
     ax.set_xlabel("output sink")
     ax.grid(axis="y", alpha=0.3)
     ax.set_title(
-        "Q1: overhead distribution across all 12 configs per sink\n"
+        "Overhead distribution across all 12 configs per sink\n"
         "(box = quartiles, orange = median, diamond = mean, dots = individual configs)",
-        fontsize=11,
     )
     fig.tight_layout()
     fig.savefig(OUT_BY_SINK, dpi=130, bbox_inches="tight")

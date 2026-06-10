@@ -131,6 +131,7 @@ def plot(data: dict[str, np.ndarray]) -> None:
     ax.set_xticklabels(
         [f"{LABELS[ct]}\n(n={len(data[ct])})" for ct in cts], fontsize=14
     )
+    ax.set_title("LLM scheduler call latency by call type")
     ax.set_ylabel("call latency (s)")
     ax.set_xlabel("LLM scheduler call type")
     ax.set_ylim(bottom=0)

@@ -123,7 +123,7 @@ def main() -> None:
         ax.set_ylim(-0.6, len(schedulers) - 0.4)
         ax.invert_yaxis()
         ax.set_xlabel("median nRMSE  (lower = better)")
-        ax.set_title(workload, fontsize=14)
+        ax.set_title(workload)
         ax.margins(x=0.18)
         ax.grid(True, axis="x", alpha=0.3)
 
@@ -144,7 +144,8 @@ def main() -> None:
         fontsize=10, frameon=False, bbox_to_anchor=(0.5, -0.02),
     )
 
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.suptitle("Effect of LLM guidance on reconstruction accuracy")
+    fig.tight_layout(rect=(0, 0.06, 1, 0.96))
     out = ps.out("q4_guidance.png")
     fig.savefig(out, dpi=130, bbox_inches="tight")
     print(f"wrote {out}")

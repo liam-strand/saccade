@@ -269,6 +269,7 @@ def main() -> None:
     ]
     ax_top.legend(handles=handles, fontsize=14, loc="upper left", framealpha=0.8)
 
+    fig.suptitle("Simulation vs. real hardware vs. perf stat")
     fig.savefig(OUT, dpi=130, bbox_inches="tight")
     print(f"wrote {OUT}  ({len(workloads)} workloads from {run_dir.name})")
 

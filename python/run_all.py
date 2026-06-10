@@ -418,7 +418,7 @@ def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool,
         r.run(["analysis/q4_guidance_plot.py", str(q4_dir / "q4_llm_guidance.csv")],
               "q4_guidance_plot")
     elif skip_collect:
-        nd = newest_run_dir_with("q4_llm_guidance.csv")
+        nd = newest_data_dir_with("q4_llm_guidance.csv")
         if nd is None:
             r.skip("q4_guidance_plot", "no results/*/q4_llm_guidance.csv found")
         else:
@@ -432,7 +432,7 @@ def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool,
     if q5_dir is not None:
         r.run(["analysis/q5_sim_vs_real_plot.py", str(q5_dir)], "q5_sim_vs_real_plot")
     elif skip_collect:
-        nd = newest_run_dir_with("q5_comparison.csv")
+        nd = newest_data_dir_with("q5_comparison.csv")
         if nd is None:
             r.skip("q5_sim_vs_real_plot", "no results/*/q5_comparison.csv found")
         else:
@@ -446,7 +446,7 @@ def analyze(r: Runner, captured: dict[str, Path | None], *, skip_collect: bool,
         r.run(["analysis/q7_latency_violin.py", str(q7_dir / "llm_latency_profile.json")],
               "q7_latency_violin")
     elif skip_collect or use_saved_latency:
-        nd = newest_run_dir_with("llm_latency_profile.json")
+        nd = newest_data_dir_with("llm_latency_profile.json")
         if nd is None:
             r.skip("q7_latency_violin", "no results/*/llm_latency_profile.json found")
         else:
