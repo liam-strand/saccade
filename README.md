@@ -2,34 +2,55 @@
 
 An eBPF-based Linux performance profiler that intelligently rotates hardware counter slots
 across time quanta to estimate rates for **more counters than the PMU can measure
-simultaneously**.
+simultaneously**. Named for the [saccade](https://en.wikipedia.org/wiki/Saccade) — the rapid,
+intermittent movement of the eye as it refocuses across a visual field.
 
-A modern x86 core exposes hundreds of hardware performance events but only a handful of
-physical counter slots — six, in saccade's case. `perf stat` handles this with round-robin
-multiplexing and linear scaling: each event gets a fraction of the wall clock, and its count
-is extrapolated. That is a fixed policy with no notion of how stale a given measurement is.
+A modern CPU exposes hundreds of hardware performance events but only a handful of physical
+counter slots — usually four or eight, and six on the reference machine. Profilers reconcile
+that gap with time-division multiplexing: each event gets a fraction of the wall clock and
+its count is linearly extrapolated, trading fidelity for breadth and treating the resulting
+noise as unavoidable.
 
-Saccade separates the two halves of that problem:
+Saccade reframes this as a problem of **state estimation and observation scheduling**, and
+decomposes it into four independently composable layers:
 
-- A **scheduler** decides which events occupy the six slots in each quantum. It is a Rust
-  trait with several implementations — round-robin, random, uncertainty-driven,
-  rate-of-change, and a family of LLM-driven policies that can be steered with a
+- A **source** produces samples — either real hardware via eBPF, or recorded rates replayed
+  in simulation.
+- A **scheduler** decides which events occupy the counter slots in each quantum.
+  Implementations range from round-robin and random baselines through uncertainty-driven and
+  rate-of-change policies to a family of LLM-driven schedulers that can be steered with a
   natural-language hint.
-- A **state estimator** maintains a running belief about *every* event's rate, including
-  the ones not currently being measured, along with an uncertainty for each. Options range
-  from last-observation-carried-forward to a Kalman filter with cross-counter correlations
-  learned offline.
+- An **estimator** maintains a running belief about *every* event's rate — including the ones
+  not currently being measured — with an uncertainty attached to each. Options range from
+  last-observation-carried-forward to a Kalman filter that propagates information between
+  correlated counters.
+- A **sink** consumes the result: Perfetto traces, CSV, or an HDF5 rate matrix.
 
 The result is a time-varying rate estimate for the full event library, plus a calibrated
-uncertainty signal, at a sampling overhead that stays low because the eBPF layer only fires
-while the target is actually on-CPU.
+uncertainty signal, at a sampling overhead kept low because the eBPF layer only fires while
+the target is actually on-CPU.
 
-The repository is both a working profiler and the artifact for an evaluation of these
-policies; see [Evaluation harness](#evaluation-harness-python).
+This repository is both a working profiler and the artifact for the thesis evaluating these
+policies — see [Evaluation](#evaluation) and [Citation](#citation).
+
+### Status
+
+The headline finding from the evaluation, stated up front because it shapes how you should
+read the rest of this document: **in simulation, where the cost of swapping counters
+vanishes, saccade already outperforms kernel-native `perf stat` on low-noise workloads. Live,
+the stop-the-world cost of that swap collapses saccade's temporal resolution below `perf
+stat`.** The scheduling and estimation ideas hold up; the actuation path is the bottleneck.
+
+This is why `simulate` is a first-class subcommand rather than a testing convenience — it is
+where the policy comparisons in the thesis are actually run.
 
 ## How it works
 
-Mechanism lives in eBPF, policy lives in Rust, and the two are strictly separated.
+Mechanism lives in eBPF, policy lives in Rust, and the two are strictly separated. The four
+composable layers above correspond to four Rust traits — `SampleSource` (`src/source.rs`),
+`Scheduler` (`src/scheduler.rs`), `StateEstimator` (`src/state.rs`), and `OutputSink`
+(`src/sink.rs`) — which the `Profiler` wires together. Stacked against the runtime, that
+looks like:
 
 | Layer | Component | Technology | Responsibility |
 | :--- | :--- | :--- | :--- |
@@ -91,9 +112,13 @@ sudo apt install clang llvm libelf-dev zlib1g-dev libhdf5-dev
 
 **Hardware.** Six counter slots (`MAX_COUNTERS` in `src/bpf/sampler.h`) and at most 256
 CPUs. The checked-in `event_lib.json` and `config/expert.toml` are **AMD Zen–specific**:
-events are encoded as raw `event`/`umask` pairs, and `saccade sweep` requires an event
-named `ex_ret_instr` to use as its normalization anchor. On other microarchitectures,
-regenerate the library with `saccade generate` and expect to adjust the anchor.
+events are encoded as raw `event`/`umask` pairs, and `saccade sweep` requires an event named
+`ex_ret_instr` — the Zen name for retired instructions — to use as its normalization anchor.
+On other microarchitectures, regenerate the library with `saccade generate` and expect to
+adjust the anchor.
+
+The reference machine for the evaluation, and the source of the checked-in 223-event library,
+is a Dell PowerEdge R7615: AMD EPYC 9124, 32 GB RAM, Ubuntu 22.04.5 LTS, Linux 5.15.0.
 
 ## Build
 
@@ -268,7 +293,7 @@ Selected with `--scheduler` or the `scheduler` key in TOML. Defined in `src/sche
 | :--- | :--- |
 | `round_robin` | *(default)* Slides a window of `num_slots` events across the library, advancing by `num_slots` each step. Deterministic full coverage. |
 | `random` | Samples `num_slots` events uniformly at random, without replacement, each quantum. |
-| `max_uncertainty` | Picks the events whose estimates are currently most uncertain. |
+| `max_uncertainty` | Scans the estimator state and picks the events whose estimates are currently most uncertain, driving toward uniform uncertainty. Paired with `kalman`, correlated events get scheduled less often, since observing one already sharpens the others. |
 | `rate_of_change` | Prioritizes events with the highest non-linearity, using the Lim 2014 triangle-area cost. |
 | `static_llm` | Queries an LLM once at startup for a cyclic schedule, then follows it. |
 | `dynamic_llm` | Re-queries the LLM periodically (on a background thread) to adapt at runtime. |
@@ -406,7 +431,8 @@ Because each batch is a separate execution of the workload, raw counts are not d
 comparable across batches. The anchor event `ex_ret_instr` is present in every batch and
 stored as plain events/ns; every other event is accumulated as events *per instruction* and
 rescaled by the global instruction rate at the end, which makes rows from different batches
-commensurable.
+commensurable. The thesis reports this normalization reducing run-to-run variance by as much
+as 20×.
 
 ### Event library (`generate`)
 
@@ -445,9 +471,26 @@ A text table by default; `--json` gives:
 - **calibration** — fraction of scored bins where the ground-truth rate falls inside
   `[est × (1 − unc), est × (1 + unc)]`, i.e. whether the reported uncertainty is honest.
 
-## Evaluation harness (`python/`)
+## Evaluation
 
-The `python/` directory holds the data-collection and analysis pipeline behind the project's
+The thesis poses five research questions:
+
+1. Does closed-loop scheduling outperform an open-loop baseline on reconstruction error?
+2. How separable are the scheduler and estimator axes, and where do they interact?
+3. How do LLM-driven schedulers perform compared to statistical baselines?
+4. How does natural-language query structure affect an LLM-driven scheduler's ability to
+   reallocate profiling effort toward regions of interest?
+5. What is the overhead of adaptive scheduling?
+
+Workloads, on the reference machine described under [Requirements](#requirements):
+
+- **Evaluation** — NPB IS (Class C), LU, SP, UA (Class B); SPEC CPU2017 `deepsjeng_r` and
+  `imagick_r` (ref).
+- **Kalman training** — NPB BT, CG, EP, FT, MG; SPEC `mcf_r`, `lbm_r`, `exchange2_r`.
+
+### Harness (`python/`)
+
+The `python/` directory holds the data-collection and analysis pipeline behind that
 evaluation. It requires Python ≥ 3.14 and is managed with [uv](https://docs.astral.sh/uv/).
 Run everything from `python/`.
 
@@ -464,16 +507,19 @@ uv run python run_all.py --dry-run       # echo commands, run nothing
 forwards outputs between them, then runs every analysis script. Figures land in
 `python/results/`.
 
-| Script | Question |
-| :--- | :--- |
-| `q1_overhead.py` | Wall-clock overhead imposed by saccade across a parameter grid, relative to an unprofiled baseline. |
-| `q2_accuracy.py` | Accuracy of every scheduler × estimator combination across workload traces. The main grid. |
-| `q3_kf_variants.py` | Kalman filter variants (naive / analytical / expert correlations) under estimator-independent schedulers. |
-| `q4_llm_guidance.py` | Whether a natural-language guidance hint improves LLM-driven scheduling. |
-| `q5_best_vs_baseline.py` | Best saccade config vs. baseline saccade vs. actual `perf stat`. |
-| `q6_noise_floor.py` | Run-to-run sweep variability — the intrinsic noise floor for the accuracy experiments. |
-| `q7_llm_latency.py` | LLM call latency distributions per scheduler call type; produces the profile replayed by `simulate --llm-latency-profile`. |
-| `q8_swap_latency.py` | Cost of the counter-rotation path, split into quiesce (stop-the-world spin) and reconfiguration time. |
+The `q1`–`q8` prefixes label **data-collection scripts**, not the five research questions
+above; several scripts feed one question, and some exist only to supply inputs to others.
+
+| Script | What it collects | Serves RQ |
+| :--- | :--- | :--- |
+| `q1_overhead.py` | Wall-clock overhead across a parameter grid, relative to an unprofiled baseline. | 5 |
+| `q2_accuracy.py` | Accuracy of every scheduler × estimator combination across workload traces. The main grid. | 1, 2, 3 |
+| `q3_kf_variants.py` | Kalman variants (naive / analytical / expert correlations) under estimator-independent schedulers. | 2 |
+| `q4_llm_guidance.py` | Whether a natural-language guidance hint redirects LLM-driven scheduling. | 4 |
+| `q5_best_vs_baseline.py` | Best saccade config vs. baseline saccade vs. actual `perf stat`. | 1, 3 |
+| `q6_noise_floor.py` | Run-to-run sweep variability — the intrinsic noise floor for the accuracy experiments. | — (control) |
+| `q7_llm_latency.py` | LLM call latency per scheduler call type; produces the profile replayed by `simulate --llm-latency-profile`. | 5 |
+| `q8_swap_latency.py` | Cost of the counter-rotation path, split into quiesce (stop-the-world spin) and reconfiguration. | 5 |
 
 Plotting lives in `python/analysis/`, with shared styling in `analysis/plot_style.py`.
 Supporting scripts include `collect.py`/`collect2.py` (sweep data across NPB and SPEC CPU2017
@@ -515,6 +561,17 @@ Conventions:
 
 The only CI workflow is `.github/workflows/docs.yml`, which builds rustdoc on pushes to
 `main` and deploys it to GitHub Pages.
+
+## Citation
+
+Saccade is the artifact for:
+
+> Liam Tucker Raab Strand. *Adaptive Profiling via ML-Driven Hardware Counter
+> Orchestration.* MS thesis, Northwestern University, June 2026.
+
+Source: [liam-strand/thesis](https://github.com/liam-strand/thesis). This also explains the
+compiled-in default LLM endpoint — `dubliner.cs.northwestern.edu` is the lab machine the
+evaluation ran against, with Gemma 4 (26B mixture-of-experts, 4B active at inference).
 
 ## License
 
